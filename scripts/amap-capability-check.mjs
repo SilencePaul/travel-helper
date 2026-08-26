@@ -63,7 +63,7 @@ export function formatAmapResult(check, result) {
   return `${check.capability} | ${check.city} | ${result.ok ? "PASS" : "FAIL"} | ${reason}`;
 }
 
-async function checkCapability(check, key) {
+export async function checkCapability(check, key, fetchImpl = fetch) {
   const url = new URL(check.endpoint);
   url.searchParams.set("origin", check.origin);
   url.searchParams.set("destination", check.destination);
@@ -71,8 +71,13 @@ async function checkCapability(check, key) {
   if (check.cityCode) url.searchParams.set("city", check.cityCode);
 
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-    const body = await response.json().catch(() => undefined);
+    const response = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
+    let body;
+    try {
+      body = await response.json();
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "TimeoutError") throw error;
+    }
     if (!response.ok && !body?.info) {
       return { ok: false, reason: `HTTP_${response.status}` };
     }
@@ -85,23 +90,28 @@ async function checkCapability(check, key) {
   }
 }
 
-function printResult(check, result) {
-  console.log(formatAmapResult(check, result));
+function printResult(check, result, print) {
+  print(formatAmapResult(check, result));
+}
+
+export async function runAmapCapabilityAudit({ key, fetchImpl = fetch, print = console.log }) {
+  if (!key) {
+    for (const check of checks) {
+      printResult(check, { ok: false, reason: "AMAP_WEB_SERVICE_KEY_MISSING" }, print);
+    }
+    return { exitCode: 1 };
+  }
+
+  const results = await Promise.all(
+    checks.map(async (check) => ({ check, result: await checkCapability(check, key, fetchImpl) }))
+  );
+  for (const { check, result } of results) printResult(check, result, print);
+  return { exitCode: results.some(({ result }) => !result.ok) ? 1 : 0 };
 }
 
 async function main() {
-  const key = process.env.AMAP_WEB_SERVICE_KEY;
-  if (!key) {
-    for (const check of checks) {
-      printResult(check, { ok: false, reason: "AMAP_WEB_SERVICE_KEY_MISSING" });
-    }
-    process.exitCode = 1;
-    return;
-  }
-
-  const results = await Promise.all(checks.map(async (check) => ({ check, result: await checkCapability(check, key) })));
-  for (const { check, result } of results) printResult(check, result);
-  if (results.some(({ result }) => !result.ok)) process.exitCode = 1;
+  const audit = await runAmapCapabilityAudit({ key: process.env.AMAP_WEB_SERVICE_KEY });
+  process.exitCode = audit.exitCode;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) await main();

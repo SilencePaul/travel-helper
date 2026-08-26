@@ -7,7 +7,7 @@
     "build": "pnpm -r build",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test",
+    "test": "pnpm -r test && pnpm test:amap-capability",
     "e2e": "playwright test",
     "test:amap-capability": "node scripts/amap-capability-check.test.mjs"
   },
