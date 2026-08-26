@@ -7,6 +7,7 @@ import {
   removeDay,
   reconcileDays,
   getDateRangeOrderWarning,
+  transitionOrderStatus,
   type OrderStatus,
   type TravelDay,
   type Trip,
@@ -118,10 +119,16 @@ function TripRoutes({ createDayId = () => "day-ui", routeService }: Pick<AppProp
     })).then((saved) => Boolean(saved));
   }
 
-  function changeDateRange(startDate: string, endDate: string, confirmed: boolean) {
+  function changeDateRange(startDate: string, endDate: string, confirmed: boolean, reviewedOrderIds?: string[]) {
     const affectedOrders = getDateRangeOrderWarning(trip, startDate, endDate);
     if (!confirmed && affectedOrders.length > 0) return Promise.resolve({ affectedOrders });
+    let updatedWarning: ReturnType<typeof getDateRangeOrderWarning> | undefined;
     return mutateTrip((current) => {
+      const currentWarning = getDateRangeOrderWarning(current, startDate, endDate);
+      if (confirmed && (!reviewedOrderIds || currentWarning.length !== reviewedOrderIds.length || currentWarning.some((order) => !reviewedOrderIds.includes(order.id)))) {
+        updatedWarning = currentWarning;
+        return undefined;
+      }
       const result = reconcileDays(current.days, startDate, endDate, current.unscheduledItemIds);
       return {
         ...current,
@@ -133,16 +140,18 @@ function TripRoutes({ createDayId = () => "day-ui", routeService }: Pick<AppProp
         orders: current.orders ?? [],
       };
     }).then((saved) => {
+      if (updatedWarning) return { affectedOrders: updatedWarning };
       if (!saved) throw new Error("日期修改失败，请重试");
       return { affectedOrders: [] };
     });
   }
 
   function changeOrderStatus(orderId: string, status: OrderStatus) {
-    return mutateTrip((current) => ({
-      ...current,
-      orders: (current.orders ?? []).map((order) => order.id === orderId ? { ...order, status } : order),
-    }));
+    return mutateTrip((current) => {
+      const target = (current.orders ?? []).find((order) => order.id === orderId);
+      if (!target) return undefined;
+      return { ...current, orders: current.orders.map((order) => order.id === orderId ? transitionOrderStatus(order, status) : order) };
+    });
   }
 
   return (

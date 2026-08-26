@@ -24,6 +24,20 @@ describe("budget contract", () => {
   it("requires monetary amounts, a category, and a persisted status", () => {
     expect(BudgetItemSchema.parse(trip.orders[0])).toMatchObject({ status: "partial", currency: "CNY" });
     expect(() => BudgetItemSchema.parse({ ...trip.orders[0], paid: -1 })).toThrow();
+    expect(() => BudgetItemSchema.parse({ ...trip.orders[0], status: "paid", paid: 1 })).toThrow("已支付金额");
+    expect(() => BudgetItemSchema.parse({ ...trip.orders[0], status: "partial", paid: 0 })).toThrow("部分支付");
+  });
+
+  it("does not let hostile order IDs, day IDs, or currencies mutate lookup maps", () => {
+    const hostile: Trip = {
+      ...trip,
+      days: [{ id: "__proto__", date: "2026-10-03", city: "深圳", itemIds: [] }],
+      orders: [{ id: "constructor", name: "安全订单", category: "food", estimated: 100, paid: 0, currency: "__proto__", status: "unpaid", dayId: "__proto__" }],
+    };
+    const totals = budgetTotals(hostile);
+    expect(Object.getPrototypeOf(totals.trip)).toBeNull();
+    expect(totals.trip["__proto__"]).toEqual({ estimated: 100, paid: 0 });
+    expect(totals.byDay["__proto__"]?.["__proto__"]).toEqual({ estimated: 100, paid: 0 });
   });
 
   it("derives trip, category, and day totals without mixing currencies", () => {

@@ -39,6 +39,12 @@ export const TripSchema = z.object({
     }
     dayIds.add(day.id);
   });
+
+  const orderIds = new Set<string>();
+  trip.orders.forEach((order, index) => {
+    if (orderIds.has(order.id)) context.addIssue({ code: "custom", message: "订单 ID 不能重复", path: ["orders", index, "id"] });
+    orderIds.add(order.id);
+  });
 });
 
 export type TravelDay = z.infer<typeof TravelDaySchema>;

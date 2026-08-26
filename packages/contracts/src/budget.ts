@@ -14,6 +14,10 @@ export const BudgetItemSchema = z.object({
   currency: z.string().min(1).max(8),
   status: OrderStatusSchema,
   dayId: z.string().min(1).optional(),
+}).superRefine((item, context) => {
+  if (item.status === "unpaid" && item.paid !== 0) context.addIssue({ code: "custom", message: "未支付订单的已支付金额必须为 0", path: ["paid"] });
+  if (item.status === "partial" && (item.paid <= 0 || item.paid >= item.estimated)) context.addIssue({ code: "custom", message: "部分支付的已支付金额必须大于 0 且小于预计金额", path: ["paid"] });
+  if (item.status === "paid" && item.paid !== item.estimated) context.addIssue({ code: "custom", message: "已支付订单的已支付金额必须等于预计金额", path: ["paid"] });
 });
 
 export type BudgetCategory = z.infer<typeof BudgetCategorySchema>;
@@ -21,6 +25,17 @@ export type OrderStatus = z.infer<typeof OrderStatusSchema>;
 export type BudgetItem = z.infer<typeof BudgetItemSchema>;
 
 export type CurrencyTotals = Record<string, { estimated: number; paid: number }>;
+
+function safeTotals(): CurrencyTotals { return Object.create(null) as CurrencyTotals; }
+
+export function transitionOrderStatus(order: BudgetItem, status: OrderStatus): BudgetItem {
+  if (status === "unpaid") return { ...order, status, paid: 0 };
+  if (status === "paid") return { ...order, status, paid: order.estimated };
+  if (order.paid <= 0 || order.paid >= order.estimated) {
+    throw new Error("部分支付请先录入介于 0 与预计金额之间的已付金额");
+  }
+  return { ...order, status };
+}
 
 function addToTotals(totals: CurrencyTotals, item: BudgetItem) {
   const current = totals[item.currency] ?? { estimated: 0, paid: 0 };
@@ -31,13 +46,14 @@ function addToTotals(totals: CurrencyTotals, item: BudgetItem) {
 }
 
 function emptyCategoryTotals(): Record<BudgetCategory, CurrencyTotals> {
-  return { flight: {}, hotel: {}, transport: {}, ticket: {}, food: {} };
+  return { flight: safeTotals(), hotel: safeTotals(), transport: safeTotals(), ticket: safeTotals(), food: safeTotals() };
 }
 
 export function budgetTotals(trip: Trip) {
-  const tripTotals: CurrencyTotals = {};
+  const tripTotals = safeTotals();
   const byCategory = emptyCategoryTotals();
-  const byDay = Object.fromEntries(trip.days.map((day) => [day.id, {} as CurrencyTotals]));
+  const byDay: Record<string, CurrencyTotals> = Object.create(null) as Record<string, CurrencyTotals>;
+  trip.days.forEach((day) => { byDay[day.id] = safeTotals(); });
 
   // Older local drafts are parsed with the schema on persistence, but tolerate
   // an in-memory legacy repository during migration.

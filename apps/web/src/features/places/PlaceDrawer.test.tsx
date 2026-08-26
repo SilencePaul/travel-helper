@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { AttractionPlace, RestaurantPlace } from "@travel/contracts";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { PlaceDrawer } from "./PlaceDrawer";
 
 const sources = [
@@ -92,4 +92,23 @@ test("mobile drawer exposes partial and full states", async () => {
   expect(dialog).toHaveAttribute("data-drawer-state", "full");
   await user.click(screen.getByRole("button", { name: "关闭详情" }));
   expect(dialog).not.toBeInTheDocument();
+});
+
+test("copies the address when clipboard access succeeds", async () => {
+  const user = userEvent.setup();
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  render(<PlaceDrawer place={restaurant} triggerRef={{ current: null }} onClose={() => undefined} />);
+  await user.click(screen.getByRole("button", { name: "复制地址" }));
+  expect(writeText).toHaveBeenCalledWith(restaurant.address);
+  expect(await screen.findByText("地址已复制")).toBeVisible();
+});
+
+test("offers a selectable manual address when clipboard access is unavailable or rejected", async () => {
+  const user = userEvent.setup();
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) } });
+  render(<PlaceDrawer place={restaurant} triggerRef={{ current: null }} onClose={() => undefined} />);
+  await user.click(screen.getByRole("button", { name: "复制地址" }));
+  expect(await screen.findByText("无法自动复制，请手动复制下方地址")).toBeVisible();
+  expect(screen.getByLabelText("可手动复制的地址")).toHaveValue(restaurant.address);
 });

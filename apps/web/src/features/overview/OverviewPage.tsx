@@ -18,7 +18,7 @@ export type OverviewPageProps = {
   onMoveDay: (activeDayId: string, overDayId: string) => void | Promise<unknown>;
   isSaving?: boolean;
   onOpenHotels?: () => void;
-  onChangeDateRange?: (startDate: string, endDate: string, confirmed: boolean) => Promise<{ affectedOrders: AffectedOrder[] }>;
+  onChangeDateRange?: (startDate: string, endDate: string, confirmed: boolean, reviewedOrderIds?: string[]) => Promise<{ affectedOrders: AffectedOrder[] }>;
   onOrderStatusChange?: (orderId: string, status: OrderStatus) => void | Promise<unknown>;
 };
 
@@ -42,10 +42,13 @@ export function OverviewPage({
   const [rangeEnd, setRangeEnd] = useState(trip.endDate);
   const [rangeWarning, setRangeWarning] = useState<{ startDate: string; endDate: string; orders: AffectedOrder[] }>();
   const [rangeError, setRangeError] = useState<string>();
+  const [rangeSaving, setRangeSaving] = useState(false);
   const deleteTriggerRef = useRef<HTMLButtonElement>(null);
   const confirmButtonRef = useRef<HTMLButtonElement>(null);
   const cancelButtonRef = useRef<HTMLButtonElement>(null);
   const deleteDialogRef = useRef<HTMLDialogElement>(null);
+  const rangeDialogRef = useRef<HTMLDialogElement>(null);
+  const dateTriggerRef = useRef<HTMLButtonElement>(null);
   const deleteTitleId = useId();
   const deleteDescriptionId = useId();
   const requestedIndex = trip.days.findIndex((day) => day.id === selectedDayId);
@@ -71,21 +74,44 @@ export function OverviewPage({
     /* oxlint-enable react/set-state-in-effect */
   }, [trip.startDate, trip.endDate]);
 
+  useEffect(() => {
+    if (!rangeWarning) return;
+    const dialog = rangeDialogRef.current;
+    if (!dialog) return;
+    if (!dialog.open) {
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else dialog.setAttribute("open", "");
+    }
+    return () => { if (dialog.open) dialog.close?.(); };
+  }, [rangeWarning]);
+
   async function requestDateRange(confirmed = false) {
     if (!onChangeDateRange) return;
     setRangeError(undefined);
     const reviewedRange = confirmed ? rangeWarning : undefined;
     const requestedStartDate = reviewedRange?.startDate ?? rangeStart;
     const requestedEndDate = reviewedRange?.endDate ?? rangeEnd;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(requestedStartDate) || !/^\d{4}-\d{2}-\d{2}$/.test(requestedEndDate)) {
+      setRangeError("请输入有效的开始与结束日期");
+      return;
+    }
+    if (requestedEndDate < requestedStartDate) {
+      setRangeError("结束日期不能早于开始日期");
+      return;
+    }
+    if (confirmed) setRangeSaving(true);
     try {
-      const result = await onChangeDateRange(requestedStartDate, requestedEndDate, confirmed);
-      if (!confirmed && result.affectedOrders.length > 0) {
+      const result = await onChangeDateRange(requestedStartDate, requestedEndDate, confirmed, reviewedRange?.orders.map((order) => order.id));
+      if (result.affectedOrders.length > 0) {
         setRangeWarning({ startDate: requestedStartDate, endDate: requestedEndDate, orders: result.affectedOrders });
         return;
       }
       setRangeWarning(undefined);
+      requestAnimationFrame(() => dateTriggerRef.current?.focus());
     } catch (error) {
       setRangeError(error instanceof Error ? error.message : "日期修改失败，请重试");
+    } finally {
+      if (confirmed) setRangeSaving(false);
     }
   }
 
@@ -260,16 +286,16 @@ export function OverviewPage({
         <div><p className="eyebrow">日期</p><h2 id="date-range-heading">调整旅行日期</h2></div>
         <label>开始日期<input type="date" value={rangeStart} aria-describedby={rangeError ? "date-range-error" : undefined} onChange={(event) => setRangeStart(event.target.value)} /></label>
         <label>结束日期<input type="date" value={rangeEnd} aria-describedby={rangeError ? "date-range-error" : undefined} onChange={(event) => setRangeEnd(event.target.value)} /></label>
-        <button type="button" onClick={() => void requestDateRange()} disabled={isSaving}>更新日期</button>
+        <button ref={dateTriggerRef} type="button" onClick={() => void requestDateRange()} disabled={isSaving || rangeSaving}>更新日期</button>
         {rangeError ? <p id="date-range-error" role="alert">{rangeError}</p> : null}
       </section> : null}
 
-      {rangeWarning ? <dialog className="date-warning" open aria-modal="true" aria-labelledby="date-warning-title">
+      {rangeWarning ? <dialog ref={rangeDialogRef} className="date-warning" aria-modal="true" aria-labelledby="date-warning-title" aria-busy={rangeSaving} onCancel={(event) => { event.preventDefault(); if (!rangeSaving) setRangeWarning(undefined); }}>
         <h2 id="date-warning-title">这些订单关联的旅行日将被移除</h2>
         <p>订单不会自动删除或改写。确认后只调整日期与行程日，请随后核对订单。</p>
         <ul>{rangeWarning.orders.map((order) => <li key={order.id}>{order.category === "hotel" ? "酒店" : "门票"} · {order.name}</li>)}</ul>
         {rangeError ? <p role="alert">{rangeError}</p> : null}
-        <div><button type="button" className="danger-button" onClick={() => void requestDateRange(true)}>仍然调整日期</button><button type="button" onClick={() => setRangeWarning(undefined)}>保留当前日期</button></div>
+        <div><button type="button" className="danger-button" onClick={() => void requestDateRange(true)} disabled={rangeSaving || isSaving}>{rangeSaving ? "正在调整" : "仍然调整日期"}</button><button type="button" onClick={() => { setRangeWarning(undefined); dateTriggerRef.current?.focus(); }} disabled={rangeSaving}>保留当前日期</button></div>
       </dialog> : null}
 
       <div className="overview-sidepanels">

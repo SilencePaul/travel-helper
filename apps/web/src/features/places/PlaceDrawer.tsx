@@ -37,6 +37,7 @@ export function PlaceDrawer({ place, triggerRef, onClose, mobile = false, rainAl
   const titleId = useId();
   const [open, setOpen] = useState(true);
   const [mobileState, setMobileState] = useState<"partial" | "full">("partial");
+  const [copyMessage, setCopyMessage] = useState<string>();
   const [portalRoot, setPortalRoot] = useState<HTMLElement | null>(null);
   const viewportIsMobile = useSyncExternalStore(subscribeToMobileViewport, getMobileViewportSnapshot, () => false);
   const isMobile = mobile || viewportIsMobile;
@@ -53,7 +54,13 @@ export function PlaceDrawer({ place, triggerRef, onClose, mobile = false, rainAl
   };
 
   const copyAddress = async () => {
-    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(place.address);
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(place.address);
+      setCopyMessage("地址已复制");
+    } catch {
+      setCopyMessage("无法自动复制，请手动复制下方地址");
+    }
   };
 
   useEffect(() => {
@@ -134,6 +141,7 @@ export function PlaceDrawer({ place, triggerRef, onClose, mobile = false, rainAl
           <button type="button" className="place-action" onClick={() => void copyAddress()}>复制地址</button>
           {communitySource ? <a className="place-action" href={communitySource.url} target="_blank" rel="noreferrer">小红书搜索</a> : null}
         </div>
+        {copyMessage ? <div className="copy-address-state" role="status"><p>{copyMessage}</p>{copyMessage.startsWith("无法") ? <input aria-label="可手动复制的地址" readOnly value={place.address} onFocus={(event) => event.currentTarget.select()} /> : null}</div> : null}
         <section className="place-detail-section" aria-labelledby="place-sources">
           <h3 id="place-sources">资料来源</h3>
           <ul className="place-sources">
