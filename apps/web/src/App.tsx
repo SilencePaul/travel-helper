@@ -112,7 +112,7 @@ function TripRoutes({ createDayId = () => "day-ui", routeService }: Pick<AppProp
     return mutateTrip((current) => ({
       ...current,
       days: current.days.map((day) => day.city.includes("香港") ? { ...day, hotelId } : day),
-    }));
+    })).then((saved) => Boolean(saved));
   }
 
   return (

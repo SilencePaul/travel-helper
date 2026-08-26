@@ -21,6 +21,7 @@ describe("HotelComparePage", () => {
     const onSelectHotel = vi.fn();
     const routeService = { getSegments: vi.fn(async () => [{ id: "provider", fromPlaceId: "a", toPlaceId: "b", mode: "transit" as const, distanceMeters: 1200, durationMinutes: 18, summary: "高德公共交通路线", path: [] }]) };
     const user = userEvent.setup();
+    onSelectHotel.mockResolvedValue(true);
     render(<HotelComparePage trip={trip} routeService={routeService} onSelectHotel={onSelectHotel} onBack={() => undefined} />);
 
     expect(screen.getByTestId("hotel-nights")).toHaveTextContent("2 晚");
@@ -36,8 +37,15 @@ describe("HotelComparePage", () => {
   });
 
   it("does not invent a commute when AMap has no response", async () => {
-    render(<HotelComparePage trip={trip} routeService={{ getSegments: vi.fn(async () => { throw new Error("unavailable"); }) }} onSelectHotel={() => undefined} onBack={() => undefined} />);
+    render(<HotelComparePage trip={trip} routeService={{ getSegments: vi.fn(async () => { throw new Error("unavailable"); }) }} onSelectHotel={() => true} onBack={() => undefined} />);
     await waitFor(() => expect(screen.getByTestId("hotel-commute")).toHaveTextContent("待高德路线确认"));
+  });
+
+  it("rolls a hotel marker back when the persisted selection is rejected", async () => {
+    const user = userEvent.setup();
+    render(<HotelComparePage trip={trip} onSelectHotel={async () => false} onBack={() => undefined} />);
+    await user.click(screen.getAllByRole("button", { name: "选择此酒店" }).at(-1)!);
+    await waitFor(() => expect(screen.getByRole("button", { name: "在地图中定位 九龙酒店" })).toHaveAttribute("aria-current", "location"));
   });
 
   it("recalculates selected stay nights when the trip has more assigned hotel days", () => {
@@ -49,7 +57,7 @@ describe("HotelComparePage", () => {
         { id: "d8", date: "2026-10-10", city: "香港", itemIds: [], hotelId: "kowloon-hotel" },
       ],
     };
-    render(<HotelComparePage trip={extended} onSelectHotel={() => undefined} onBack={() => undefined} />);
+    render(<HotelComparePage trip={extended} onSelectHotel={() => true} onBack={() => undefined} />);
     expect(screen.getByTestId("hotel-nights")).toHaveTextContent("4 晚");
   });
 });

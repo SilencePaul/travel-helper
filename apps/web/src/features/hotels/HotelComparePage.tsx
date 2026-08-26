@@ -11,7 +11,7 @@ import type { RouteService } from "../map/types";
 
 type HotelComparePageProps = {
   trip: Trip;
-  onSelectHotel: (hotelId: string) => void | Promise<unknown>;
+  onSelectHotel: (hotelId: string) => boolean | Promise<boolean>;
   onBack: () => void;
   routeService?: RouteService;
 };
@@ -50,7 +50,7 @@ export function HotelComparePage({ trip, onSelectHotel, onBack, routeService }: 
   const selectHotel = useCallback(async (hotelId: string) => {
     const previousId = highlightedId;
     setHighlightedId(hotelId);
-    try { await onSelectHotel(hotelId); } catch { setHighlightedId(previousId); }
+    try { if (!await onSelectHotel(hotelId)) setHighlightedId(previousId); } catch { setHighlightedId(previousId); }
   }, [highlightedId, onSelectHotel]);
 
   return (

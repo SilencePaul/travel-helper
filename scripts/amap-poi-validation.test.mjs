@@ -14,6 +14,15 @@ const mismatched = await validatePoi(poi, "test-only-key", async () => ({
 }));
 assert.deepEqual(mismatched, { id: "peak", ok: false, reason: "MISMATCHED_POI" });
 
+let attempts = 0;
+const retried = await validatePoi(poi, "test-only-key", async () => {
+  attempts += 1;
+  if (attempts === 1) throw new Error("temporary");
+  return { ok: true, json: async () => ({ status: "1", pois: [{ name: "太平山顶", location: "114.1,22.2" }] }) };
+});
+assert.deepEqual(retried, { id: "peak", ok: true, reason: "verified" });
+assert.equal(attempts, 2);
+
 const lines = [];
 const result = await validatePoiCatalog({ pois: [poi], key: undefined, print: (line) => lines.push(line) });
 assert.equal(result.exitCode, 1);

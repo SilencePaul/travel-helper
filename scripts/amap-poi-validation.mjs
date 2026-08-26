@@ -2,15 +2,16 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 const timeoutMs = 10_000;
-const safeReasons = new Set(["AMAP_WEB_SERVICE_KEY_MISSING", "INVALID_USER_KEY", "INSUFFICIENT_PRIVILEGES", "NETWORK_ERROR", "TIMEOUT", "UNRESOLVED_POI", "MISMATCHED_POI", "INVALID_LOCATION"]);
+const safeReasons = new Set(["AMAP_WEB_SERVICE_KEY_MISSING", "INVALID_USER_KEY", "INSUFFICIENT_PRIVILEGES", "NETWORK_ERROR", "TRANSIENT_ERROR", "TIMEOUT", "UNRESOLVED_POI", "MISMATCHED_POI", "INVALID_LOCATION"]);
 
-export async function validatePoi(poi, key, fetchImpl = fetch) {
+export async function validatePoi(poi, key, fetchImpl = fetch, attempts = 2) {
   if (!key) return { id: poi.id, ok: false, reason: "AMAP_WEB_SERVICE_KEY_MISSING" };
   try {
     const url = new URL("https://restapi.amap.com/v3/place/detail");
     url.searchParams.set("key", key);
     url.searchParams.set("id", poi.amapPoiId);
     const response = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
+    if (response.status >= 500 && attempts > 1) return validatePoi(poi, key, fetchImpl, attempts - 1);
     const body = await response.json();
     const result = body?.pois?.[0];
     if (!response.ok || body?.status !== "1" || !result) return { id: poi.id, ok: false, reason: "UNRESOLVED_POI" };
@@ -19,7 +20,8 @@ export async function validatePoi(poi, key, fetchImpl = fetch) {
     if (result.name !== poi.name || lng !== poi.lng || lat !== poi.lat) return { id: poi.id, ok: false, reason: "MISMATCHED_POI" };
     return { id: poi.id, ok: true, reason: "verified" };
   } catch (error) {
-    return { id: poi.id, ok: false, reason: error instanceof DOMException && error.name === "TimeoutError" ? "TIMEOUT" : "NETWORK_ERROR" };
+    if (attempts > 1) return validatePoi(poi, key, fetchImpl, attempts - 1);
+    return { id: poi.id, ok: false, reason: error instanceof DOMException && error.name === "TimeoutError" ? "TIMEOUT" : "TRANSIENT_ERROR" };
   }
 }
 
