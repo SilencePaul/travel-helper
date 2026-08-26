@@ -9,11 +9,11 @@ import {
 
 describe("reconcileDays", () => {
   it.each([
-    ["2026-10-03", "2026-10-06", 4],
-    ["2026-10-03", "2026-10-08", 6],
-    ["2026-10-03", "2026-10-10", 8],
-  ])("builds an inclusive range", (start, end, count) => {
-    expect(reconcileDays([], start, end).days).toHaveLength(count);
+    ["2026-10-03", "2026-10-06", ["2026-10-03", "2026-10-04", "2026-10-05", "2026-10-06"]],
+    ["2026-10-03", "2026-10-08", ["2026-10-03", "2026-10-04", "2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08"]],
+    ["2026-10-03", "2026-10-10", ["2026-10-03", "2026-10-04", "2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08", "2026-10-09", "2026-10-10"]],
+  ])("builds an inclusive range", (start, end, dates) => {
+    expect(reconcileDays([], start, end).days.map((day) => day.date)).toEqual(dates);
   });
 
   it("keeps removed content in the unscheduled bucket", () => {
