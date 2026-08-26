@@ -12,6 +12,7 @@ export type OverviewPageProps = {
   onDeleteDay: (dayId: string) => void | Promise<unknown>;
   onMoveDay: (activeDayId: string, overDayId: string) => void | Promise<unknown>;
   isSaving?: boolean;
+  onOpenHotels?: () => void;
 };
 
 export function OverviewPage({
@@ -23,6 +24,7 @@ export function OverviewPage({
   onDeleteDay,
   onMoveDay,
   isSaving = false,
+  onOpenHotels = () => undefined,
 }: OverviewPageProps) {
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; dayNumber: number }>();
   const [isDeleting, setIsDeleting] = useState(false);
@@ -122,6 +124,7 @@ export function OverviewPage({
           <div><dt>预算</dt><dd>预算数据尚未接入</dd></div>
           <div><dt>预订</dt><dd>预订数据尚未接入</dd></div>
         </dl>
+        <button type="button" className="hotel-open" onClick={onOpenHotels}>酒店比较</button>
       </header>
 
       <section aria-labelledby="days-heading">

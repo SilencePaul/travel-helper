@@ -14,6 +14,7 @@ import { TripProvider } from "./app/TripProvider";
 import { useTrip } from "./app/tripContext";
 import { DayPage } from "./features/itinerary/DayPage";
 import { OverviewPage } from "./features/overview/OverviewPage";
+import { HotelComparePage } from "./features/hotels/HotelComparePage";
 import "./styles/global.css";
 
 type AppProps = {
@@ -107,6 +108,13 @@ function TripRoutes({ createDayId = () => "day-ui", routeService }: Pick<AppProp
     });
   }
 
+  function selectHotel(hotelId: string) {
+    return mutateTrip((current) => ({
+      ...current,
+      days: current.days.map((day) => day.city.includes("香港") ? { ...day, hotelId } : day),
+    }));
+  }
+
   return (
     <div className="app-shell">
       <div className="sync-bar" role="status">{syncState}</div>
@@ -126,9 +134,11 @@ function TripRoutes({ createDayId = () => "day-ui", routeService }: Pick<AppProp
               onDeleteDay={deleteDay}
               onMoveDay={reorderDays}
               isSaving={syncState === "正在保存"}
+              onOpenHotels={() => navigate("/hotels")}
             />
           }
         />
+        <Route path="/hotels" element={<HotelComparePage trip={trip} onSelectHotel={selectHotel} onBack={() => navigate("/")} />} />
         <Route
           path="/day/:dayId"
           element={
