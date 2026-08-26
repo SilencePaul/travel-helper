@@ -1,0 +1,56 @@
+[
+  {
+    "id": "peak",
+    "type": "attraction",
+    "name": "太平山顶",
+    "address": "香港山顶道128号凌霄阁",
+    "coordinate": { "lng": 114.150192, "lat": 22.270851, "coordinateSystem": "GCJ02" },
+    "summary": "从山顶缆车到凌霄阁摩天台 428，可俯瞰维多利亚港天际线。",
+    "updatedAt": "2026-08-26T00:00:00.000Z",
+    "ticketPrice": "山顶缆车来回成人 HK$108（官方 2024-12-30 起公布票价）",
+    "hours": "山顶缆车 07:30–23:00；凌霄阁摩天台 428 08:30–22:00（以官方当天公告为准）",
+    "stayMinutes": 120,
+    "bestTime": "日落前抵达，衔接夜景",
+    "crowdNote": "节假日或繁忙时段可能实施人流管理；官方建议提前购票，并尽量在下午 3 点前到达。",
+    "photoSpots": ["凌霄阁摩天台 428", "卢吉道观景位"],
+    "rainAlternativeId": "peak-tower",
+    "bookingUrl": "https://ticketing.thepeak.com.hk/",
+    "images": [{
+      "url": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/88/Hong_Kong_at_night_from_Victoria_Peak.jpg/960px-Hong_Kong_at_night_from_Victoria_Peak.jpg",
+      "alt": "从太平山顶眺望香港夜景",
+      "licenseOrOwner": "The Ruester / Wikimedia Commons，Public Domain"
+    }],
+    "sources": [
+      { "label": "山顶官方体验与开放时间", "url": "https://www.thepeak.com.hk/en/the-peak-experience", "kind": "official", "checkedAt": "2026-08-26T00:00:00.000Z" },
+      { "label": "山顶缆车官方票价公告", "url": "https://www.thepeak.com.hk/sites/peak/files/2024-12/%5BPress%20Release%5D%20The%20Peak%20Tram%20standardises%20fares.pdf", "kind": "official", "checkedAt": "2026-08-26T00:00:00.000Z" },
+      { "label": "香港旅游发展局：山顶环回步行径", "url": "https://www.discoverhongkong.com/eng/interactive-map/peak-circle-walk.html", "kind": "tourism-board", "checkedAt": "2026-08-26T00:00:00.000Z" },
+      { "label": "小红书：香港太平山顶搜索", "url": "https://www.xiaohongshu.com/search_result?keyword=%E9%A6%99%E6%B8%AF%20%E5%A4%AA%E5%B9%B3%E5%B1%B1%E9%A1%B6", "kind": "community", "checkedAt": "2026-08-26T00:00:00.000Z" }
+    ]
+  },
+  {
+    "id": "arabica-peak",
+    "type": "restaurant",
+    "name": "%Arabica(香港凌霄阁店)",
+    "address": "香港山顶道128号凌霄阁地下 G17",
+    "coordinate": { "lng": 114.154678, "lat": 22.268561, "coordinateSystem": "GCJ02" },
+    "summary": "山顶凌霄阁内的咖啡停靠点，适合在上山或下山前短暂停留。",
+    "updatedAt": "2026-08-26T00:00:00.000Z",
+    "averagePrice": "HK$45–60 / 人（山顶官方店铺页）",
+    "signatureDishes": ["Caffè Latte（其他香港分店菜单参考）", "Kyoto Latte（其他香港分店菜单参考）"],
+    "twoPersonOrder": "按官方人均区间计算：两人约 HK$90–120；实际以门店菜单为准",
+    "hours": "08:00–19:00（周一至周五）；08:00–21:00（周末及公众假期）",
+    "queueNote": "官方店铺页未公开排队时间，抵达后以现场为准。",
+    "reservationUrl": "https://arabicacoffee.hk/",
+    "images": [{
+      "url": "https://arabicacoffee.hk/uploads/_700x380_crop_center-center_90_none/TPK_website_1.png",
+      "alt": "% Arabica 山顶凌霄阁店环境",
+      "licenseOrOwner": "© % Arabica Hong Kong"
+    }],
+    "sources": [
+      { "label": "山顶官方：% Arabica 店铺信息", "url": "https://www.thepeak.com.hk/en/dining-and-shopping/dining/hong-kong-day", "kind": "official", "checkedAt": "2026-08-26T00:00:00.000Z" },
+      { "label": "% Arabica 香港门店目录", "url": "https://arabicacoffee.hk/locations/locations%26loc%3Dbeijing", "kind": "official", "checkedAt": "2026-08-26T00:00:00.000Z" },
+      { "label": "Foodpanda 菜单（其他香港分店，仅作单品参考）", "url": "https://www.foodpanda.hk/restaurant/udt3/arabica-hong-kong-airside", "kind": "menu", "checkedAt": "2026-08-26T00:00:00.000Z" },
+      { "label": "小红书：% Arabica 香港山顶搜索", "url": "https://www.xiaohongshu.com/search_result?keyword=%25%20Arabica%20%E9%A6%99%E6%B8%AF%E5%B1%B1%E9%A1%B6", "kind": "community", "checkedAt": "2026-08-26T00:00:00.000Z" }
+    ]
+  }
+]

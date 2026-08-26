@@ -1,11 +1,12 @@
 import type { Trip } from "@travel/contracts";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AmapRouteMap, type AmapLoader } from "../map/AmapRouteMap";
 import { createAmapRouteService } from "../map/amapRouteService";
 import { loadAmap } from "../map/amapLoader";
 import type { MapInteractionAdapter, RouteService } from "../map/types";
-import { getPlace, getPlaces, getRouteModes } from "./itineraryData";
+import { getPlace, getPlaceDetail, getPlaces, getRouteModes } from "./itineraryData";
 import { Timeline } from "./Timeline";
+import { PlaceDrawer } from "../places/PlaceDrawer";
 
 type DayPageProps = {
   trip: Trip;
@@ -22,6 +23,8 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, r
   const dayIndex = trip.days.findIndex((day) => day.id === dayId);
   const day = trip.days[dayIndex];
   const [selectedPlaceId, setSelectedPlaceId] = useState<string>();
+  const drawerTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const [drawerPlaceId, setDrawerPlaceId] = useState<string>();
   const places = useMemo(() => getPlaces(day?.itemIds ?? []), [day?.itemIds]);
   const defaultRouteService = useMemo(() => createAmapRouteService(loadAmap, getPlace), []);
   const activeRouteService = routeService ?? defaultRouteService;
@@ -34,8 +37,12 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, r
   }>();
   const segments = routeResult?.key === routeKey ? routeResult.segments : [];
   const routeError = routeResult?.key === routeKey ? routeResult.error : undefined;
-  const selectPlace = useCallback((placeId: string) => {
+  const selectPlace = useCallback((placeId: string, trigger?: HTMLButtonElement) => {
     setSelectedPlaceId(placeId);
+    if (trigger && getPlaceDetail(placeId)) {
+      drawerTriggerRef.current = trigger;
+      setDrawerPlaceId(placeId);
+    }
     mapAdapter.focusPlace(placeId);
     document.getElementById(`timeline-place-${placeId}`)?.scrollIntoView?.({ behavior: "smooth", block: "nearest" });
   }, [mapAdapter]);
@@ -95,6 +102,12 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, r
           onSelectPlace={selectPlace}
         />
       </section>
+      {drawerPlaceId && getPlaceDetail(drawerPlaceId) ? <PlaceDrawer
+        place={getPlaceDetail(drawerPlaceId)!}
+        triggerRef={drawerTriggerRef}
+        onClose={() => setDrawerPlaceId(undefined)}
+        mobile={typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(max-width: 799px)").matches}
+      /> : null}
     </main>
   );
 }

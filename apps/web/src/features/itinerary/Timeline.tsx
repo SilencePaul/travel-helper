@@ -4,7 +4,7 @@ type TimelineProps = {
   places: TimelinePlace[];
   segments: RouteSegment[];
   selectedPlaceId?: string;
-  onSelectPlace: (placeId: string) => void;
+  onSelectPlace: (placeId: string, trigger?: HTMLButtonElement) => void;
 };
 
 function formatSegment(segment: RouteSegment) {
@@ -30,7 +30,7 @@ export function Timeline({ places, segments, selectedPlaceId, onSelectPlace }: T
               type="button"
               className="timeline-place"
               aria-current={selectedPlaceId === place.id ? "location" : undefined}
-              onClick={() => onSelectPlace(place.id)}
+              onClick={(event) => onSelectPlace(place.id, event.currentTarget)}
             >
               {place.name}
             </button>

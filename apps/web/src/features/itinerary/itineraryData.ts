@@ -1,4 +1,6 @@
 import poiCatalog from "../../../../../content/amap-pois.json";
+import placeCatalog from "../../../../../content/places.json";
+import { PlaceSchema, type Place } from "@travel/contracts";
 import type { TimelinePlace, TravelMode } from "../map/types";
 
 export function validatePoiCatalog(catalog: unknown): TimelinePlace[] {
@@ -27,6 +29,25 @@ export function getPlaces(itemIds: string[]) {
 
 export function getPlace(placeId: string) {
   return itineraryPlaces[placeId];
+}
+
+export function validatePlaceCatalog(catalog: unknown): Place[] {
+  const parsed = PlaceSchema.array().safeParse(catalog);
+  if (!parsed.success) throw new Error("PLACE_CATALOG_INVALID");
+  const ids = new Set<string>();
+  parsed.data.forEach((place) => {
+    if (ids.has(place.id)) throw new Error("PLACE_CATALOG_INVALID");
+    ids.add(place.id);
+  });
+  return parsed.data;
+}
+
+export const placeDetails: Record<string, Place> = Object.fromEntries(
+  validatePlaceCatalog(placeCatalog).map((place) => [place.id, place]),
+);
+
+export function getPlaceDetail(placeId: string) {
+  return placeDetails[placeId];
 }
 
 export function getRouteModes(placeIds: string[]): TravelMode[] {

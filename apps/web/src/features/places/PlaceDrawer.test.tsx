@@ -1,0 +1,74 @@
+import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import type { AttractionPlace, RestaurantPlace } from "@travel/contracts";
+import { expect, test } from "vitest";
+import { PlaceDrawer } from "./PlaceDrawer";
+
+const sources = [
+  { label: "官方资料", url: "https://example.com/official", kind: "official" as const, checkedAt: "2026-08-26T00:00:00.000Z" },
+  { label: "小红书搜索", url: "https://www.xiaohongshu.com/search_result", kind: "community" as const, checkedAt: "2026-08-26T00:00:00.000Z" },
+];
+
+const restaurant: RestaurantPlace = {
+  id: "arabica-peak", type: "restaurant", name: "% Arabica 山顶凌霄阁店",
+  address: "香港山顶道128号凌霄阁G17", coordinate: { lng: 114.150192, lat: 22.270851, coordinateSystem: "GCJ02" },
+  summary: "山顶行程中的咖啡停靠。", updatedAt: "2026-08-26T00:00:00.000Z",
+  averagePrice: "HK$45–60 / 人", signatureDishes: ["Caffè Latte", "Kyoto Latte"],
+  twoPersonOrder: "两杯咖啡预算 HK$90–120", hours: "08:00–19:00（周一至周五）；08:00–21:00（周末及公众假期）",
+  queueNote: "高峰时段以现场为准", reservationUrl: "https://arabicacoffee.hk/",
+  images: [{ url: "https://example.com/coffee.jpg", alt: "% Arabica 店内咖啡", licenseOrOwner: "© % Arabica Hong Kong" }], sources,
+};
+
+const attraction: AttractionPlace = {
+  id: "peak", type: "attraction", name: "太平山顶", address: "香港山顶道128号",
+  coordinate: { lng: 114.150192, lat: 22.270851, coordinateSystem: "GCJ02" }, summary: "俯瞰维港天际线。",
+  updatedAt: "2026-08-26T00:00:00.000Z", ticketPrice: "山顶缆车来回成人 HK$108（官方公布，2024-12-30起）",
+  hours: "山顶缆车 07:30–23:00；凌霄阁摩天台 428 08:30–22:00", stayMinutes: 120,
+  bestTime: "日落前抵达，衔接夜景", crowdNote: "节假日可能实施人流管理，官方建议提前购票。",
+  photoSpots: ["凌霄阁摩天台 428", "卢吉道观景位"], rainAlternativeId: "peak-tower",
+  bookingUrl: "https://ticketing.thepeak.com.hk/", images: [{ url: "https://example.com/peak.jpg", alt: "太平山顶维港景观", licenseOrOwner: "© Hong Kong Tourism Board" }], sources,
+};
+
+test("restaurant drawer shows sourced food details and navigation", async () => {
+  const user = userEvent.setup();
+  render(<><button type="button">打开餐厅</button><PlaceDrawer place={restaurant} triggerRef={{ current: null }} onClose={() => undefined} /></>);
+  expect(screen.getByRole("dialog", { name: restaurant.name })).toBeVisible();
+  expect(screen.getByAltText("% Arabica 店内咖啡")).toBeVisible();
+  expect(screen.getByText("HK$45–60 / 人")).toBeVisible();
+  expect(screen.getByText("两杯咖啡预算 HK$90–120")).toBeVisible();
+  expect(screen.getByText("Caffè Latte")).toBeVisible();
+  expect(screen.getByRole("link", { name: /官方资料.*2026年8月26日/ })).toBeVisible();
+  expect(screen.getByRole("link", { name: "小红书搜索" })).toBeVisible();
+  await user.click(screen.getByRole("link", { name: "打开高德导航" }));
+});
+
+test("attraction drawer shows visit details and official booking", () => {
+  render(<PlaceDrawer place={attraction} triggerRef={{ current: null }} onClose={() => undefined} />);
+  expect(screen.getByText(/HK\$108/)).toBeVisible();
+  expect(screen.getByText("预计停留 120 分钟")).toBeVisible();
+  expect(screen.getByText("日落前抵达，衔接夜景")).toBeVisible();
+  expect(screen.getByText("卢吉道观景位")).toBeVisible();
+  expect(screen.getByText((_, element) => element?.textContent === "雨天备选：峰顶室内区域（待确认）")).toBeVisible();
+  expect(screen.getByRole("link", { name: "官方订票" })).toHaveAttribute("href", attraction.bookingUrl);
+});
+
+test("escape closes the desktop drawer and restores its triggering card", () => {
+  const trigger = document.createElement("button");
+  document.body.append(trigger);
+  const onClose = () => { trigger.focus(); };
+  render(<PlaceDrawer place={restaurant} triggerRef={{ current: trigger }} onClose={onClose} />);
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+  expect(trigger).toHaveFocus();
+  trigger.remove();
+});
+
+test("mobile drawer exposes partial and full states", async () => {
+  const user = userEvent.setup();
+  render(<PlaceDrawer place={restaurant} triggerRef={{ current: null }} onClose={() => undefined} mobile />);
+  const dialog = screen.getByRole("dialog");
+  expect(dialog).toHaveAttribute("data-drawer-state", "partial");
+  await user.click(screen.getByRole("button", { name: "展开详情" }));
+  expect(dialog).toHaveAttribute("data-drawer-state", "full");
+  await user.click(screen.getByRole("button", { name: "关闭详情" }));
+  expect(dialog).not.toBeInTheDocument();
+});

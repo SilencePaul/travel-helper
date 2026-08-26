@@ -126,3 +126,30 @@ test("keeps the drag handle focused and inert during a delayed save", async ({ p
     "day-tab-day-2026-10-08",
   ]);
 });
+
+test("restaurant drawer shows sourced details and restores focus on desktop", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "desktop drawer coverage");
+  await page.goto("/day/day-2026-10-05");
+  const card = page.locator("#timeline-place-arabica-peak button");
+  await card.click();
+  const drawer = page.getByRole("dialog", { name: "%Arabica(香港凌霄阁店)" });
+  await expect(drawer).toBeVisible();
+  await expect(drawer.getByText(/HK\$45–60/)).toBeVisible();
+  await expect(drawer.getByRole("link", { name: "小红书搜索" })).toBeVisible();
+  await expect(drawer.getByRole("link", { name: "打开高德导航" })).toHaveAttribute("href", /uri\.amap\.com/);
+  await page.keyboard.press("Escape");
+  await expect(drawer).toBeHidden();
+  await expect(card).toBeFocused();
+});
+
+test("attraction drawer uses partial then full mobile states", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone-15", "mobile drawer coverage");
+  await page.goto("/day/day-2026-10-05");
+  await page.locator("#timeline-place-peak button").click();
+  const drawer = page.getByRole("dialog", { name: "太平山顶" });
+  await expect(drawer).toHaveAttribute("data-drawer-state", "partial");
+  await expect(drawer.getByText("预计停留 120 分钟")).toBeVisible();
+  await drawer.getByRole("button", { name: "展开详情" }).click();
+  await expect(drawer).toHaveAttribute("data-drawer-state", "full");
+  await drawer.getByRole("link", { name: "官方订票" }).click({ modifiers: ["Meta"] });
+});
