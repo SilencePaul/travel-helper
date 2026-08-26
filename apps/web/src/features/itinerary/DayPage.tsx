@@ -111,7 +111,6 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, r
         rainAlternative={drawerRainAlternative}
         triggerRef={drawerTriggerRef}
         onClose={() => setDrawerPlaceId(undefined)}
-        mobile={typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(max-width: 799px)").matches}
       /> : null}
     </main>
   );

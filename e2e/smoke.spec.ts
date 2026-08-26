@@ -158,6 +158,8 @@ test("attraction drawer uses partial then full mobile states", async ({ page }, 
   await expect(drawer.getByText("预计停留 120 分钟")).toBeVisible();
   await drawer.getByRole("button", { name: "展开详情" }).click();
   await expect(drawer).toHaveAttribute("data-drawer-state", "full");
+  const fullBox = await drawer.boundingBox();
+  expect(fullBox).toMatchObject({ x: 0, y: 0, width: page.viewportSize()!.width, height: page.viewportSize()!.height });
   await drawer.getByRole("link", { name: "官方订票" }).click({ modifiers: ["Meta"] });
 });
 
@@ -171,4 +173,20 @@ test("uses the mobile drawer treatment below 800px", async ({ page }, testInfo) 
   await expect(drawer).toHaveCSS("bottom", "0px");
   await expect(drawer.getByRole("button", { name: "展开详情" })).toBeVisible();
   await expect(drawer.getByRole("link", { name: "雨天备选：凌霄阁室内区域" })).toBeVisible();
+});
+
+test("updates an open drawer when crossing the 800px breakpoint", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "responsive drawer coverage");
+  await page.setViewportSize({ width: 1000, height: 900 });
+  await page.goto("/day/day-2026-10-05");
+  await page.locator("#timeline-place-peak button").click();
+  const drawer = page.getByRole("dialog", { name: "太平山顶" });
+  await expect(drawer).toHaveAttribute("data-drawer-state", "full");
+  await expect(drawer.getByRole("button", { name: "展开详情" })).toBeHidden();
+  await page.setViewportSize({ width: 760, height: 900 });
+  await expect(drawer).toHaveAttribute("data-drawer-state", "partial");
+  await expect(drawer.getByRole("button", { name: "展开详情" })).toBeVisible();
+  await page.setViewportSize({ width: 1000, height: 900 });
+  await expect(drawer).toHaveAttribute("data-drawer-state", "full");
+  await expect(drawer.getByRole("button", { name: "展开详情" })).toBeHidden();
 });

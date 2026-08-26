@@ -1,5 +1,5 @@
 import type { Place } from "@travel/contracts";
-import { useEffect, useId, useRef, useState, type RefObject } from "react";
+import { startTransition, useEffect, useId, useRef, useState, useSyncExternalStore, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { AttractionDetails } from "./AttractionDetails";
 import { RestaurantDetails } from "./RestaurantDetails";
@@ -21,12 +21,33 @@ function getAmapNavigationUrl(place: Place) {
   return `https://uri.amap.com/marker?position=${lng},${lat}&name=${encodeURIComponent(place.name)}&coordinate=gaode&callnative=1`;
 }
 
+const mobileMediaQuery = "(max-width: 799px)";
+
+function subscribeToMobileViewport(onStoreChange: () => void) {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return () => undefined;
+  const mediaQuery = window.matchMedia(mobileMediaQuery);
+  mediaQuery.addEventListener("change", onStoreChange);
+  return () => mediaQuery.removeEventListener("change", onStoreChange);
+}
+
+function getMobileViewportSnapshot() {
+  return typeof window !== "undefined" && typeof window.matchMedia === "function"
+    ? window.matchMedia(mobileMediaQuery).matches
+    : false;
+}
+
 export function PlaceDrawer({ place, triggerRef, onClose, mobile = false, rainAlternative }: PlaceDrawerProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const [open, setOpen] = useState(true);
   const [mobileState, setMobileState] = useState<"partial" | "full">("partial");
-  const isMobile = mobile;
+  const [portalRoot, setPortalRoot] = useState<HTMLElement | null>(null);
+  const viewportIsMobile = useSyncExternalStore(subscribeToMobileViewport, getMobileViewportSnapshot, () => false);
+  const isMobile = mobile || viewportIsMobile;
+
+  useEffect(() => {
+    startTransition(() => setPortalRoot(document.body));
+  }, []);
 
   const close = () => {
     setOpen(false);
@@ -35,7 +56,7 @@ export function PlaceDrawer({ place, triggerRef, onClose, mobile = false, rainAl
   };
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || !portalRoot) return;
     const dialog = dialogRef.current;
     dialog?.showModal?.();
     if (dialog && !dialog.open) dialog.setAttribute("open", "");
@@ -57,9 +78,9 @@ export function PlaceDrawer({ place, triggerRef, onClose, mobile = false, rainAl
       }
       document.body.style.overflow = previousOverflow;
     };
-  }, [open]);
+  }, [open, portalRoot]);
 
-  if (!open) return null;
+  if (!open || !portalRoot) return null;
   const communitySource = place.sources.find((source) => source.kind === "community");
   const focusableSelector = "button:not([disabled]), a[href]";
 
@@ -119,6 +140,6 @@ export function PlaceDrawer({ place, triggerRef, onClose, mobile = false, rainAl
         </section>
       </div>
     </dialog>,
-    document.body,
+    portalRoot,
   );
 }
