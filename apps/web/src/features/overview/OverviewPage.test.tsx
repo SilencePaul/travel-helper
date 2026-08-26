@@ -62,6 +62,33 @@ class DelayedSaveRepository implements TripRepository {
   }
 }
 
+function mockDayStripLayout() {
+  const originalGetBoundingClientRect = HTMLElement.prototype.getBoundingClientRect;
+  const rect = (left: number, width: number, height = 146) => ({
+    x: left,
+    y: 0,
+    top: 0,
+    right: left + width,
+    bottom: height,
+    left,
+    width,
+    height,
+    toJSON: () => ({}),
+  }) as DOMRect;
+
+  return vi.spyOn(HTMLElement.prototype, "getBoundingClientRect")
+    .mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains("day-strip")) return rect(0, 512);
+      if (this.classList.contains("day-tab-wrap")) {
+        const index = this.parentElement
+          ? Array.from(this.parentElement.children).indexOf(this)
+          : 0;
+        return rect(index * 174, 164);
+      }
+      return originalGetBoundingClientRect.call(this);
+    });
+}
+
 test("renders every dynamic travel day and traveler", async () => {
   const onSelectDay = vi.fn();
 
@@ -348,6 +375,57 @@ test("keeps a native modal open and focus contained until deletion completes", a
   expect(screen.getByRole("tab", { name: /D1/ })).toHaveFocus();
 });
 
+test("retains the modal and reports a rejected deletion", async () => {
+  const user = userEvent.setup();
+  const onDeleteDay = vi.fn(async (_dayId: string) => {
+    throw new Error("无法删除这个旅行日");
+  });
+  render(
+    <OverviewPage
+      trip={threeDayTrip}
+      selectedDayId="day-2"
+      onSelectDay={() => undefined}
+      onAddDay={() => undefined}
+      onDuplicateDay={() => undefined}
+      onDeleteDay={onDeleteDay}
+      onMoveDay={() => undefined}
+    />,
+  );
+
+  await user.click(screen.getByRole("button", { name: "删除当天" }));
+  await user.click(screen.getByRole("button", { name: "确认删除" }));
+
+  expect(onDeleteDay).toHaveBeenCalledWith("day-2");
+  expect(await screen.findByRole("alert")).toHaveTextContent("无法删除这个旅行日");
+  expect(screen.getByRole("alertdialog", { name: /删除 D2/ })).toHaveAttribute("open");
+  expect(screen.getByRole("alertdialog")).toHaveFocus();
+});
+
+test("does not delete a different day when an external update removes the modal target", async () => {
+  const user = userEvent.setup();
+  const repository = new LocalTripRepository(threeDayTrip);
+  window.history.replaceState({}, "", "/");
+  render(<App repository={repository} tripId={threeDayTrip.id} />);
+
+  await user.click(await screen.findByRole("button", { name: "删除当天" }));
+  const external = await repository.load(threeDayTrip.id);
+  await act(async () => {
+    await repository.save({
+      ...external,
+      startDate: external.days[1]!.date,
+      days: external.days.slice(1),
+    }, external.version);
+  });
+  await user.click(screen.getByRole("button", { name: "确认删除" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("旅行日已不存在");
+  expect(screen.getByRole("alertdialog", { name: /删除 D1/ })).toHaveAttribute("open");
+  await expect(repository.load(threeDayTrip.id)).resolves.toMatchObject({
+    version: 1,
+    days: [{ id: "day-2" }, { id: "day-3" }],
+  });
+});
+
 test("syncs the roving tab stop to controlled selection changes", () => {
   const props = {
     trip: threeDayTrip,
@@ -377,29 +455,7 @@ test("syncs the roving tab stop to controlled selection changes", () => {
 });
 
 test("persists a dnd-kit keyboard reorder by stable day ID", async () => {
-  const originalGetBoundingClientRect = HTMLElement.prototype.getBoundingClientRect;
-  const rect = (left: number, width: number, height = 146) => ({
-    x: left,
-    y: 0,
-    top: 0,
-    right: left + width,
-    bottom: height,
-    left,
-    width,
-    height,
-    toJSON: () => ({}),
-  }) as DOMRect;
-  const layoutSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect")
-    .mockImplementation(function (this: HTMLElement) {
-      if (this.classList.contains("day-strip")) return rect(0, 512);
-      if (this.classList.contains("day-tab-wrap")) {
-        const index = this.parentElement
-          ? Array.from(this.parentElement.children).indexOf(this)
-          : 0;
-        return rect(index * 174, 164);
-      }
-      return originalGetBoundingClientRect.call(this);
-    });
+  const layoutSpy = mockDayStripLayout();
   const user = userEvent.setup();
   const repository = new LocalTripRepository(threeDayTrip);
   window.history.replaceState({}, "", "/");
@@ -424,6 +480,33 @@ test("persists a dnd-kit keyboard reorder by stable day ID", async () => {
         ],
       });
     });
+  } finally {
+    layoutSpy.mockRestore();
+  }
+});
+
+test("keeps the dropped drag handle focused throughout a delayed save", async () => {
+  const layoutSpy = mockDayStripLayout();
+  const user = userEvent.setup();
+  const repository = new DelayedSaveRepository(threeDayTrip);
+  window.history.replaceState({}, "", "/");
+  try {
+    render(<App repository={repository} tripId={threeDayTrip.id} />);
+    const firstHandle = await screen.findByRole("button", { name: "拖动 D1" });
+    firstHandle.focus();
+    await user.keyboard(" ");
+    await waitFor(() => expect(firstHandle).toHaveAttribute("aria-pressed", "true"));
+    await user.keyboard("{ArrowRight}");
+    await screen.findByText(/Draggable item day-1 was moved over droppable area day-2/);
+    await user.keyboard(" ");
+    await waitFor(() => expect(repository.saveRequests).toHaveLength(1));
+
+    expect(screen.getByRole("button", { name: "拖动 D1" })).toHaveFocus();
+    await act(async () => repository.saveRequests[0]!.resolve({
+      ...repository.saveRequests[0]!.next,
+      version: 1,
+    }));
+    expect(screen.getByRole("button", { name: "拖动 D2" })).toHaveFocus();
   } finally {
     layoutSpy.mockRestore();
   }

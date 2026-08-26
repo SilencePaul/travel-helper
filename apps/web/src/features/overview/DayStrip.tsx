@@ -147,8 +147,7 @@ export function DayStrip({
 
   return (
     <DndContext
-      key={disabled ? "disabled" : "enabled"}
-      sensors={disabled ? [] : sensors}
+      sensors={sensors}
       collisionDetection={closestCenter}
       onDragEnd={handleDragEnd}
     >

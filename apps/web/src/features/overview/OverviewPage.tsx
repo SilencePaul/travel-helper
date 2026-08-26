@@ -9,7 +9,7 @@ export type OverviewPageProps = {
   onSelectDay: (dayId: string) => void;
   onAddDay: () => void | Promise<unknown>;
   onDuplicateDay: () => void | Promise<unknown>;
-  onDeleteDay: () => void | Promise<unknown>;
+  onDeleteDay: (dayId: string) => void | Promise<unknown>;
   onMoveDay: (activeDayId: string, overDayId: string) => void | Promise<unknown>;
   isSaving?: boolean;
 };
@@ -26,6 +26,7 @@ export function OverviewPage({
 }: OverviewPageProps) {
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; dayNumber: number }>();
   const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string>();
   const deleteTriggerRef = useRef<HTMLButtonElement>(null);
   const confirmButtonRef = useRef<HTMLButtonElement>(null);
   const cancelButtonRef = useRef<HTMLButtonElement>(null);
@@ -59,6 +60,7 @@ export function OverviewPage({
     if (isDeleting) return;
     closeDeleteDialog();
     setDeleteTarget(undefined);
+    setDeleteError(undefined);
     deleteTriggerRef.current?.focus();
   }
 
@@ -89,14 +91,20 @@ export function OverviewPage({
 
   async function confirmDelete() {
     setIsDeleting(true);
+    setDeleteError(undefined);
     deleteDialogRef.current?.focus();
     try {
-      await onDeleteDay();
+      await onDeleteDay(deleteTarget!.id);
       closeDeleteDialog();
       setDeleteTarget(undefined);
       window.setTimeout(() => {
         document.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]')?.focus();
       }, 0);
+    } catch (error) {
+      setDeleteError(error instanceof Error && error.message
+        ? error.message
+        : "删除失败，请重试");
+      deleteDialogRef.current?.focus();
     } finally {
       setIsDeleting(false);
     }
@@ -133,6 +141,7 @@ export function OverviewPage({
               className="danger-button"
               onClick={() => {
                 setIsDeleting(false);
+                setDeleteError(undefined);
                 if (selectedDay) {
                   setDeleteTarget({ id: selectedDay.id, dayNumber: selectedIndex + 1 });
                 }
@@ -171,6 +180,7 @@ export function OverviewPage({
             <div className="delete-copy">
               <h3 id={deleteTitleId}>删除 D{deleteTarget.dayNumber}</h3>
               <p id={deleteDescriptionId}>确定删除 D{deleteTarget.dayNumber} 吗？</p>
+              {deleteError ? <p role="alert">{deleteError}</p> : null}
             </div>
             <div>
               <button

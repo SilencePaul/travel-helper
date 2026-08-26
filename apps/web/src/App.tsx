@@ -73,15 +73,25 @@ function TripRoutes({ createDayId = () => "day-ui" }: Pick<AppProps, "createDayI
     });
   }
 
-  async function deleteSelectedDay() {
+  async function deleteDay(dayId: string) {
     let adjacentDayId: string | undefined;
+    let rejectionMessage: string | undefined;
     const saved = await mutateTrip((current) => {
-      const selectedIndex = current.days.findIndex((day) => day.id === selectedDayId);
-      if (selectedIndex < 0 || current.days.length <= 1) return undefined;
-      adjacentDayId = current.days[selectedIndex + 1]?.id ?? current.days[selectedIndex - 1]?.id;
-      const result = removeDay(current.days, selectedIndex, current.unscheduledItemIds);
+      const dayIndex = current.days.findIndex((day) => day.id === dayId);
+      if (dayIndex < 0) {
+        rejectionMessage = "旅行日已不存在，请取消并重新选择";
+        return undefined;
+      }
+      if (current.days.length <= 1) {
+        rejectionMessage = "行程至少需要保留一天";
+        return undefined;
+      }
+      adjacentDayId = current.days[dayIndex + 1]?.id ?? current.days[dayIndex - 1]?.id;
+      const result = removeDay(current.days, dayIndex, current.unscheduledItemIds);
       return withDayRange(current, result.days, result.unscheduledItemIds);
     });
+    if (rejectionMessage) throw new Error(rejectionMessage);
+    if (!saved) throw new Error("删除失败，请重试");
     if (saved && adjacentDayId) setRequestedDayId(adjacentDayId);
   }
 
@@ -111,7 +121,7 @@ function TripRoutes({ createDayId = () => "day-ui" }: Pick<AppProps, "createDayI
               }}
               onAddDay={addDay}
               onDuplicateDay={duplicateSelectedDay}
-              onDeleteDay={deleteSelectedDay}
+              onDeleteDay={deleteDay}
               onMoveDay={reorderDays}
               isSaving={syncState === "正在保存"}
             />
