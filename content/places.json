@@ -36,7 +36,7 @@
     "summary": "山顶凌霄阁内的咖啡停靠点，适合在上山或下山前短暂停留。",
     "updatedAt": "2026-08-26T00:00:00.000Z",
     "averagePrice": "HK$45–60 / 人（山顶官方店铺页）",
-    "signatureDishes": ["Caffè Latte（其他香港分店菜单参考）", "Kyoto Latte（其他香港分店菜单参考）"],
+    "signatureDishes": ["山顶门店官方页未公开招牌单品", "到店以现场菜单为准"],
     "twoPersonOrder": "按官方人均区间计算：两人约 HK$90–120；实际以门店菜单为准",
     "hours": "08:00–19:00（周一至周五）；08:00–21:00（周末及公众假期）",
     "queueNote": "官方店铺页未公开排队时间，抵达后以现场为准。",
@@ -49,7 +49,6 @@
     "sources": [
       { "label": "山顶官方：% Arabica 店铺信息", "url": "https://www.thepeak.com.hk/en/dining-and-shopping/dining/hong-kong-day", "kind": "official", "checkedAt": "2026-08-26T00:00:00.000Z" },
       { "label": "% Arabica 香港门店目录", "url": "https://arabicacoffee.hk/locations/locations%26loc%3Dbeijing", "kind": "official", "checkedAt": "2026-08-26T00:00:00.000Z" },
-      { "label": "Foodpanda 菜单（其他香港分店，仅作单品参考）", "url": "https://www.foodpanda.hk/restaurant/udt3/arabica-hong-kong-airside", "kind": "menu", "checkedAt": "2026-08-26T00:00:00.000Z" },
       { "label": "小红书：% Arabica 香港山顶搜索", "url": "https://www.xiaohongshu.com/search_result?keyword=%25%20Arabica%20%E9%A6%99%E6%B8%AF%E5%B1%B1%E9%A1%B6", "kind": "community", "checkedAt": "2026-08-26T00:00:00.000Z" }
     ]
   }
