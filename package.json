@@ -8,7 +8,8 @@
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "test:amap-capability": "node scripts/amap-capability-check.test.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
