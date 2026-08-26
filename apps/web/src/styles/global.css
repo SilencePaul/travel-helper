@@ -128,7 +128,7 @@ h2 { margin: 0; font-size: 24px; }
 .route-map-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
 .route-map-heading h2 { font-size: 22px; }
 .route-points { color: #536c5b; font-size: 13px; }
-.amap-canvas { min-height: 320px; overflow: hidden; border: 1px solid #d9dbd5; border-radius: 20px; background: #e9eee7; }
+.amap-canvas { min-height: 440px; overflow: hidden; border: 1px solid #d9dbd5; border-radius: 20px; background: #e9eee7; }
 .map-fallback { margin: 10px 0 0; color: #6b736c; font-size: 14px; }
 .map-marker-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .map-marker, .timeline-place { border: 0; color: #24594d; background: transparent; text-align: left; }
@@ -148,5 +148,5 @@ h2 { margin: 0; font-size: 24px; }
   .section-heading { align-items: start; flex-direction: column; }
   .day-actions { justify-content: flex-start; }
   .delete-confirmation { align-items: flex-start; flex-direction: column; }
-  .amap-canvas { min-height: 240px; }
+  .amap-canvas { min-height: 320px; }
 }

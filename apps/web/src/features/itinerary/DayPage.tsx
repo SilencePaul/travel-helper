@@ -1,8 +1,10 @@
 import type { Trip } from "@travel/contracts";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AmapRouteMap } from "../map/AmapRouteMap";
-import type { MapInteractionAdapter } from "../map/types";
-import { getPlaces, getRouteSegments } from "./itineraryData";
+import { createAmapRouteService } from "../map/amapRouteService";
+import { loadAmap } from "../map/amapLoader";
+import type { MapInteractionAdapter, RouteService } from "../map/types";
+import { getPlace, getPlaces, getRouteModes } from "./itineraryData";
 import { Timeline } from "./Timeline";
 
 type DayPageProps = {
@@ -10,21 +12,48 @@ type DayPageProps = {
   dayId: string | undefined;
   onBack: () => void;
   mapAdapter?: MapInteractionAdapter;
+  routeService?: RouteService;
 };
 
 const browserMapAdapter: MapInteractionAdapter = { focusPlace: () => undefined };
 
-export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter }: DayPageProps) {
+export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, routeService }: DayPageProps) {
   const dayIndex = trip.days.findIndex((day) => day.id === dayId);
   const day = trip.days[dayIndex];
   const [selectedPlaceId, setSelectedPlaceId] = useState<string>();
   const places = useMemo(() => getPlaces(day?.itemIds ?? []), [day?.itemIds]);
-  const segments = useMemo(() => getRouteSegments(day?.id ?? "", day?.itemIds ?? []), [day?.id, day?.itemIds]);
+  const defaultRouteService = useMemo(() => createAmapRouteService(loadAmap, getPlace), []);
+  const activeRouteService = routeService ?? defaultRouteService;
+  const routeKey = `${day?.id ?? ""}:${places.map((place) => place.id).join(",")}`;
+  const [routeResult, setRouteResult] = useState<{
+    key: string;
+    segments: Awaited<ReturnType<RouteService["getSegments"]>>;
+    error?: string;
+  }>();
+  const segments = routeResult?.key === routeKey ? routeResult.segments : [];
+  const routeError = routeResult?.key === routeKey ? routeResult.error : undefined;
   const selectPlace = useCallback((placeId: string) => {
     setSelectedPlaceId(placeId);
     mapAdapter.focusPlace(placeId);
     document.getElementById(`timeline-place-${placeId}`)?.scrollIntoView?.({ behavior: "smooth", block: "nearest" });
   }, [mapAdapter]);
+
+  useEffect(() => {
+    if (!day || places.length < 2) return;
+    let active = true;
+    void activeRouteService.getSegments({
+      dayId: day.id,
+      placeIds: places.map((place) => place.id),
+      modeByLeg: getRouteModes(places.map((place) => place.id)),
+    }).then((nextSegments) => {
+      if (active) setRouteResult({ key: routeKey, segments: nextSegments });
+    }).catch(() => {
+      if (active) {
+        setRouteResult({ key: routeKey, segments: [], error: "暂未取得高德道路路径，未绘制直线替代路线。" });
+      }
+    });
+    return () => { active = false; };
+  }, [activeRouteService, day, places, routeKey]);
 
   if (!day) {
     return (
@@ -52,6 +81,7 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter }:
         selectedPlaceId={selectedPlaceId}
         onSelectPlace={selectPlace}
       />
+      {routeError ? <p className="map-fallback" role="status">{routeError}</p> : null}
       <section aria-labelledby="timeline-heading">
         <h2 id="timeline-heading">当天行程</h2>
         <Timeline

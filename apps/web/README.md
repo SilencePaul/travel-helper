@@ -9,7 +9,7 @@ pnpm install
 pnpm dev
 ```
 
-Copy `apps/web/.env.example` to `apps/web/.env` for client configuration. Keep the server-only AMap service key in the root `.env`.
+Copy the root `.env.example` to the ignored root `.env.local`. Vite is configured with `envDir: "../.."`, so the web app reads `VITE_AMAP_JS_KEY` and `VITE_AMAP_SECURITY_CODE` from that one location. `AMAP_WEB_SERVICE_KEY` stays server-only and must never be prefixed with `VITE_`.
 
 ## Validation
 

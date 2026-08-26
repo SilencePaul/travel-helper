@@ -9,6 +9,7 @@ import {
   type Trip,
   type TripRepository,
 } from "@travel/contracts";
+import type { RouteService } from "./features/map/types";
 import { TripProvider } from "./app/TripProvider";
 import { useTrip } from "./app/tripContext";
 import { DayPage } from "./features/itinerary/DayPage";
@@ -19,6 +20,7 @@ type AppProps = {
   repository?: TripRepository;
   createDayId?: () => string;
   tripId?: string;
+  routeService?: RouteService;
 };
 
 function uniqueDayId(days: TravelDay[], requestedId: string) {
@@ -43,7 +45,7 @@ function withDayRange(trip: Trip, days: TravelDay[], unscheduledItemIds = trip.u
   };
 }
 
-function TripRoutes({ createDayId = () => "day-ui" }: Pick<AppProps, "createDayId">) {
+function TripRoutes({ createDayId = () => "day-ui", routeService }: Pick<AppProps, "createDayId" | "routeService">) {
   const { trip, mutateTrip, syncState } = useTrip();
   const navigate = useNavigate();
   const [requestedDayId, setRequestedDayId] = useState<string>();
@@ -132,6 +134,7 @@ function TripRoutes({ createDayId = () => "day-ui" }: Pick<AppProps, "createDayI
           element={
             <DayRoute
               trip={trip}
+              routeService={routeService}
               onBack={(dayId) => {
                 setRequestedDayId(dayId);
                 navigate("/");
@@ -145,16 +148,16 @@ function TripRoutes({ createDayId = () => "day-ui" }: Pick<AppProps, "createDayI
   );
 }
 
-function DayRoute({ trip, onBack }: { trip: Trip; onBack: (dayId: string | undefined) => void }) {
+function DayRoute({ trip, onBack, routeService }: { trip: Trip; onBack: (dayId: string | undefined) => void; routeService?: RouteService }) {
   const { dayId } = useParams();
-  return <DayPage trip={trip} dayId={dayId} onBack={() => onBack(dayId)} />;
+  return <DayPage trip={trip} dayId={dayId} onBack={() => onBack(dayId)} routeService={routeService} />;
 }
 
-export default function App({ repository, createDayId, tripId }: AppProps) {
+export default function App({ repository, createDayId, tripId, routeService }: AppProps) {
   return (
     <TripProvider repository={repository} tripId={tripId}>
       <BrowserRouter>
-        <TripRoutes createDayId={createDayId} />
+        <TripRoutes createDayId={createDayId} routeService={routeService} />
       </BrowserRouter>
     </TripProvider>
   );

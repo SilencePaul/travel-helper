@@ -13,14 +13,19 @@ test("opens a day from the dynamic overview", async ({ page }) => {
 });
 
 test("shows road-following route points and syncs a map marker to its timeline card", async ({ page }) => {
-  await page.goto("/day/day-2026-10-05");
+  await page.goto("/day/day-2026-10-05?__testRouteMap=1");
 
   const routePoints = page.locator("[data-route-points]");
   await expect(routePoints).toHaveAttribute("data-route-points", /[3-9]|[1-9]\d+/);
 
-  const timelinePlace = page.getByRole("button", { name: "太平山顶", exact: true });
-  await page.getByRole("button", { name: "在地图中定位 太平山顶" }).click();
+  const timelinePlace = page.getByRole("button", { name: "天星码头", exact: true });
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await expect(timelinePlace).not.toBeInViewport();
+  await page.getByRole("button", { name: "在地图中定位 天星码头" }).evaluate((marker) => {
+    (marker as HTMLButtonElement).click();
+  });
   await expect(timelinePlace).toHaveAttribute("aria-current", "location");
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
   await expect(timelinePlace).toBeInViewport();
 });
 

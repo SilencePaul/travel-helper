@@ -36,4 +36,6 @@ export type MapInteractionAdapter = {
 export type TimelinePlace = Coordinate & {
   id: string;
   name: string;
+  /** AMap POI ID returned with the GCJ-02 location used for routing. */
+  amapPoiId: string;
 };

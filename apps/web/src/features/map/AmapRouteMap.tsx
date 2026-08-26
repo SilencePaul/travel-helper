@@ -12,6 +12,7 @@ type AmapRouteMapProps = {
 type AMapInstance = {
   destroy: () => void;
   setFitView: () => void;
+  setCenter: (center: [number, number]) => void;
 };
 
 export function AmapRouteMap({ places, segments, selectedPlaceId, onSelectPlace }: AmapRouteMapProps) {
@@ -56,6 +57,11 @@ export function AmapRouteMap({ places, segments, selectedPlaceId, onSelectPlace 
       mapRef.current = undefined;
     };
   }, [completeSegments, onSelectPlace, places]);
+
+  useEffect(() => {
+    const selectedPlace = places.find((place) => place.id === selectedPlaceId);
+    if (selectedPlace) mapRef.current?.setCenter([selectedPlace.lng, selectedPlace.lat]);
+  }, [places, selectedPlaceId]);
 
   return (
     <section className="route-map" aria-labelledby="route-map-heading">
