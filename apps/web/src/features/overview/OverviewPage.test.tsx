@@ -224,7 +224,8 @@ test("disables every mutation control and exposes failure while a save is pendin
   expect(screen.getByRole("button", { name: "复制当天" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "删除当天" })).toBeDisabled();
   for (const handle of screen.getAllByRole("button", { name: /拖动 D\d/ })) {
-    expect(handle).toBeDisabled();
+    expect(handle).toBeEnabled();
+    expect(handle).toHaveAttribute("aria-disabled", "true");
   }
 
   await user.click(screen.getByRole("button", { name: "新增一天" }));
@@ -501,6 +502,11 @@ test("keeps the dropped drag handle focused throughout a delayed save", async ()
     await user.keyboard(" ");
     await waitFor(() => expect(repository.saveRequests).toHaveLength(1));
 
+    expect(screen.getByRole("button", { name: "拖动 D1" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "拖动 D1" })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
     expect(screen.getByRole("button", { name: "拖动 D1" })).toHaveFocus();
     await act(async () => repository.saveRequests[0]!.resolve({
       ...repository.saveRequests[0]!.next,

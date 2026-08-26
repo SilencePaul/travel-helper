@@ -14,6 +14,7 @@ import {
   useSortable,
 } from "@dnd-kit/sortable";
 import {
+  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -39,6 +40,7 @@ type SortableDayProps = {
   onSelectDay: (dayId: string) => void;
   onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
   tabRef: RefCallback<HTMLButtonElement>;
+  handleRef: RefCallback<HTMLButtonElement>;
   disabled: boolean;
 };
 
@@ -50,6 +52,7 @@ function SortableDay({
   onSelectDay,
   onKeyDown,
   tabRef,
+  handleRef,
   disabled,
 }: SortableDayProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
@@ -82,12 +85,13 @@ function SortableDay({
         <small>待预报</small>
       </button>
       <button
+        ref={handleRef}
         type="button"
         className="drag-handle"
         aria-label={`拖动 D${dayNumber}`}
         {...attributes}
-        {...listeners}
-        disabled={disabled}
+        {...(disabled ? {} : listeners)}
+        aria-disabled={disabled}
       >
         拖动
       </button>
@@ -103,6 +107,8 @@ export function DayStrip({
   disabled = false,
 }: DayStripProps) {
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const handleRefs = useRef(new Map<string, HTMLButtonElement>());
+  const lastDroppedDayIdRef = useRef<string | undefined>(undefined);
   const [rovingState, setRovingState] = useState({
     selectedDayId,
     requestedTabStopId: selectedDayId,
@@ -124,9 +130,18 @@ export function DayStrip({
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
+  useLayoutEffect(() => {
+    const dayId = lastDroppedDayIdRef.current;
+    if (!dayId) return;
+    handleRefs.current.get(dayId)?.focus();
+    if (!disabled) lastDroppedDayIdRef.current = undefined;
+  }, [days, disabled]);
+
   function handleDragEnd(event: DragEndEvent) {
     if (!disabled && event.over && event.active.id !== event.over.id) {
-      onMoveDay(String(event.active.id), String(event.over.id));
+      const activeDayId = String(event.active.id);
+      lastDroppedDayIdRef.current = activeDayId;
+      onMoveDay(activeDayId, String(event.over.id));
     }
   }
 
@@ -164,6 +179,10 @@ export function DayStrip({
               onKeyDown={(event) => handleTabKeyDown(index, event)}
               tabRef={(element) => {
                 tabRefs.current[index] = element;
+              }}
+              handleRef={(element) => {
+                if (element) handleRefs.current.set(day.id, element);
+                else handleRefs.current.delete(day.id);
               }}
               disabled={disabled}
             />

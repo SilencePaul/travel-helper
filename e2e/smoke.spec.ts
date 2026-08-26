@@ -49,3 +49,59 @@ test("reorders stable day IDs with the keyboard drag handle", async ({ page }) =
     "day-tab-day-2026-10-08",
   ]);
 });
+
+test("keeps the drag handle focused and inert during a delayed save", async ({ page }) => {
+  await page.goto("/?__testSaveDelayMs=2000");
+  const firstHandle = page.locator("#day-tab-day-2026-10-03 + .drag-handle");
+  await firstHandle.focus();
+  await page.keyboard.press("Space");
+  await expect(firstHandle).toHaveAttribute("aria-pressed", "true");
+  await page.waitForTimeout(20);
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByRole("status").filter({
+    hasText: "Draggable item day-2026-10-03 was moved over droppable area day-2026-10-04",
+  })).toBeVisible();
+  await page.keyboard.press("Space");
+
+  await expect.poll(() => firstHandle.evaluate((handle) => ({
+    syncState: document.querySelector(".sync-bar")?.textContent,
+    focused: document.activeElement === handle,
+    nativeDisabled: (handle as HTMLButtonElement).disabled,
+    ariaDisabled: handle.getAttribute("aria-disabled"),
+  })), { timeout: 1500 }).toEqual({
+    syncState: "正在保存",
+    focused: true,
+    nativeDisabled: false,
+    ariaDisabled: "true",
+  });
+
+  await page.keyboard.press("Space");
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("Space");
+  await expect(firstHandle).not.toHaveAttribute("aria-pressed", "true");
+
+  const source = await firstHandle.boundingBox();
+  const target = await page.locator("#day-tab-day-2026-10-04 + .drag-handle").boundingBox();
+  expect(source).not.toBeNull();
+  expect(target).not.toBeNull();
+  await page.mouse.move(source!.x + source!.width / 2, source!.y + source!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(target!.x + target!.width / 2, target!.y + target!.height / 2);
+  await expect(firstHandle).not.toHaveAttribute("aria-pressed", "true");
+  await page.mouse.up();
+  await expect(page.getByText("正在保存")).toBeVisible();
+
+  await expect(page.getByText("正在使用本地计划")).toBeVisible();
+  await expect(firstHandle).toHaveAccessibleName("拖动 D2");
+  await expect(firstHandle).toBeFocused();
+  await expect.poll(async () =>
+    page.getByRole("tab").evaluateAll((tabs) => tabs.map((tab) => tab.id)),
+  ).toEqual([
+    "day-tab-day-2026-10-04",
+    "day-tab-day-2026-10-03",
+    "day-tab-day-2026-10-05",
+    "day-tab-day-2026-10-06",
+    "day-tab-day-2026-10-07",
+    "day-tab-day-2026-10-08",
+  ]);
+});
