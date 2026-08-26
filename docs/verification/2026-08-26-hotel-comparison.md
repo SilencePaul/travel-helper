@@ -15,6 +15,6 @@
 
 ## 验证
 
-- `pnpm test`：合同与 Web 单测共 70 项通过，另有高德能力和 POI 验证通过。
+- `pnpm test`：合同与 Web 单测共 73 项通过，另有高德能力和 POI 验证通过。
 - `pnpm typecheck && pnpm lint && pnpm build`：通过。
 - `pnpm e2e`：18 通过、4 个跨设备定向用例按设计跳过；酒店用例在 Chromium 与 iPhone 15 上均通过，覆盖选择第二候选、标记联动、6 日扩展为 8 日后住宿晚数和参考总额重算。

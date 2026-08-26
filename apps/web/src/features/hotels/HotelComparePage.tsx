@@ -1,5 +1,5 @@
 import { scoreHotels, stayNightsForHotel, type Trip } from "@travel/contracts";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { HotelCard } from "./HotelCard";
 import { hongKongHotels } from "./hotelData";
 import { deriveHotelCommutes } from "./hotelCommutes";
@@ -32,6 +32,7 @@ export function HotelComparePage({ trip, onSelectHotel, onBack, routeService }: 
   }), []);
   const activeRouteService = routeService ?? defaultRouteService;
   const [commutesByHotel, setCommutesByHotel] = useState<Record<string, import("@travel/contracts").HotelCommute[]>>({});
+  const itinerarySignature = trip.days.filter((day) => day.city.includes("香港")).map((day) => `${day.id}:${day.date}:${day.itemIds.join(",")}`).join("|");
   useEffect(() => {
     /* oxlint-disable react/set-state-in-effect -- route data belongs to the active trip and must clear before its replacement resolves. */
     let active = true;
@@ -39,17 +40,18 @@ export function HotelComparePage({ trip, onSelectHotel, onBack, routeService }: 
     /* oxlint-enable react/set-state-in-effect */
     void Promise.all(hongKongHotels.map(async (hotel) => [hotel.id, await deriveHotelCommutes(trip, hotel, activeRouteService)] as const)).then((entries) => { if (active) setCommutesByHotel(Object.fromEntries(entries)); });
     return () => { active = false; };
-  }, [activeRouteService, trip]);
+  // oxlint-disable-next-line react-hooks/exhaustive-deps -- itinerarySignature intentionally avoids refetching when only selection/version changes.
+  }, [activeRouteService, itinerarySignature]);
   const scoredHotels = useMemo(() => scoreHotels(hongKongHotels, { nights, commutesByHotel }), [commutesByHotel, nights]);
   const selectedHotel = scoredHotels.find((hotel) => hotel.id === highlightedId) ?? scoredHotels[0];
   const selectedCommutes = selectedHotel ? commutesByHotel[selectedHotel.id] : undefined;
   const allRoutesConfirmed = Boolean(selectedCommutes?.length) && selectedCommutes!.every((item) => item.status === "confirmed");
 
-  async function selectHotel(hotelId: string) {
+  const selectHotel = useCallback(async (hotelId: string) => {
     const previousId = highlightedId;
     setHighlightedId(hotelId);
     try { await onSelectHotel(hotelId); } catch { setHighlightedId(previousId); }
-  }
+  }, [highlightedId, onSelectHotel]);
 
   return (
     <main className="hotel-compare narrow-page">

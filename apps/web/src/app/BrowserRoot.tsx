@@ -24,7 +24,11 @@ function createBrowserTestRepository(): TripRepository | undefined {
 function createBrowserTestRouteService(): RouteService | undefined {
   if (!import.meta.env.DEV || new URLSearchParams(window.location.search).get("__testRouteMap") !== "1") return undefined;
   return {
-    async getSegments() {
+    async getSegments(input) {
+      if (input.dayId.includes(":hotel")) {
+        const isPark = input.placeIds.includes("park-hotel-hong-kong");
+        return [{ id: `${input.dayId}-${isPark ? "park" : "kowloon"}`, fromPlaceId: input.placeIds[0]!, toPlaceId: input.placeIds[1]!, mode: "transit", distanceMeters: isPark ? 2200 : 1300, durationMinutes: isPark ? 22 : 13, summary: "测试高德酒店路线", path: [] }];
+      }
       return [
         {
           id: "test-peak-central",

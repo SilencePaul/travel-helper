@@ -192,7 +192,7 @@ h2 { margin: 0; font-size: 24px; }
 .hotel-map h2, .hotel-commute h2 { font-size: 21px; }
 .hotel-map p, .hotel-commute p { color: #536057; line-height: 1.55; }
 .hotel-amap-canvas { min-height: 220px; overflow: hidden; border-radius: 14px; background: #e9eee7; }
-.hotel-amap-marker { display: inline-block; padding: 6px 9px; border: 1px solid #31594d; border-radius: 999px; color: #31594d; background: #faf9f5; font-size: 12px; white-space: nowrap; box-shadow: 0 2px 8px rgb(35 49 42 / 20%); }
+.hotel-amap-marker { display: block; width: 14px; height: 14px; border: 2px solid #faf9f5; border-radius: 50%; background: #31594d; box-shadow: 0 2px 8px rgb(35 49 42 / 35%); }
 .hotel-amap-marker.is-selected { color: #fff; background: #24594d; outline: 3px solid #b6d0bf; }
 .hotel-map-stage::before { position: absolute; inset: 50% -10% auto; height: 2px; background: rgb(49 89 77 / 35%); content: ""; transform: rotate(-12deg); }
 .hotel-commute dl, .hotel-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 16px 0; }

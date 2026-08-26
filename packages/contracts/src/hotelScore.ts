@@ -35,10 +35,10 @@ export function scoreHotels(hotels: Hotel[], { nights, commutesByHotel = {} }: {
     estimatedSteps,
     priceScore: minimumPrice / stayTotalMinor,
     commuteComplete: commutes.length > 0 && commutes.every((commute) => commute.status === "confirmed"),
-    commuteScore: minimumCommute !== undefined && commutes.length > 0 && commutes.every((commute) => commute.status === "confirmed") ? minimumCommute / totalCommuteMinutes : undefined,
+    commuteScore: minimumCommute !== undefined && minimumCommute > 0 && totalCommuteMinutes > 0 && commutes.length > 0 && commutes.every((commute) => commute.status === "confirmed") ? minimumCommute / totalCommuteMinutes : undefined,
     badges: [
       ...(stayTotalMinor === minimumPrice ? ["总价最低"] : []),
-      ...(minimumCommute !== undefined && commutes.length > 0 && commutes.every((commute) => commute.status === "confirmed") && totalCommuteMinutes === minimumCommute ? ["最省体力"] : []),
+      ...(minimumCommute !== undefined && minimumCommute > 0 && commutes.length > 0 && commutes.every((commute) => commute.status === "confirmed") && totalCommuteMinutes === minimumCommute ? ["最省体力"] : []),
     ],
   }));
 }
