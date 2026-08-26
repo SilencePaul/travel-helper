@@ -138,7 +138,7 @@ function TripRoutes({ createDayId = () => "day-ui", routeService }: Pick<AppProp
             />
           }
         />
-        <Route path="/hotels" element={<HotelComparePage trip={trip} onSelectHotel={selectHotel} onBack={() => navigate("/")} />} />
+        <Route path="/hotels" element={<HotelComparePage trip={trip} routeService={routeService} onSelectHotel={selectHotel} onBack={() => navigate("/")} />} />
         <Route
           path="/day/:dayId"
           element={

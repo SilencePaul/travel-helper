@@ -16,7 +16,7 @@ const nearHotel: Hotel = {
   roomArea: "18–48 平方米", breakfast: "以订单页为准", cancellation: "以订单页为准", stationWalk: "步行约 3 分钟", strengths: ["近景点"], drawbacks: ["房间较紧凑"],
 };
 const cheapFarHotel: Hotel = { ...nearHotel, id: "far", name: "远酒店", nightlyPrice: { ...nearHotel.nightlyPrice, snapshotTotalMinor: 270000 } };
-const commutes = { near: [{ date: "2026-10-04", firstPlace: "码头", lastPlace: "山顶", outboundMinutes: 12, returnMinutes: 15, estimatedSteps: 2800 }], far: [{ date: "2026-10-04", firstPlace: "码头", lastPlace: "山顶", outboundMinutes: 35, returnMinutes: 40, estimatedSteps: 6200 }] };
+const commutes = { near: [{ date: "2026-10-04", firstPlace: "码头", lastPlace: "山顶", outboundMinutes: 12, returnMinutes: 15, distanceMeters: 2800, status: "confirmed" as const }], far: [{ date: "2026-10-04", firstPlace: "码头", lastPlace: "山顶", outboundMinutes: 35, returnMinutes: 40, distanceMeters: 6200, status: "confirmed" as const }] };
 
 describe("scoreHotels", () => {
   it("labels the hotel with the lowest total commute as most energy-saving", () => {

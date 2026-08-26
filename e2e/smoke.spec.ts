@@ -205,6 +205,6 @@ test("selects a map-linked hotel and recalculates its stay after extending Hong 
   await page.getByRole("button", { name: "选择此酒店" }).last().click();
   await expect(page.getByRole("button", { name: "在地图中定位 香港百乐酒店" })).toHaveAttribute("aria-current", "location");
   await expect(page.getByTestId("hotel-total")).toHaveText("CNY 4532.17");
-  await expect(page.getByTestId("hotel-commute")).not.toHaveText("0 分钟");
-  await expect(page.getByTestId("hotel-steps")).not.toHaveText("0 步");
+  await expect(page.getByTestId("hotel-commute")).toHaveText("待高德路线确认");
+  await expect(page.getByTestId("hotel-steps")).toHaveText("待高德路线确认");
 });

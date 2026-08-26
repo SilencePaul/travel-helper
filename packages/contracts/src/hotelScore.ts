@@ -14,14 +14,14 @@ export function stayNightsForHotel(trip: Trip, hotelId: string) {
   return trip.days.filter((day) => day.hotelId === hotelId).length;
 }
 
-export type HotelCommute = { date: string; firstPlace: string; lastPlace: string; outboundMinutes: number; returnMinutes: number; estimatedSteps: number };
+export type HotelCommute = { date: string; firstPlace: string; lastPlace: string; outboundMinutes: number; returnMinutes: number; distanceMeters: number; sourceCheckedAt?: string; status: "confirmed" | "pending" };
 
 export function scoreHotels(hotels: Hotel[], { nights, commutesByHotel = {} }: { nights: number; commutesByHotel?: Record<string, HotelCommute[]> }): ScoredHotel[] {
   const raw = hotels.map((hotel) => ({
     hotel,
     stayTotalMinor: Math.round(hotel.nightlyPrice.snapshotTotalMinor * nights / hotel.nightlyPrice.snapshotNights),
     totalCommuteMinutes: (commutesByHotel[hotel.id] ?? []).reduce((total, day) => total + day.outboundMinutes + day.returnMinutes, 0),
-    estimatedSteps: (commutesByHotel[hotel.id] ?? []).reduce((total, day) => total + day.estimatedSteps, 0),
+    estimatedSteps: 0,
   }));
   const minimumPrice = Math.min(...raw.map((item) => item.stayTotalMinor));
   const minimumCommute = Math.min(...raw.map((item) => item.totalCommuteMinutes));

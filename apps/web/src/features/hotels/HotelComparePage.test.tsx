@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { Trip } from "@travel/contracts";
@@ -9,7 +9,7 @@ const trip: Trip = {
   days: [
     { id: "d1", date: "2026-10-03", city: "深圳", itemIds: [] },
     { id: "d2", date: "2026-10-04", city: "香港", itemIds: [] },
-    { id: "d3", date: "2026-10-05", city: "香港", itemIds: [] },
+    { id: "d3", date: "2026-10-05", city: "香港", itemIds: ["peak", "star-ferry"] },
     { id: "d4", date: "2026-10-06", city: "澳门", itemIds: [] },
     { id: "d5", date: "2026-10-07", city: "澳门 / 珠海", itemIds: [] },
     { id: "d6", date: "2026-10-08", city: "珠海 / 北京", itemIds: [] },
@@ -19,8 +19,9 @@ const trip: Trip = {
 describe("HotelComparePage", () => {
   it("selects a hotel, synchronizes the marker, and exposes sourced snapshot caveats", async () => {
     const onSelectHotel = vi.fn();
+    const routeService = { getSegments: vi.fn(async () => [{ id: "provider", fromPlaceId: "a", toPlaceId: "b", mode: "transit" as const, distanceMeters: 1200, durationMinutes: 18, summary: "高德公共交通路线", path: [] }]) };
     const user = userEvent.setup();
-    render(<HotelComparePage trip={trip} onSelectHotel={onSelectHotel} onBack={() => undefined} />);
+    render(<HotelComparePage trip={trip} routeService={routeService} onSelectHotel={onSelectHotel} onBack={() => undefined} />);
 
     expect(screen.getByTestId("hotel-nights")).toHaveTextContent("2 晚");
     await user.click(screen.getAllByRole("button", { name: "选择此酒店" }).at(-1)!);
@@ -28,8 +29,15 @@ describe("HotelComparePage", () => {
     expect(onSelectHotel).toHaveBeenCalledWith("park-hotel-hong-kong");
     expect(screen.getByRole("button", { name: "在地图中定位 香港百乐酒店" })).toHaveAttribute("aria-current", "location");
     expect(screen.getByTestId("hotel-total")).toHaveTextContent("CNY 2266.09");
+    await waitFor(() => expect(screen.getByText(/太平山顶 18 分钟/)).toBeVisible());
+    expect(screen.getByTestId("hotel-commute")).toHaveTextContent("待高德路线确认");
     expect(screen.getAllByText(/非 2026 十一实时可订价/)).toHaveLength(2);
     expect(screen.getAllByRole("link", { name: /Booking\.com/ })[1]).toHaveAttribute("href", "https://www.booking.com/hotel/hk/parkhotel.zh-tw.html");
+  });
+
+  it("does not invent a commute when AMap has no response", async () => {
+    render(<HotelComparePage trip={trip} routeService={{ getSegments: vi.fn(async () => { throw new Error("unavailable"); }) }} onSelectHotel={() => undefined} onBack={() => undefined} />);
+    await waitFor(() => expect(screen.getByTestId("hotel-commute")).toHaveTextContent("待高德路线确认"));
   });
 
   it("recalculates selected stay nights when the trip has more assigned hotel days", () => {

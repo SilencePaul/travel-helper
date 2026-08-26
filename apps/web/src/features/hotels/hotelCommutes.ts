@@ -1,26 +1,27 @@
 import type { Hotel, HotelCommute, Trip } from "@travel/contracts";
 import { getPlaces } from "../itinerary/itineraryData";
+import type { RouteService, TimelinePlace } from "../map/types";
 
-function distanceKm(a: { lng: number; lat: number }, b: { lng: number; lat: number }) {
-  const latScale = 111;
-  const lngScale = 111 * Math.cos(((a.lat + b.lat) / 2) * Math.PI / 180);
-  return Math.hypot((a.lng - b.lng) * lngScale, (a.lat - b.lat) * latScale);
-}
-
-export function deriveHotelCommutes(trip: Trip, hotel: Hotel): HotelCommute[] {
-  return trip.days.filter((day) => day.city.includes("香港")).map((day) => {
+export async function deriveHotelCommutes(trip: Trip, hotel: Hotel, routeService: RouteService): Promise<HotelCommute[]> {
+  return Promise.all(trip.days.filter((day) => day.city.includes("香港")).map(async (day) => {
     const places = getPlaces(day.itemIds);
     const first = places[0];
     const last = places.at(-1);
-    const outboundKm = first ? distanceKm(hotel.coordinate, first) : 0;
-    const returnKm = last ? distanceKm(last, hotel.coordinate) : 0;
-    return {
+    const pending = (): HotelCommute => ({
       date: day.date,
       firstPlace: first?.name ?? "当天首站待安排",
       lastPlace: last?.name ?? "当天末站待安排",
-      outboundMinutes: first ? Math.max(1, Math.round(outboundKm * 7)) : 0,
-      returnMinutes: last ? Math.max(1, Math.round(returnKm * 7)) : 0,
-      estimatedSteps: Math.round((outboundKm + returnKm) * 1400),
-    };
-  });
+      outboundMinutes: 0, returnMinutes: 0, distanceMeters: 0, status: "pending",
+    });
+    if (!first || !last) return pending();
+    const hotelPlace: TimelinePlace = { id: hotel.id, name: hotel.name, amapPoiId: hotel.id, ...hotel.coordinate };
+    try {
+      const [outbound, inbound] = await Promise.all([
+        routeService.getSegments({ dayId: `${day.id}:hotel-out`, placeIds: [hotelPlace.id, first.id], modeByLeg: ["transit"] }),
+        routeService.getSegments({ dayId: `${day.id}:hotel-back`, placeIds: [last.id, hotelPlace.id], modeByLeg: ["transit"] }),
+      ]);
+      if (!outbound[0] || !inbound[0]) return pending();
+      return { date: day.date, firstPlace: first.name, lastPlace: last.name, outboundMinutes: outbound[0].durationMinutes, returnMinutes: inbound[0].durationMinutes, distanceMeters: outbound[0].distanceMeters + inbound[0].distanceMeters, sourceCheckedAt: new Date().toISOString(), status: "confirmed" };
+    } catch { return pending(); }
+  }));
 }
