@@ -12,6 +12,18 @@ test("opens a day from the dynamic overview", async ({ page }) => {
   await expect(page).toHaveURL(/day\/day-2026-10-05/);
 });
 
+test("shows road-following route points and syncs a map marker to its timeline card", async ({ page }) => {
+  await page.goto("/day/day-2026-10-05");
+
+  const routePoints = page.locator("[data-route-points]");
+  await expect(routePoints).toHaveAttribute("data-route-points", /[3-9]|[1-9]\d+/);
+
+  const timelinePlace = page.getByRole("button", { name: "太平山顶", exact: true });
+  await page.getByRole("button", { name: "在地图中定位 太平山顶" }).click();
+  await expect(timelinePlace).toHaveAttribute("aria-current", "location");
+  await expect(timelinePlace).toBeInViewport();
+});
+
 test("opens deletion in the browser modal layer", async ({ page }) => {
   await page.goto("/");
   const trigger = page.getByRole("button", { name: "删除当天" });
