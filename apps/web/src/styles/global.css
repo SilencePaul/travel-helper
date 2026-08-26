@@ -87,6 +87,7 @@ h2 { margin: 0; font-size: 24px; }
   font-size: 11px;
   touch-action: none;
 }
+.drag-handle[aria-disabled="true"] { cursor: not-allowed; opacity: 0.45; }
 
 .selected-day, .unscheduled, .delete-confirmation, .day-page section {
   margin-top: 18px;

@@ -64,11 +64,15 @@ test("keeps the drag handle focused and inert during a delayed save", async ({ p
   await page.keyboard.press("Space");
 
   await expect.poll(() => firstHandle.evaluate((handle) => ({
+    opacity: getComputedStyle(handle).opacity,
+    cursor: getComputedStyle(handle).cursor,
     syncState: document.querySelector(".sync-bar")?.textContent,
     focused: document.activeElement === handle,
     nativeDisabled: (handle as HTMLButtonElement).disabled,
     ariaDisabled: handle.getAttribute("aria-disabled"),
   })), { timeout: 1500 }).toEqual({
+    opacity: "0.45",
+    cursor: "not-allowed",
     syncState: "正在保存",
     focused: true,
     nativeDisabled: false,
