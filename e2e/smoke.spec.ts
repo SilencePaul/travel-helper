@@ -134,6 +134,8 @@ test("restaurant drawer shows sourced details and restores focus on desktop", as
   await card.click();
   const drawer = page.getByRole("dialog", { name: "%Arabica(香港凌霄阁店)" });
   await expect(drawer).toBeVisible();
+  const drawerBox = await drawer.boundingBox();
+  expect(drawerBox?.x + drawerBox!.width).toBeCloseTo(page.viewportSize()!.width, 0);
   await expect(drawer.getByText(/HK\$45–60/)).toBeVisible();
   await expect(drawer.getByRole("link", { name: "小红书搜索" })).toBeVisible();
   await expect(drawer.getByRole("link", { name: "打开高德导航" })).toHaveAttribute("href", /uri\.amap\.com/);

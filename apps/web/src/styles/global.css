@@ -142,6 +142,7 @@ h2 { margin: 0; font-size: 24px; }
   position: fixed;
   z-index: 30;
   top: 0;
+  left: auto;
   right: 0;
   display: flex;
   width: min(42vw, 560px);
