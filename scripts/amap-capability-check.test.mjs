@@ -18,4 +18,12 @@ const formatted = formatAmapResult(
 assert.equal(formatted, "walking | Beijing | FAIL | UNKNOWN_RESPONSE");
 assert.doesNotMatch(formatted, /https|key|never-print-this/i);
 
+const uppercaseCanary = "SENSITIVEKEYCANARY";
+const uppercaseFormatted = formatAmapResult(
+  { capability: "walking", city: "Beijing" },
+  classifyAmapResponse({ status: "0", info: uppercaseCanary })
+);
+assert.equal(uppercaseFormatted, "walking | Beijing | FAIL | UNKNOWN_RESPONSE");
+assert.doesNotMatch(uppercaseFormatted, /SENSITIVEKEYCANARY/);
+
 console.log("amap capability classifier: PASS");

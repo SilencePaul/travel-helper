@@ -1,6 +1,20 @@
 import { fileURLToPath } from "node:url";
 
 const timeoutMs = 10_000;
+const safeInfoCodes = new Set([
+  "AMAP_WEB_SERVICE_KEY_MISSING",
+  "CUQPS_HAS_EXCEEDED_THE_LIMIT",
+  "DAILY_QUERY_OVER_LIMIT",
+  "INSUFFICIENT_PRIVILEGES",
+  "INVALID_USER_KEY",
+  "NETWORK_ERROR",
+  "SERVICE_NOT_AVAILABLE",
+  "TIMEOUT",
+  "UNKNOWN_RESPONSE",
+  "USERKEY_EXPIRED",
+  "USERKEY_PLAT_NOMATCH",
+  "USERKEY_RECYCLED"
+]);
 
 const checks = [
   {
@@ -41,7 +55,7 @@ export function classifyAmapResponse(body) {
 }
 
 export function sanitizeAmapInfo(info) {
-  return typeof info === "string" && /^[A-Z0-9_]+$/.test(info) ? info : "UNKNOWN_RESPONSE";
+  return typeof info === "string" && safeInfoCodes.has(info) ? info : "UNKNOWN_RESPONSE";
 }
 
 export function formatAmapResult(check, result) {
