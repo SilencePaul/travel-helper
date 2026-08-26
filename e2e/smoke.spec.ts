@@ -137,8 +137,13 @@ test("restaurant drawer shows sourced details and restores focus on desktop", as
   await expect(drawer.getByText(/HK\$45–60/)).toBeVisible();
   await expect(drawer.getByRole("link", { name: "小红书搜索" })).toBeVisible();
   await expect(drawer.getByRole("link", { name: "打开高德导航" })).toHaveAttribute("href", /uri\.amap\.com/);
+  await expect(page.locator("#root")).toHaveAttribute("inert", "");
+  await expect(page.locator("body")).toHaveCSS("overflow", "hidden");
+  await expect(page.locator(".back-button").click({ timeout: 300 })).rejects.toThrow();
   await page.keyboard.press("Escape");
   await expect(drawer).toBeHidden();
+  await expect(page.locator("#root")).not.toHaveAttribute("inert", "");
+  await expect(page.locator("body")).toHaveCSS("overflow", "visible");
   await expect(card).toBeFocused();
 });
 
@@ -152,4 +157,16 @@ test("attraction drawer uses partial then full mobile states", async ({ page }, 
   await drawer.getByRole("button", { name: "展开详情" }).click();
   await expect(drawer).toHaveAttribute("data-drawer-state", "full");
   await drawer.getByRole("link", { name: "官方订票" }).click({ modifiers: ["Meta"] });
+});
+
+test("uses the mobile drawer treatment below 800px", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "intermediate mobile breakpoint coverage");
+  await page.setViewportSize({ width: 760, height: 900 });
+  await page.goto("/day/day-2026-10-05");
+  await page.locator("#timeline-place-peak button").click();
+  const drawer = page.getByRole("dialog", { name: "太平山顶" });
+  await expect(drawer).toHaveAttribute("data-drawer-state", "partial");
+  await expect(drawer).toHaveCSS("bottom", "0px");
+  await expect(drawer.getByRole("button", { name: "展开详情" })).toBeVisible();
+  await expect(drawer.getByRole("link", { name: "雨天备选：凌霄阁室内区域" })).toBeVisible();
 });

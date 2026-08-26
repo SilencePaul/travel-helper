@@ -1,6 +1,6 @@
-import type { AttractionPlace } from "@travel/contracts";
+import type { AttractionPlace, Place } from "@travel/contracts";
 
-export function AttractionDetails({ place }: { place: AttractionPlace }) {
+export function AttractionDetails({ place, rainAlternative }: { place: AttractionPlace; rainAlternative?: Place }) {
   return (
     <>
       <dl className="place-facts">
@@ -12,7 +12,9 @@ export function AttractionDetails({ place }: { place: AttractionPlace }) {
         <h3 id="visit-tips">到访提示</h3>
         <p><strong>最佳时段：</strong>{place.bestTime}</p>
         <p><strong>人流提醒：</strong>{place.crowdNote}</p>
-        <p><strong>雨天备选：</strong>峰顶室内区域（待确认）</p>
+        {rainAlternative
+          ? <p><a href={rainAlternative.sources[0]!.url} target="_blank" rel="noreferrer">雨天备选：{rainAlternative.name}</a></p>
+          : <p><strong>雨天备选：</strong>资料待补充</p>}
       </section>
       <section className="place-detail-section" aria-labelledby="photo-spots">
         <h3 id="photo-spots">拍照位置</h3>

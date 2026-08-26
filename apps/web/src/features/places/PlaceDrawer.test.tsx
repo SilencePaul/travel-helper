@@ -43,13 +43,31 @@ test("restaurant drawer shows sourced food details and navigation", async () => 
 });
 
 test("attraction drawer shows visit details and official booking", () => {
-  render(<PlaceDrawer place={attraction} triggerRef={{ current: null }} onClose={() => undefined} />);
+  render(<PlaceDrawer place={attraction} rainAlternative={{ ...attraction, id: "peak-tower", name: "凌霄阁室内区域" }} triggerRef={{ current: null }} onClose={() => undefined} />);
   expect(screen.getByText(/HK\$108/)).toBeVisible();
   expect(screen.getByText("预计停留 120 分钟")).toBeVisible();
   expect(screen.getByText("日落前抵达，衔接夜景")).toBeVisible();
   expect(screen.getByText("卢吉道观景位")).toBeVisible();
-  expect(screen.getByText((_, element) => element?.textContent === "雨天备选：峰顶室内区域（待确认）")).toBeVisible();
+  expect(screen.getByRole("link", { name: "雨天备选：凌霄阁室内区域" })).toHaveAttribute("href", "https://example.com/official");
   expect(screen.getByRole("link", { name: "官方订票" })).toHaveAttribute("href", attraction.bookingUrl);
+});
+
+test("modal drawer isolates the app and locks document scroll until close", () => {
+  const appRoot = document.createElement("div");
+  appRoot.id = "root";
+  document.body.append(appRoot);
+  const trigger = document.createElement("button");
+  document.body.append(trigger);
+  const { unmount } = render(<PlaceDrawer place={restaurant} triggerRef={{ current: trigger }} onClose={() => undefined} />);
+  expect(appRoot).toHaveAttribute("inert");
+  expect(document.body.style.overflow).toBe("hidden");
+  fireEvent.click(screen.getByRole("button", { name: "关闭详情" }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(appRoot).not.toHaveAttribute("inert");
+  expect(document.body.style.overflow).toBe("");
+  unmount();
+  appRoot.remove();
+  trigger.remove();
 });
 
 test("escape closes the desktop drawer and restores its triggering card", () => {

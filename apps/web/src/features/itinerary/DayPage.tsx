@@ -37,6 +37,10 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, r
   }>();
   const segments = routeResult?.key === routeKey ? routeResult.segments : [];
   const routeError = routeResult?.key === routeKey ? routeResult.error : undefined;
+  const drawerPlace = drawerPlaceId ? getPlaceDetail(drawerPlaceId) : undefined;
+  const drawerRainAlternative = drawerPlace?.type === "attraction"
+    ? getPlaceDetail(drawerPlace.rainAlternativeId)
+    : undefined;
   const selectPlace = useCallback((placeId: string, trigger?: HTMLButtonElement) => {
     setSelectedPlaceId(placeId);
     if (trigger && getPlaceDetail(placeId)) {
@@ -102,8 +106,9 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, r
           onSelectPlace={selectPlace}
         />
       </section>
-      {drawerPlaceId && getPlaceDetail(drawerPlaceId) ? <PlaceDrawer
-        place={getPlaceDetail(drawerPlaceId)!}
+      {drawerPlace ? <PlaceDrawer
+        place={drawerPlace}
+        rainAlternative={drawerRainAlternative}
         triggerRef={drawerTriggerRef}
         onClose={() => setDrawerPlaceId(undefined)}
         mobile={typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(max-width: 799px)").matches}

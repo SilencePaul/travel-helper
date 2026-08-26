@@ -1,5 +1,6 @@
 import type { Place } from "@travel/contracts";
 import { useEffect, useId, useRef, useState, type RefObject } from "react";
+import { createPortal } from "react-dom";
 import { AttractionDetails } from "./AttractionDetails";
 import { RestaurantDetails } from "./RestaurantDetails";
 
@@ -8,6 +9,7 @@ type PlaceDrawerProps = {
   triggerRef: RefObject<HTMLButtonElement | null>;
   onClose: () => void;
   mobile?: boolean;
+  rainAlternative?: Place;
 };
 
 function formatCheckedAt(value: string) {
@@ -19,8 +21,8 @@ function getAmapNavigationUrl(place: Place) {
   return `https://uri.amap.com/marker?position=${lng},${lat}&name=${encodeURIComponent(place.name)}&coordinate=gaode&callnative=1`;
 }
 
-export function PlaceDrawer({ place, triggerRef, onClose, mobile = false }: PlaceDrawerProps) {
-  const dialogRef = useRef<HTMLElement>(null);
+export function PlaceDrawer({ place, triggerRef, onClose, mobile = false, rainAlternative }: PlaceDrawerProps) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const [open, setOpen] = useState(true);
   const [mobileState, setMobileState] = useState<"partial" | "full">("partial");
@@ -33,16 +35,36 @@ export function PlaceDrawer({ place, triggerRef, onClose, mobile = false }: Plac
   };
 
   useEffect(() => {
+    if (!open) return;
+    const dialog = dialogRef.current;
+    dialog?.showModal?.();
+    if (dialog && !dialog.open) dialog.setAttribute("open", "");
     const focusTarget = dialogRef.current?.querySelector<HTMLElement>("button, a[href]");
     focusTarget?.focus();
-  }, []);
+    const appRoot = document.getElementById("root");
+    const previousOverflow = document.body.style.overflow;
+    const previousAriaHidden = appRoot?.getAttribute("aria-hidden") ?? null;
+    appRoot?.setAttribute("inert", "");
+    appRoot?.setAttribute("aria-hidden", "true");
+    document.body.style.overflow = "hidden";
+    return () => {
+      if (dialog?.open) dialog.close?.();
+      dialog?.removeAttribute("open");
+      if (appRoot) {
+        appRoot.removeAttribute("inert");
+        if (previousAriaHidden === null) appRoot.removeAttribute("aria-hidden");
+        else appRoot.setAttribute("aria-hidden", previousAriaHidden);
+      }
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [open]);
 
   if (!open) return null;
   const communitySource = place.sources.find((source) => source.kind === "community");
   const focusableSelector = "button:not([disabled]), a[href]";
 
-  return (
-    <aside
+  return createPortal(
+    <dialog
       ref={dialogRef}
       className={`place-drawer${isMobile ? " place-drawer-mobile" : ""}`}
       role="dialog"
@@ -66,6 +88,10 @@ export function PlaceDrawer({ place, triggerRef, onClose, mobile = false }: Plac
           event.preventDefault(); first.focus();
         }
       }}
+      onCancel={(event) => {
+        event.preventDefault();
+        close();
+      }}
     >
       <div className="place-drawer-handle" aria-hidden="true" />
       <header className="place-drawer-header">
@@ -80,7 +106,7 @@ export function PlaceDrawer({ place, triggerRef, onClose, mobile = false }: Plac
         <img className="place-image" src={place.images[0]!.url} alt={place.images[0]!.alt} />
         <p className="place-image-credit">图片：{place.images[0]!.licenseOrOwner}</p>
         <p className="place-summary">{place.summary}</p>
-        {place.type === "restaurant" ? <RestaurantDetails place={place} /> : <AttractionDetails place={place} />}
+        {place.type === "restaurant" ? <RestaurantDetails place={place} /> : <AttractionDetails place={place} rainAlternative={rainAlternative} />}
         <div className="place-links">
           <a className="place-action primary" href={getAmapNavigationUrl(place)} target="_blank" rel="noreferrer">打开高德导航</a>
           {communitySource ? <a className="place-action" href={communitySource.url} target="_blank" rel="noreferrer">小红书搜索</a> : null}
@@ -92,6 +118,7 @@ export function PlaceDrawer({ place, triggerRef, onClose, mobile = false }: Plac
           </ul>
         </section>
       </div>
-    </aside>
+    </dialog>,
+    document.body,
   );
 }

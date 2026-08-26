@@ -51,5 +51,31 @@
       { "label": "% Arabica 香港门店目录", "url": "https://arabicacoffee.hk/locations/locations%26loc%3Dbeijing", "kind": "official", "checkedAt": "2026-08-26T00:00:00.000Z" },
       { "label": "小红书：% Arabica 香港山顶搜索", "url": "https://www.xiaohongshu.com/search_result?keyword=%25%20Arabica%20%E9%A6%99%E6%B8%AF%E5%B1%B1%E9%A1%B6", "kind": "community", "checkedAt": "2026-08-26T00:00:00.000Z" }
     ]
+  },
+  {
+    "id": "peak-tower",
+    "type": "attraction",
+    "name": "凌霄阁室内区域",
+    "address": "香港山顶道128号凌霄阁",
+    "coordinate": { "lng": 114.154783, "lat": 22.268594, "coordinateSystem": "GCJ02" },
+    "summary": "凌霄阁内的公共室内空间；雨天可作为山顶行程的短暂停留选择。",
+    "updatedAt": "2026-08-26T00:00:00.000Z",
+    "ticketPrice": "室内公共区域不设单独入场票；个别体验和商户以现场为准",
+    "hours": "凌霄阁 07:00–23:00（以官方当天公告为准）",
+    "stayMinutes": 45,
+    "bestTime": "雨天或等待天气转好时",
+    "crowdNote": "室内公共区域与商户开放情况以现场为准。",
+    "photoSpots": ["凌霄阁建筑外观", "商场内观景窗区域"],
+    "rainAlternativeId": "peak",
+    "bookingUrl": "https://www.thepeak.com.hk/en/the-peak-experience/the-peak-tower-overview",
+    "images": [{
+      "url": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/88/Hong_Kong_at_night_from_Victoria_Peak.jpg/960px-Hong_Kong_at_night_from_Victoria_Peak.jpg",
+      "alt": "从太平山顶眺望香港夜景",
+      "licenseOrOwner": "The Ruester / Wikimedia Commons，Public Domain"
+    }],
+    "sources": [
+      { "label": "山顶官方体验与开放时间", "url": "https://www.thepeak.com.hk/en/the-peak-experience", "kind": "official", "checkedAt": "2026-08-26T00:00:00.000Z" },
+      { "label": "香港旅游发展局：凌霄阁", "url": "https://www.discoverhongkong.com/eng/place-to-go/travel.guide-the-peak-tower.html", "kind": "tourism-board", "checkedAt": "2026-08-26T00:00:00.000Z" }
+    ]
   }
 ]
