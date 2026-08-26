@@ -1,6 +1,6 @@
 import type { Trip } from "@travel/contracts";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AmapRouteMap } from "../map/AmapRouteMap";
+import { AmapRouteMap, type AmapLoader } from "../map/AmapRouteMap";
 import { createAmapRouteService } from "../map/amapRouteService";
 import { loadAmap } from "../map/amapLoader";
 import type { MapInteractionAdapter, RouteService } from "../map/types";
@@ -13,11 +13,12 @@ type DayPageProps = {
   onBack: () => void;
   mapAdapter?: MapInteractionAdapter;
   routeService?: RouteService;
+  mapLoader?: AmapLoader;
 };
 
 const browserMapAdapter: MapInteractionAdapter = { focusPlace: () => undefined };
 
-export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, routeService }: DayPageProps) {
+export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, routeService, mapLoader }: DayPageProps) {
   const dayIndex = trip.days.findIndex((day) => day.id === dayId);
   const day = trip.days[dayIndex];
   const [selectedPlaceId, setSelectedPlaceId] = useState<string>();
@@ -25,6 +26,7 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, r
   const defaultRouteService = useMemo(() => createAmapRouteService(loadAmap, getPlace), []);
   const activeRouteService = routeService ?? defaultRouteService;
   const routeKey = `${day?.id ?? ""}:${places.map((place) => place.id).join(",")}`;
+  const unresolvedItemIds = (day?.itemIds ?? []).filter((itemId) => !getPlace(itemId));
   const [routeResult, setRouteResult] = useState<{
     key: string;
     segments: Awaited<ReturnType<RouteService["getSegments"]>>;
@@ -39,7 +41,7 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, r
   }, [mapAdapter]);
 
   useEffect(() => {
-    if (!day || places.length < 2) return;
+    if (!day || places.length < 2 || unresolvedItemIds.length > 0) return;
     let active = true;
     void activeRouteService.getSegments({
       dayId: day.id,
@@ -53,7 +55,7 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, r
       }
     });
     return () => { active = false; };
-  }, [activeRouteService, day, places, routeKey]);
+  }, [activeRouteService, day, places, routeKey, unresolvedItemIds.length]);
 
   if (!day) {
     return (
@@ -80,7 +82,9 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, r
         segments={segments}
         selectedPlaceId={selectedPlaceId}
         onSelectPlace={selectPlace}
+        mapLoader={mapLoader}
       />
+      {unresolvedItemIds.length > 0 ? <p className="map-fallback" role="alert">有未识别地点，无法串联道路路线：{unresolvedItemIds.join("、")}</p> : null}
       {routeError ? <p className="map-fallback" role="status">{routeError}</p> : null}
       <section aria-labelledby="timeline-heading">
         <h2 id="timeline-heading">当天行程</h2>

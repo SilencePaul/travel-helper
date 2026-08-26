@@ -1,0 +1,5 @@
+[
+  { "id": "peak", "name": "太平山顶", "amapPoiId": "B073C0YCF7", "lng": 114.150192, "lat": 22.270851, "coordinateSystem": "GCJ02" },
+  { "id": "central-pier", "name": "中环天星码头", "amapPoiId": "B0FFGQPCXF", "lng": 114.166177, "lat": 22.284364, "coordinateSystem": "GCJ02" },
+  { "id": "star-ferry", "name": "尖沙咀天星码头", "amapPoiId": "B073C0TWVV", "lng": 114.173827, "lat": 22.29081, "coordinateSystem": "GCJ02" }
+]

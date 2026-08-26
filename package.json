@@ -7,9 +7,11 @@
     "build": "pnpm -r build",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test && pnpm test:amap-capability",
+    "test": "pnpm -r test && pnpm test:amap-capability && pnpm test:amap-poi-validation",
     "e2e": "playwright test",
-    "test:amap-capability": "node scripts/amap-capability-check.test.mjs"
+    "test:amap-capability": "node scripts/amap-capability-check.test.mjs",
+    "test:amap-poi-validation": "node scripts/amap-poi-validation.test.mjs",
+    "check:amap-pois": "node --env-file=.env.local scripts/amap-poi-validation.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",

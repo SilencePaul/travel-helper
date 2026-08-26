@@ -18,10 +18,10 @@ test("shows road-following route points and syncs a map marker to its timeline c
   const routePoints = page.locator("[data-route-points]");
   await expect(routePoints).toHaveAttribute("data-route-points", /[3-9]|[1-9]\d+/);
 
-  const timelinePlace = page.getByRole("button", { name: "天星码头", exact: true });
+  const timelinePlace = page.getByRole("button", { name: "尖沙咀天星码头", exact: true });
   await page.evaluate(() => window.scrollTo(0, 0));
   await expect(timelinePlace).not.toBeInViewport();
-  await page.getByRole("button", { name: "在地图中定位 天星码头" }).evaluate((marker) => {
+  await page.getByRole("button", { name: "在地图中定位 尖沙咀天星码头" }).evaluate((marker) => {
     (marker as HTMLButtonElement).click();
   });
   await expect(timelinePlace).toHaveAttribute("aria-current", "location");

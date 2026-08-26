@@ -20,3 +20,9 @@ pnpm test
 pnpm build
 pnpm e2e --grep "travel app shell"
 ```
+
+After changing committed AMap POI IDs or coordinates, validate them locally without exposing the server key:
+
+```bash
+pnpm check:amap-pois
+```

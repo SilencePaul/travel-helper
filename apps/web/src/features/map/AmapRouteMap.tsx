@@ -2,11 +2,20 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { loadAmap, missingAmapBrowserCredentials } from "./amapLoader";
 import type { RouteSegment, TimelinePlace } from "./types";
 
+type AmapApi = {
+  Map: new (element: HTMLDivElement, options: unknown) => AMapInstance;
+  Polyline: new (options: unknown) => unknown;
+  Marker: new (options: unknown) => { on: (event: string, callback: () => void) => void };
+};
+
+export type AmapLoader = () => Promise<AmapApi>;
+
 type AmapRouteMapProps = {
   places: TimelinePlace[];
   segments: RouteSegment[];
   selectedPlaceId?: string;
   onSelectPlace: (placeId: string) => void;
+  mapLoader?: AmapLoader;
 };
 
 type AMapInstance = {
@@ -15,21 +24,23 @@ type AMapInstance = {
   setCenter: (center: [number, number]) => void;
 };
 
-export function AmapRouteMap({ places, segments, selectedPlaceId, onSelectPlace }: AmapRouteMapProps) {
+export function AmapRouteMap({ places, segments, selectedPlaceId, onSelectPlace, mapLoader = loadAmap }: AmapRouteMapProps) {
   const elementRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<AMapInstance | undefined>(undefined);
   const [state, setState] = useState<"loading" | "ready" | "missing" | "error">("loading");
+  const [mapGeneration, setMapGeneration] = useState(0);
   const routePointCount = Math.max(0, ...segments.map((segment) => segment.path.length));
   const completeSegments = useMemo(() => segments.filter((segment) => segment.path.length >= 2), [segments]);
   const incompleteSegments = useMemo(() => segments.filter((segment) => segment.path.length < 2), [segments]);
 
   useEffect(() => {
     let active = true;
-    void loadAmap()
+    void mapLoader()
       .then((AMap) => {
         if (!active || !elementRef.current) return;
         const map = new AMap.Map(elementRef.current, { resizeEnable: true, zoom: 13 });
         mapRef.current = map;
+        setMapGeneration((generation) => generation + 1);
         for (const segment of completeSegments) {
           new AMap.Polyline({
             map,
@@ -56,12 +67,12 @@ export function AmapRouteMap({ places, segments, selectedPlaceId, onSelectPlace 
       mapRef.current?.destroy();
       mapRef.current = undefined;
     };
-  }, [completeSegments, onSelectPlace, places]);
+  }, [completeSegments, mapLoader, onSelectPlace, places]);
 
   useEffect(() => {
     const selectedPlace = places.find((place) => place.id === selectedPlaceId);
     if (selectedPlace) mapRef.current?.setCenter([selectedPlace.lng, selectedPlace.lat]);
-  }, [places, selectedPlaceId]);
+  }, [mapGeneration, places, selectedPlaceId]);
 
   return (
     <section className="route-map" aria-labelledby="route-map-heading">
