@@ -37,7 +37,16 @@ const checks = [
 
 export function classifyAmapResponse(body) {
   if (body?.status === "1") return { ok: true, reason: "available" };
-  return { ok: false, reason: String(body?.info || "UNKNOWN_RESPONSE") };
+  return { ok: false, reason: sanitizeAmapInfo(body?.info) };
+}
+
+export function sanitizeAmapInfo(info) {
+  return typeof info === "string" && /^[A-Z0-9_]+$/.test(info) ? info : "UNKNOWN_RESPONSE";
+}
+
+export function formatAmapResult(check, result) {
+  const reason = result.ok ? "available" : sanitizeAmapInfo(result.reason);
+  return `${check.capability} | ${check.city} | ${result.ok ? "PASS" : "FAIL"} | ${reason}`;
 }
 
 async function checkCapability(check, key) {
@@ -63,7 +72,7 @@ async function checkCapability(check, key) {
 }
 
 function printResult(check, result) {
-  console.log(`${check.capability} | ${check.city} | ${result.ok ? "PASS" : "FAIL"} | ${result.reason}`);
+  console.log(formatAmapResult(check, result));
 }
 
 async function main() {
