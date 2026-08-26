@@ -9,5 +9,6 @@ it("creates real AMap markers from hotel coordinates and centers the selected ho
   render(<AmapHotelMap hotels={hongKongHotels} selectedId="park-hotel-hong-kong" onSelect={() => undefined} mapLoader={async () => api} />);
   await waitFor(() => expect(marker).toHaveBeenCalledTimes(2));
   expect(marker).toHaveBeenCalledWith(expect.objectContaining({ position: [114.1722, 22.2972] }));
+  expect(marker).toHaveBeenCalledWith(expect.objectContaining({ position: [114.1747, 22.2989], zIndex: 200, content: expect.stringContaining("is-selected") }));
   await waitFor(() => expect(setCenter).toHaveBeenCalledWith([114.1747, 22.2989]));
 });

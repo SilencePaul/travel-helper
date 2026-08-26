@@ -20,7 +20,7 @@ export async function deriveHotelCommutes(trip: Trip, hotel: Hotel, routeService
         routeService.getSegments({ dayId: `${day.id}:hotel-out`, placeIds: [hotelPlace.id, first.id], modeByLeg: ["transit"] }),
         routeService.getSegments({ dayId: `${day.id}:hotel-back`, placeIds: [last.id, hotelPlace.id], modeByLeg: ["transit"] }),
       ]);
-      if (!outbound[0] || !inbound[0]) return pending();
+      if (!outbound[0] || !inbound[0] || !Number.isFinite(outbound[0].durationMinutes) || !Number.isFinite(inbound[0].durationMinutes) || !Number.isFinite(outbound[0].distanceMeters) || !Number.isFinite(inbound[0].distanceMeters) || outbound[0].durationMinutes <= 0 || inbound[0].durationMinutes <= 0 || outbound[0].distanceMeters <= 0 || inbound[0].distanceMeters <= 0) return pending();
       return { date: day.date, firstPlace: first.name, lastPlace: last.name, outboundMinutes: outbound[0].durationMinutes, returnMinutes: inbound[0].durationMinutes, distanceMeters: outbound[0].distanceMeters + inbound[0].distanceMeters, sourceCheckedAt: new Date().toISOString(), status: "confirmed" };
     } catch { return pending(); }
   }));

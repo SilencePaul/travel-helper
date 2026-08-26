@@ -42,6 +42,8 @@ export function HotelComparePage({ trip, onSelectHotel, onBack, routeService }: 
   }, [activeRouteService, trip]);
   const scoredHotels = useMemo(() => scoreHotels(hongKongHotels, { nights, commutesByHotel }), [commutesByHotel, nights]);
   const selectedHotel = scoredHotels.find((hotel) => hotel.id === highlightedId) ?? scoredHotels[0];
+  const selectedCommutes = selectedHotel ? commutesByHotel[selectedHotel.id] : undefined;
+  const allRoutesConfirmed = Boolean(selectedCommutes?.length) && selectedCommutes!.every((item) => item.status === "confirmed");
 
   function selectHotel(hotelId: string) {
     setHighlightedId(hotelId);
@@ -69,8 +71,8 @@ export function HotelComparePage({ trip, onSelectHotel, onBack, routeService }: 
         <h2 id="hotel-commute-heading">{selectedHotel.name}</h2>
         <dl>
           <div><dt>住宿参考总额</dt><dd data-testid="hotel-total">{selectedHotel.nightlyPrice.currency} {(selectedHotel.stayTotalMinor / 100).toFixed(2)}</dd></div>
-          <div><dt>往返通勤</dt><dd data-testid="hotel-commute">{(commutesByHotel[selectedHotel.id] ?? []).some((item) => item.status === "pending") ? "待高德路线确认" : `${selectedHotel.totalCommuteMinutes} 分钟`}</dd></div>
-          <div><dt>路线距离</dt><dd data-testid="hotel-steps">{(commutesByHotel[selectedHotel.id] ?? []).some((item) => item.status === "pending") ? "待高德路线确认" : `${(commutesByHotel[selectedHotel.id] ?? []).reduce((sum, item) => sum + item.distanceMeters, 0).toLocaleString()} 米`}</dd></div>
+          <div><dt>往返通勤</dt><dd data-testid="hotel-commute">{!selectedCommutes ? "正在请求高德路线" : allRoutesConfirmed ? `${selectedHotel.totalCommuteMinutes} 分钟` : "待高德路线确认"}</dd></div>
+          <div><dt>路线距离</dt><dd data-testid="hotel-steps">{!selectedCommutes ? "正在请求高德路线" : allRoutesConfirmed ? `${selectedCommutes.reduce((sum, item) => sum + item.distanceMeters, 0).toLocaleString()} 米` : "待高德路线确认"}</dd></div>
         </dl>
         <p className="hotel-caveat">只展示高德路线服务返回的时间与距离；缺少返回时明确等待确认，不以几何距离替代。</p>
         <ul>

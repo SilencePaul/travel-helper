@@ -16,7 +16,8 @@ export function AmapHotelMap({ hotels, selectedId, onSelect, mapLoader = loadAma
       const map = new AMap.Map(elementRef.current, { resizeEnable: true, zoom: 15 });
       mapRef.current = map;
       hotels.forEach((hotel) => {
-        const marker = new AMap.Marker({ map, position: [hotel.coordinate.lng, hotel.coordinate.lat], title: hotel.name });
+        const selected = hotel.id === selectedId;
+        const marker = new AMap.Marker({ map, position: [hotel.coordinate.lng, hotel.coordinate.lat], title: hotel.name, zIndex: selected ? 200 : 100, content: `<span class="hotel-amap-marker${selected ? " is-selected" : ""}">${hotel.name}</span>` });
         marker.on("click", () => onSelect(hotel.id));
       });
       map.setFitView(); setState("ready");
