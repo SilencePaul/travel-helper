@@ -192,8 +192,17 @@ test("updates an open drawer when crossing the 800px breakpoint", async ({ page 
 });
 
 test("selects a map-linked hotel and recalculates its stay after extending Hong Kong days", async ({ page }) => {
-  await page.goto("/");
+  await page.goto("/?__testRouteMap=1");
+  await expect(page.getByRole("tab")).toHaveCount(6);
   await page.getByRole("tab", { name: /D3/ }).click();
+  await page.getByRole("button", { name: "返回行程总览" }).click();
+  await page.getByRole("button", { name: "酒店比较" }).click();
+  await expect(page.getByTestId("hotel-nights")).toHaveText("2 晚");
+  await expect(page.getByTestId("hotel-commute")).toHaveText("52 分钟");
+  await page.getByRole("button", { name: "选择此酒店" }).last().click();
+  await expect(page.getByRole("button", { name: "在地图中定位 香港百乐酒店" })).toHaveAttribute("aria-current", "location");
+  await expect(page.getByTestId("hotel-total")).toHaveText("CNY 2266.09");
+  await expect(page.getByTestId("hotel-commute")).toHaveText("88 分钟");
   await page.getByRole("button", { name: "返回行程总览" }).click();
   await page.getByRole("button", { name: "复制当天" }).click();
   await expect(page.getByRole("tab")).toHaveCount(7);
@@ -202,9 +211,8 @@ test("selects a map-linked hotel and recalculates its stay after extending Hong 
   await page.getByRole("button", { name: "酒店比较" }).click();
 
   await expect(page.getByTestId("hotel-nights")).toHaveText("4 晚");
-  await page.getByRole("button", { name: "选择此酒店" }).last().click();
   await expect(page.getByRole("button", { name: "在地图中定位 香港百乐酒店" })).toHaveAttribute("aria-current", "location");
   await expect(page.getByTestId("hotel-total")).toHaveText("CNY 4532.17");
-  await expect(page.getByTestId("hotel-commute")).toHaveText("待高德路线确认");
-  await expect(page.getByTestId("hotel-steps")).toHaveText("待高德路线确认");
+  await expect(page.getByTestId("hotel-commute")).toHaveText("176 分钟");
+  await expect(page.getByTestId("hotel-steps")).toHaveText("17,600 米");
 });

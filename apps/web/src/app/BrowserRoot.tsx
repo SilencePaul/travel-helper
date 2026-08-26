@@ -7,15 +7,21 @@ import type { RouteService } from "../features/map/types";
 
 function createBrowserTestRepository(): TripRepository | undefined {
   if (!import.meta.env.DEV) return undefined;
-  const delayMs = Number(new URLSearchParams(window.location.search).get("__testSaveDelayMs"));
-  if (!Number.isFinite(delayMs) || delayMs <= 0) return undefined;
+  const params = new URLSearchParams(window.location.search);
+  const delayMs = Number(params.get("__testSaveDelayMs"));
+  const hotelRouteFixture = params.get("__testRouteMap") === "1";
+  if ((!Number.isFinite(delayMs) || delayMs <= 0) && !hotelRouteFixture) return undefined;
 
-  const localRepository = new LocalTripRepository(seed);
+  const fixture = hotelRouteFixture ? {
+    ...seed,
+    days: seed.days.map((day) => day.city === "香港" ? { ...day, itemIds: ["peak", "star-ferry"] } : day),
+  } : seed;
+  const localRepository = new LocalTripRepository(fixture);
   return {
     load: (tripId) => localRepository.load(tripId),
     subscribe: (tripId, onChange) => localRepository.subscribe(tripId, onChange),
     save: async (trip, expectedVersion) => {
-      await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+      if (Number.isFinite(delayMs) && delayMs > 0) await new Promise((resolve) => window.setTimeout(resolve, delayMs));
       return localRepository.save(trip, expectedVersion);
     },
   };
