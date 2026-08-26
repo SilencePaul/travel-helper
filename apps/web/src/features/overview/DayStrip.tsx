@@ -103,7 +103,19 @@ export function DayStrip({
   disabled = false,
 }: DayStripProps) {
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const [requestedTabStopId, setRequestedTabStopId] = useState(selectedDayId);
+  const [rovingState, setRovingState] = useState({
+    selectedDayId,
+    requestedTabStopId: selectedDayId,
+  });
+  if (rovingState.selectedDayId !== selectedDayId) {
+    setRovingState({
+      selectedDayId,
+      requestedTabStopId: selectedDayId,
+    });
+  }
+  const requestedTabStopId = rovingState.selectedDayId === selectedDayId
+    ? rovingState.requestedTabStopId
+    : selectedDayId;
   const tabStopId = days.some((day) => day.id === requestedTabStopId)
     ? requestedTabStopId
     : selectedDayId;
@@ -126,12 +138,16 @@ export function DayStrip({
     if (event.key === "End") targetIndex = days.length - 1;
     if (targetIndex === undefined) return;
     event.preventDefault();
-    setRequestedTabStopId(days[targetIndex]?.id);
+    setRovingState({
+      selectedDayId,
+      requestedTabStopId: days[targetIndex]?.id,
+    });
     tabRefs.current[targetIndex]?.focus();
   }
 
   return (
     <DndContext
+      key={disabled ? "disabled" : "enabled"}
       sensors={disabled ? [] : sensors}
       collisionDetection={closestCenter}
       onDragEnd={handleDragEnd}

@@ -1,5 +1,5 @@
 import type { Trip } from "@travel/contracts";
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import { DayStrip } from "./DayStrip";
 import { getDayPanelId, getDayTabId } from "./dayTabIds";
 
@@ -24,31 +24,60 @@ export function OverviewPage({
   onMoveDay,
   isSaving = false,
 }: OverviewPageProps) {
-  const [deleteDayId, setDeleteDayId] = useState<string>();
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; dayNumber: number }>();
+  const [isDeleting, setIsDeleting] = useState(false);
   const deleteTriggerRef = useRef<HTMLButtonElement>(null);
   const confirmButtonRef = useRef<HTMLButtonElement>(null);
   const cancelButtonRef = useRef<HTMLButtonElement>(null);
+  const deleteDialogRef = useRef<HTMLDialogElement>(null);
+  const deleteTitleId = useId();
+  const deleteDescriptionId = useId();
   const requestedIndex = trip.days.findIndex((day) => day.id === selectedDayId);
   const selectedIndex = requestedIndex >= 0 ? requestedIndex : trip.days.length > 0 ? 0 : -1;
   const selectedDay = trip.days[selectedIndex];
-  const dialogOpen = deleteDayId === selectedDay?.id && Boolean(selectedDay);
+  const dialogOpen = Boolean(deleteTarget);
 
   useEffect(() => {
-    if (dialogOpen) cancelButtonRef.current?.focus();
+    if (!dialogOpen) return;
+    const dialog = deleteDialogRef.current;
+    if (!dialog) return;
+    if (!dialog.open) {
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else dialog.setAttribute("open", "");
+    }
+    cancelButtonRef.current?.focus();
   }, [dialogOpen]);
 
+  function closeDeleteDialog() {
+    const dialog = deleteDialogRef.current;
+    if (!dialog?.open) return;
+    if (typeof dialog.close === "function") dialog.close();
+    else dialog.removeAttribute("open");
+  }
+
   function cancelDelete() {
-    setDeleteDayId(undefined);
+    if (isDeleting) return;
+    closeDeleteDialog();
+    setDeleteTarget(undefined);
     deleteTriggerRef.current?.focus();
   }
 
-  function handleDialogKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+  function handleDialogKeyDown(event: KeyboardEvent<HTMLDialogElement>) {
     if (event.key === "Escape") {
       event.preventDefault();
+      if (isDeleting) {
+        deleteDialogRef.current?.focus();
+        return;
+      }
       cancelDelete();
       return;
     }
     if (event.key !== "Tab") return;
+    if (isDeleting) {
+      event.preventDefault();
+      deleteDialogRef.current?.focus();
+      return;
+    }
     if (!event.shiftKey && document.activeElement === cancelButtonRef.current) {
       event.preventDefault();
       confirmButtonRef.current?.focus();
@@ -59,11 +88,18 @@ export function OverviewPage({
   }
 
   async function confirmDelete() {
-    setDeleteDayId(undefined);
-    await onDeleteDay();
-    window.setTimeout(() => {
-      document.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]')?.focus();
-    }, 0);
+    setIsDeleting(true);
+    deleteDialogRef.current?.focus();
+    try {
+      await onDeleteDay();
+      closeDeleteDialog();
+      setDeleteTarget(undefined);
+      window.setTimeout(() => {
+        document.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]')?.focus();
+      }, 0);
+    } finally {
+      setIsDeleting(false);
+    }
   }
 
   return (
@@ -95,7 +131,12 @@ export function OverviewPage({
               ref={deleteTriggerRef}
               type="button"
               className="danger-button"
-              onClick={() => setDeleteDayId(selectedDay?.id)}
+              onClick={() => {
+                setIsDeleting(false);
+                if (selectedDay) {
+                  setDeleteTarget({ id: selectedDay.id, dayNumber: selectedIndex + 1 });
+                }
+              }}
               disabled={!selectedDay || trip.days.length <= 1 || isSaving}
             >
               删除当天
@@ -111,18 +152,25 @@ export function OverviewPage({
           disabled={isSaving}
         />
 
-        {dialogOpen && selectedDay ? (
-          <div
+        {dialogOpen && deleteTarget ? (
+          <dialog
+            ref={deleteDialogRef}
             className="delete-confirmation"
             role="alertdialog"
             aria-modal="true"
-            aria-labelledby={`delete-title-${selectedDay.id}`}
-            aria-describedby={`delete-description-${selectedDay.id}`}
+            aria-labelledby={deleteTitleId}
+            aria-describedby={deleteDescriptionId}
+            aria-busy={isDeleting}
+            tabIndex={-1}
+            onCancel={(event) => {
+              event.preventDefault();
+              cancelDelete();
+            }}
             onKeyDown={handleDialogKeyDown}
           >
             <div className="delete-copy">
-              <h3 id={`delete-title-${selectedDay.id}`}>删除 D{selectedIndex + 1}</h3>
-              <p id={`delete-description-${selectedDay.id}`}>确定删除 D{selectedIndex + 1} 吗？</p>
+              <h3 id={deleteTitleId}>删除 D{deleteTarget.dayNumber}</h3>
+              <p id={deleteDescriptionId}>确定删除 D{deleteTarget.dayNumber} 吗？</p>
             </div>
             <div>
               <button
@@ -130,12 +178,15 @@ export function OverviewPage({
                 type="button"
                 className="danger-button"
                 onClick={() => void confirmDelete()}
+                disabled={isDeleting}
               >
-                确认删除
+                {isDeleting ? "正在删除" : "确认删除"}
               </button>
-              <button ref={cancelButtonRef} type="button" onClick={cancelDelete}>取消</button>
+              <button ref={cancelButtonRef} type="button" onClick={cancelDelete} disabled={isDeleting}>
+                取消
+              </button>
             </div>
-          </div>
+          </dialog>
         ) : null}
 
         {selectedDay ? (

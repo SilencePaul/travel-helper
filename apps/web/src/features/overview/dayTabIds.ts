@@ -1,5 +1,5 @@
 function safeDayId(dayId: string) {
-  return encodeURIComponent(dayId).replaceAll("%", "-");
+  return encodeURIComponent(dayId);
 }
 
 export function getDayTabId(dayId: string) {

@@ -302,3 +302,129 @@ test("traps confirmation focus, closes on Escape, and restores focus", async () 
   expect(onDeleteDay).toHaveBeenCalledOnce();
   await waitFor(() => expect(screen.getByRole("tab", { name: /D2/ })).toHaveFocus());
 });
+
+test("keeps a native modal open and focus contained until deletion completes", async () => {
+  const user = userEvent.setup();
+  let finishDelete!: () => void;
+  const onDeleteDay = vi.fn(() => new Promise<void>((resolve) => {
+    finishDelete = resolve;
+  }));
+  const whitespaceIdTrip: Trip = {
+    ...threeDayTrip,
+    days: threeDayTrip.days.map((day, index) =>
+      index === 0 ? { ...day, id: "day with whitespace" } : day),
+  };
+  render(
+    <OverviewPage
+      trip={whitespaceIdTrip}
+      selectedDayId="day with whitespace"
+      onSelectDay={() => undefined}
+      onAddDay={() => undefined}
+      onDuplicateDay={() => undefined}
+      onDeleteDay={onDeleteDay}
+      onMoveDay={() => undefined}
+    />,
+  );
+
+  await user.click(screen.getByRole("button", { name: "删除当天" }));
+  const dialog = screen.getByRole("alertdialog", { name: /删除 D1/ });
+  expect(dialog.tagName).toBe("DIALOG");
+  expect(dialog).toHaveAttribute("open");
+  const labelledBy = dialog.getAttribute("aria-labelledby")!;
+  expect(labelledBy).not.toMatch(/\s/);
+  expect(document.getElementById(labelledBy)).toHaveTextContent("删除 D1");
+
+  await user.click(screen.getByRole("button", { name: "确认删除" }));
+  expect(onDeleteDay).toHaveBeenCalledOnce();
+  expect(screen.getByRole("alertdialog")).toBe(dialog);
+  expect(dialog).toHaveAttribute("open");
+  expect(dialog).toHaveFocus();
+  await user.keyboard("{Escape}{Tab}");
+  expect(screen.getByRole("alertdialog")).toBe(dialog);
+  expect(dialog).toHaveFocus();
+
+  await act(async () => finishDelete());
+  await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+  expect(screen.getByRole("tab", { name: /D1/ })).toHaveFocus();
+});
+
+test("syncs the roving tab stop to controlled selection changes", () => {
+  const props = {
+    trip: threeDayTrip,
+    onSelectDay: () => undefined,
+    onAddDay: () => undefined,
+    onDuplicateDay: () => undefined,
+    onDeleteDay: () => undefined,
+    onMoveDay: () => undefined,
+  };
+  const view = render(<OverviewPage {...props} selectedDayId="day-1" />);
+  expect(screen.getByRole("tab", { name: /D1/ })).toHaveAttribute("tabindex", "0");
+
+  view.rerender(<OverviewPage {...props} selectedDayId="day-2" />);
+  expect(screen.getByRole("tab", { name: /D1/ })).toHaveAttribute("tabindex", "-1");
+  expect(screen.getByRole("tab", { name: /D2/ })).toHaveAttribute("tabindex", "0");
+
+  screen.getByRole("tab", { name: /D2/ }).focus();
+  fireEvent.keyDown(screen.getByRole("tab", { name: /D2/ }), { key: "ArrowRight" });
+  expect(screen.getByRole("tab", { name: /D3/ })).toHaveAttribute("tabindex", "0");
+  view.rerender(<OverviewPage {...props} trip={{ ...threeDayTrip }} selectedDayId="day-2" />);
+  expect(screen.getByRole("tab", { name: /D3/ })).toHaveAttribute("tabindex", "0");
+
+  view.rerender(<OverviewPage {...props} selectedDayId="day-1" />);
+  view.rerender(<OverviewPage {...props} selectedDayId="day-2" />);
+  expect(screen.getByRole("tab", { name: /D2/ })).toHaveAttribute("tabindex", "0");
+  expect(screen.getByRole("tab", { name: /D3/ })).toHaveAttribute("tabindex", "-1");
+});
+
+test("persists a dnd-kit keyboard reorder by stable day ID", async () => {
+  const originalGetBoundingClientRect = HTMLElement.prototype.getBoundingClientRect;
+  const rect = (left: number, width: number, height = 146) => ({
+    x: left,
+    y: 0,
+    top: 0,
+    right: left + width,
+    bottom: height,
+    left,
+    width,
+    height,
+    toJSON: () => ({}),
+  }) as DOMRect;
+  const layoutSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect")
+    .mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains("day-strip")) return rect(0, 512);
+      if (this.classList.contains("day-tab-wrap")) {
+        const index = this.parentElement
+          ? Array.from(this.parentElement.children).indexOf(this)
+          : 0;
+        return rect(index * 174, 164);
+      }
+      return originalGetBoundingClientRect.call(this);
+    });
+  const user = userEvent.setup();
+  const repository = new LocalTripRepository(threeDayTrip);
+  window.history.replaceState({}, "", "/");
+  try {
+    render(<App repository={repository} tripId={threeDayTrip.id} />);
+
+    const firstHandle = await screen.findByRole("button", { name: "拖动 D1" });
+    firstHandle.focus();
+    await user.keyboard(" ");
+    await waitFor(() => expect(firstHandle).toHaveAttribute("aria-pressed", "true"));
+    await user.keyboard("{ArrowRight}");
+    await screen.findByText(/Draggable item day-1 was moved over droppable area day-2/);
+    await user.keyboard(" ");
+
+    await waitFor(async () => {
+      await expect(repository.load(threeDayTrip.id)).resolves.toMatchObject({
+        version: 1,
+        days: [
+          { id: "day-2", date: "2026-10-03" },
+          { id: "day-1", date: "2026-10-04" },
+          { id: "day-3", date: "2026-10-05" },
+        ],
+      });
+    });
+  } finally {
+    layoutSpy.mockRestore();
+  }
+});
