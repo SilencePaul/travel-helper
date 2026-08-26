@@ -33,7 +33,8 @@ function createBrowserTestRouteService(): RouteService | undefined {
     async getSegments(input) {
       if (input.dayId.includes(":hotel")) {
         const isPark = input.placeIds.includes("park-hotel-hong-kong");
-        return [{ id: `${input.dayId}-${isPark ? "park" : "kowloon"}`, fromPlaceId: input.placeIds[0]!, toPlaceId: input.placeIds[1]!, mode: "transit", distanceMeters: isPark ? 2200 : 1300, durationMinutes: isPark ? 22 : 13, summary: "测试高德酒店路线", path: [] }];
+        const walking = input.modeByLeg[0] === "walking";
+        return [{ id: `${input.dayId}-${isPark ? "park" : "kowloon"}`, fromPlaceId: input.placeIds[0]!, toPlaceId: input.placeIds[1]!, mode: walking ? "walking" : "transit", distanceMeters: walking ? (isPark ? 760 : 380) : (isPark ? 2200 : 1300), durationMinutes: walking ? (isPark ? 10 : 5) : (isPark ? 22 : 13), summary: "测试高德酒店路线", path: [] }];
       }
       return [
         {

@@ -1,7 +1,7 @@
 [
   {
     "id": "kowloon-hotel",
-    "name": "香港九龙酒店",
+    "name": "九龙酒店",
     "address": "香港九龙尖沙咀弥敦道 19–21 号",
     "amapPoiId": "B073C044UE",
     "coordinate": { "lng": 114.176707, "lat": 22.293025, "coordinateSystem": "GCJ02" },

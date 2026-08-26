@@ -75,11 +75,11 @@ export function HotelComparePage({ trip, onSelectHotel, onBack, routeService }: 
         <dl>
           <div><dt>住宿参考总额</dt><dd data-testid="hotel-total">{selectedHotel.nightlyPrice.currency} {(selectedHotel.stayTotalMinor / 100).toFixed(2)}</dd></div>
           <div><dt>往返通勤</dt><dd data-testid="hotel-commute">{!selectedCommutes ? "正在请求高德路线" : allRoutesConfirmed ? `${selectedHotel.totalCommuteMinutes} 分钟` : "待高德路线确认"}</dd></div>
-          <div><dt>路线距离</dt><dd data-testid="hotel-steps">{!selectedCommutes ? "正在请求高德路线" : allRoutesConfirmed ? `${selectedCommutes.reduce((sum, item) => sum + item.distanceMeters, 0).toLocaleString()} 米` : "待高德路线确认"}</dd></div>
+          <div><dt>预计步数</dt><dd data-testid="hotel-steps">{!selectedCommutes ? "正在请求高德路线" : !allRoutesConfirmed ? "待高德路线确认" : selectedCommutes.some((item) => item.estimatedSteps === undefined) ? "待高德步行距离确认" : `${selectedCommutes.reduce((sum, item) => sum + item.estimatedSteps!, 0).toLocaleString()} 步`}</dd></div>
         </dl>
-        <p className="hotel-caveat">只展示高德路线服务返回的时间与距离；缺少返回时明确等待确认，不以几何距离替代。</p>
+        <p className="hotel-caveat">时间与距离只使用高德路线服务返回值；步数仅以高德步行路线距离 ÷ 0.76 米/步估算，并显示同次路线核查时间。缺少步行距离时不估算。</p>
         <ul>
-          {(commutesByHotel[selectedHotel.id] ?? []).map((commute) => <li key={commute.date}>{commute.date}：首站 {commute.firstPlace} {commute.status === "confirmed" ? `${commute.outboundMinutes} 分钟` : "待高德路线确认"}；末站 {commute.lastPlace} {commute.status === "confirmed" ? `返回 ${commute.returnMinutes} 分钟，${commute.distanceMeters.toLocaleString()} 米，高德核查 ${new Date(commute.sourceCheckedAt!).toLocaleString("zh-CN")}` : "待高德路线确认"}</li>)}
+          {(commutesByHotel[selectedHotel.id] ?? []).map((commute) => <li key={commute.date}>{commute.date}：首站 {commute.firstPlace} {commute.status === "confirmed" ? `${commute.outboundMinutes} 分钟` : "待高德路线确认"}；末站 {commute.lastPlace} {commute.status === "confirmed" ? `返回 ${commute.returnMinutes} 分钟，${commute.distanceMeters.toLocaleString()} 米，步行 ${commute.walkingDistanceMeters !== undefined ? `${commute.walkingDistanceMeters.toLocaleString()} 米 / ${commute.estimatedSteps?.toLocaleString()} 步` : "待高德步行距离确认"}，高德核查 ${new Date(commute.sourceCheckedAt!).toLocaleString("zh-CN")}` : "待高德路线确认"}</li>)}
         </ul>
       </section> : null}
       <section className="hotel-grid" aria-label="酒店候选">

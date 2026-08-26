@@ -214,5 +214,5 @@ test("selects a map-linked hotel and recalculates its stay after extending Hong 
   await expect(page.getByRole("button", { name: "在地图中定位 香港百乐酒店" })).toHaveAttribute("aria-current", "location");
   await expect(page.getByTestId("hotel-total")).toHaveText("CNY 4532.17");
   await expect(page.getByTestId("hotel-commute")).toHaveText("176 分钟");
-  await expect(page.getByTestId("hotel-steps")).toHaveText("17,600 米");
+  await expect(page.getByTestId("hotel-steps")).toHaveText("8,000 步");
 });
