@@ -1,7 +1,120 @@
-:root { color:#18181b; background:#f5f5f2; font-family:Inter,"PingFang SC","Microsoft YaHei",sans-serif; font-synthesis:none; }
-* { box-sizing:border-box; }
-body { margin:0; min-width:320px; min-height:100vh; }
-button, input, textarea { font:inherit; }
-.app-shell { min-height:100vh; padding:24px; }
-.eyebrow { color:#71717a; font-size:12px; letter-spacing:.12em; }
-.sync-state { color:#657166; font-size:13px; }
+:root {
+  color: #1d241e;
+  background: #f2f1eb;
+  font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-synthesis: none;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; min-height: 100vh; }
+button, input, textarea { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: .55; }
+
+.app-shell { min-height: 100vh; padding: 24px; }
+.sync-bar {
+  width: min(1080px, 100%);
+  margin: 0 auto 16px;
+  color: #657166;
+  font-size: 13px;
+  text-align: right;
+}
+.overview, .narrow-page { width: min(1080px, 100%); margin: 0 auto; }
+.narrow-page { max-width: 760px; }
+.eyebrow { margin: 0 0 8px; color: #6d766f; font-size: 12px; letter-spacing: .12em; text-transform: uppercase; }
+h1, h2, h3, p { overflow-wrap: anywhere; }
+h1 { margin: 0; font-size: clamp(32px, 6vw, 64px); line-height: 1.05; letter-spacing: -.04em; }
+h2 { margin: 0; font-size: 24px; }
+
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 32px;
+  align-items: end;
+  padding: clamp(28px, 6vw, 72px) 0 48px;
+}
+.travelers { margin: 18px 0 0; color: #485249; font-size: 17px; }
+.trip-statuses { display: flex; gap: 12px; margin: 0; }
+.trip-statuses div { min-width: 132px; padding: 16px; border: 1px solid #d9dbd5; border-radius: 16px; background: #faf9f5; }
+.trip-statuses dt { color: #707871; font-size: 12px; }
+.trip-statuses dd { margin: 6px 0 0; font-size: 14px; }
+
+.section-heading { display: flex; justify-content: space-between; gap: 24px; align-items: end; margin-bottom: 18px; }
+.day-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.day-actions button, .delete-confirmation button, .back-button, .day-page > button {
+  min-height: 42px;
+  padding: 8px 14px;
+  border: 1px solid #cfd3ca;
+  border-radius: 999px;
+  color: #273128;
+  background: #faf9f5;
+}
+.danger-button { color: #8a332d !important; border-color: #e0bcb7 !important; }
+
+.day-strip {
+  display: flex;
+  gap: 10px;
+  margin: 0;
+  padding: 2px 2px 14px;
+  overflow-x: auto;
+  list-style: none;
+  scrollbar-width: thin;
+}
+.day-tab-wrap { position: relative; flex: 0 0 164px; }
+.day-tab {
+  display: grid;
+  width: 100%;
+  min-height: 146px;
+  padding: 16px;
+  border: 1px solid #d6d9d2;
+  border-radius: 18px;
+  color: #253027;
+  background: #faf9f5;
+  text-align: left;
+}
+.day-tab[aria-selected="true"] { outline: 2px solid #576d5b; outline-offset: 1px; background: #eef2e9; }
+.day-tab strong { font-size: 22px; }
+.day-tab span, .day-tab small { align-self: end; color: #667067; }
+.day-tab small { color: #936f31; }
+.drag-handle {
+  position: absolute;
+  top: 10px;
+  right: 9px;
+  padding: 6px;
+  border: 0;
+  color: #727a73;
+  background: transparent;
+  font-size: 11px;
+  touch-action: none;
+}
+
+.selected-day, .unscheduled, .delete-confirmation, .day-page section {
+  margin-top: 18px;
+  padding: 24px;
+  border: 1px solid #d9dbd5;
+  border-radius: 20px;
+  background: #faf9f5;
+}
+.selected-day h3 { margin: 0; font-size: 22px; }
+.selected-day > p:last-child { margin-bottom: 0; color: #697169; }
+.delete-confirmation { display: flex; justify-content: space-between; gap: 16px; align-items: center; border-color: #e0bcb7; }
+.delete-confirmation p { margin: 0; }
+.delete-confirmation div { display: flex; gap: 8px; }
+.unscheduled ul, .timeline { padding-left: 22px; }
+
+.day-page { padding-top: 44px; }
+.day-page header { padding: 42px 0 16px; }
+.day-page .back-button { border: 0; padding-left: 0; background: transparent; }
+.weather-state { color: #936f31; }
+.empty-state { color: #6b736c; }
+
+@media (max-width: 720px) {
+  .app-shell { padding: 16px; }
+  .sync-bar { text-align: left; }
+  .hero { grid-template-columns: 1fr; align-items: start; padding-top: 28px; }
+  .trip-statuses { width: 100%; }
+  .trip-statuses div { flex: 1; min-width: 0; }
+  .section-heading { align-items: start; flex-direction: column; }
+  .day-actions { justify-content: flex-start; }
+  .delete-confirmation { align-items: flex-start; flex-direction: column; }
+}

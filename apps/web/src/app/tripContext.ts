@@ -1,0 +1,23 @@
+import { createContext, useContext } from "react";
+import type { Trip } from "@travel/contracts";
+
+export type TripSyncState =
+  | "正在使用本地计划"
+  | "正在保存"
+  | "保存失败，请重试";
+
+export type TripContextValue = {
+  trip: Trip;
+  saveTrip: (next: Trip) => Promise<Trip>;
+  syncState: TripSyncState;
+};
+
+export const TripContext = createContext<TripContextValue | undefined>(undefined);
+
+export function useTrip() {
+  const value = useContext(TripContext);
+  if (!value) {
+    throw new Error("useTrip 必须在 TripProvider 内使用");
+  }
+  return value;
+}
