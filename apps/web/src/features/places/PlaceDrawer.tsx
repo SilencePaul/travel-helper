@@ -3,6 +3,7 @@ import { startTransition, useEffect, useId, useRef, useState, useSyncExternalSto
 import { createPortal } from "react-dom";
 import { AttractionDetails } from "./AttractionDetails";
 import { RestaurantDetails } from "./RestaurantDetails";
+import { buildAmapNavigationUrl } from "../map/navigation";
 
 type PlaceDrawerProps = {
   place: Place;
@@ -14,11 +15,6 @@ type PlaceDrawerProps = {
 
 function formatCheckedAt(value: string) {
   return new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium" }).format(new Date(value));
-}
-
-function getAmapNavigationUrl(place: Place) {
-  const { lng, lat } = place.coordinate;
-  return `https://uri.amap.com/marker?position=${lng},${lat}&name=${encodeURIComponent(place.name)}&coordinate=gaode&callnative=1`;
 }
 
 const mobileMediaQuery = "(max-width: 799px)";
@@ -44,6 +40,7 @@ export function PlaceDrawer({ place, triggerRef, onClose, mobile = false, rainAl
   const [portalRoot, setPortalRoot] = useState<HTMLElement | null>(null);
   const viewportIsMobile = useSyncExternalStore(subscribeToMobileViewport, getMobileViewportSnapshot, () => false);
   const isMobile = mobile || viewportIsMobile;
+  const navigationUrl = buildAmapNavigationUrl({ ...place.coordinate, name: place.name, mode: "walking" });
 
   useEffect(() => {
     startTransition(() => setPortalRoot(document.body));
@@ -53,6 +50,10 @@ export function PlaceDrawer({ place, triggerRef, onClose, mobile = false, rainAl
     setOpen(false);
     onClose();
     requestAnimationFrame(() => triggerRef.current?.focus());
+  };
+
+  const copyAddress = async () => {
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(place.address);
   };
 
   useEffect(() => {
@@ -129,7 +130,8 @@ export function PlaceDrawer({ place, triggerRef, onClose, mobile = false, rainAl
         <p className="place-summary">{place.summary}</p>
         {place.type === "restaurant" ? <RestaurantDetails place={place} /> : <AttractionDetails place={place} rainAlternative={rainAlternative} />}
         <div className="place-links">
-          <a className="place-action primary" href={getAmapNavigationUrl(place)} target="_blank" rel="noreferrer">打开高德导航</a>
+          <a className="place-action primary" href={navigationUrl} target="_blank" rel="noreferrer">开始导航</a>
+          <button type="button" className="place-action" onClick={() => void copyAddress()}>复制地址</button>
           {communitySource ? <a className="place-action" href={communitySource.url} target="_blank" rel="noreferrer">小红书搜索</a> : null}
         </div>
         <section className="place-detail-section" aria-labelledby="place-sources">

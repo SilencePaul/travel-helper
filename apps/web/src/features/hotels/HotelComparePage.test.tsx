@@ -5,7 +5,7 @@ import type { Trip } from "@travel/contracts";
 import { HotelComparePage } from "./HotelComparePage";
 
 const trip: Trip = {
-  id: "trip", title: "测试行程", startDate: "2026-10-03", endDate: "2026-10-08", version: 0, travelers: [], unscheduledItemIds: [],
+  id: "trip", title: "测试行程", startDate: "2026-10-03", endDate: "2026-10-08", version: 0, travelers: [], unscheduledItemIds: [], orders: [],
   days: [
     { id: "d1", date: "2026-10-03", city: "深圳", itemIds: [] },
     { id: "d2", date: "2026-10-04", city: "香港", itemIds: [] },

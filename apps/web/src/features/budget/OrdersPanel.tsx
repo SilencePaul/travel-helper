@@ -1,0 +1,24 @@
+import type { BudgetItem, OrderStatus } from "@travel/contracts";
+
+const labels: Record<OrderStatus, string> = { unpaid: "未支付", partial: "部分支付", paid: "已支付" };
+function amount(value: number, currency: string) { return `${currency} ${(value / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`; }
+
+export function OrdersPanel({ orders, onStatusChange, disabled = false }: {
+  orders: BudgetItem[];
+  onStatusChange: (orderId: string, status: OrderStatus) => void | Promise<unknown>;
+  disabled?: boolean;
+}) {
+  return (
+    <section className="orders-panel" aria-labelledby="orders-heading">
+      <div><p className="eyebrow">预订</p><h2 id="orders-heading">订单与付款</h2></div>
+      {orders.length === 0 ? <p className="empty-state">尚未录入订单；酒店候选价格仅作比较，不会被当作已预订或已付款。</p> : <ul className="order-list">
+        {orders.map((order) => <li key={order.id}>
+          <div><strong>{order.name}</strong><span>{amount(order.estimated, order.currency)} · 已付 {amount(order.paid, order.currency)}</span></div>
+          <label>{order.name}状态<select aria-label={`${order.name}状态`} value={order.status} disabled={disabled} onChange={(event) => void onStatusChange(order.id, event.target.value as OrderStatus)}>
+            {(Object.keys(labels) as OrderStatus[]).map((status) => <option key={status} value={status}>{labels[status]}</option>)}
+          </select></label>
+        </li>)}
+      </ul>}
+    </section>
+  );
+}

@@ -97,6 +97,33 @@ h2 { margin: 0; font-size: 24px; }
   border-radius: 20px;
   background: #faf9f5;
 }
+.overview-sidepanels { display: grid; width: min(1080px, 100%); gap: 18px; margin: 24px auto 0; }
+.budget-panel, .orders-panel, .date-range, .date-warning {
+  padding: 22px; border: 1px solid #d9dbd5; border-radius: 20px; background: #faf9f5;
+}
+.budget-panel { display: grid; grid-template-columns: minmax(0, .7fr) minmax(0, 1.3fr); gap: 28px; }
+.budget-total { display: grid; gap: 6px; margin-top: 12px; color: #31594d; font-size: 18px; font-weight: 650; }
+.budget-breakdown { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.budget-breakdown h3 { margin: 0; font-size: 15px; }
+.budget-breakdown ul { display: grid; gap: 7px; margin: 10px 0 0; padding: 0; list-style: none; color: #536057; font-size: 13px; }
+.budget-breakdown li span { display: inline-block; }
+.orders-panel { display: grid; grid-template-columns: minmax(160px, .45fr) 1fr; gap: 24px; }
+.orders-panel h2 { font-size: 21px; }
+.order-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.order-list li { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px; border: 1px solid #e1e3dd; border-radius: 12px; }
+.order-list li > div, .order-list label { display: grid; gap: 5px; }
+.order-list span, .order-list label { color: #536057; font-size: 13px; }
+.order-list select { min-height: 34px; border: 1px solid #cfd3ca; border-radius: 8px; background: #fff; }
+.date-range { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin-top: 24px; }
+.date-range > div { margin-right: auto; }
+.date-range label { display: grid; gap: 5px; color: #536057; font-size: 13px; }
+.date-range input { min-height: 40px; padding: 6px 8px; border: 1px solid #cfd3ca; border-radius: 8px; background: #fff; }
+.date-range button, .date-warning button { min-height: 40px; padding: 8px 14px; border: 1px solid #cfd3ca; border-radius: 999px; background: #fff; }
+.date-warning { position: fixed; z-index: 32; top: 50%; left: 50%; width: min(480px, calc(100vw - 32px)); margin: 0; box-shadow: 0 24px 80px rgb(35 29 25 / 24%); transform: translate(-50%, -50%); }
+.date-warning::backdrop { background: rgb(25 29 25 / 48%); }
+.date-warning h2 { font-size: 22px; }
+.date-warning p { color: #536057; line-height: 1.55; }
+.date-warning > div:last-child { display: flex; gap: 8px; }
 .selected-day h3 { margin: 0; font-size: 22px; }
 .selected-day > p:last-child { margin-bottom: 0; color: #697169; }
 .delete-confirmation {
@@ -232,5 +259,7 @@ h2 { margin: 0; font-size: 24px; }
   .drawer-expand { display: block; align-self: flex-start; min-height: 34px; margin: 0 20px 10px; padding: 4px 10px; font-size: 13px; }
   .place-drawer-content { padding: 14px 20px calc(28px + env(safe-area-inset-bottom)); }
   .hotel-map, .hotel-grid { grid-template-columns: 1fr; }
+  .budget-panel, .orders-panel, .budget-breakdown { grid-template-columns: 1fr; }
+  .order-list li { align-items: start; flex-direction: column; }
   .hotel-commute dl { grid-template-columns: 1fr; }
 }

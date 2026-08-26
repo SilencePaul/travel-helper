@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { BudgetItemSchema } from "./budget";
 
 export const TravelDaySchema = z.object({
   id: z.string().min(1),
@@ -16,6 +17,7 @@ export const TripSchema = z.object({
   travelers: z.array(z.object({ id: z.string(), name: z.string() })),
   days: z.array(TravelDaySchema),
   unscheduledItemIds: z.array(z.string()),
+  orders: z.array(BudgetItemSchema).default([]),
   version: z.number().int().nonnegative(),
 }).superRefine((trip, context) => {
   if (trip.endDate < trip.startDate) {

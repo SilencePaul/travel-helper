@@ -138,7 +138,8 @@ test("restaurant drawer shows sourced details and restores focus on desktop", as
   expect(drawerBox?.x + drawerBox!.width).toBeCloseTo(page.viewportSize()!.width, 0);
   await expect(drawer.getByText(/HK\$45–60/)).toBeVisible();
   await expect(drawer.getByRole("link", { name: "小红书搜索" })).toBeVisible();
-  await expect(drawer.getByRole("link", { name: "打开高德导航" })).toHaveAttribute("href", /uri\.amap\.com/);
+  await expect(drawer.getByRole("link", { name: "开始导航" })).toHaveAttribute("href", /uri\.amap\.com\/navigation/);
+  await expect(drawer.getByRole("link", { name: "开始导航" })).toHaveAttribute("href", /callnative=1/);
   await expect(page.locator("#root")).toHaveAttribute("inert", "");
   await expect(page.locator("body")).toHaveCSS("overflow", "hidden");
   await expect(page.locator(".back-button").click({ timeout: 300 })).rejects.toThrow();
@@ -147,6 +148,17 @@ test("restaurant drawer shows sourced details and restores focus on desktop", as
   await expect(page.locator("#root")).not.toHaveAttribute("inert", "");
   await expect(page.locator("body")).toHaveCSS("overflow", "visible");
   await expect(card).toBeFocused();
+});
+
+test("shows truthful empty order state and direct AMap launch fallback", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "总预算" })).toBeVisible();
+  await expect(page.getByText("尚未录入订单；酒店候选价格仅作比较，不会被当作已预订或已付款。" )).toBeVisible();
+  await page.getByRole("tab", { name: /D3/ }).click();
+  await page.locator("#timeline-place-peak button").click();
+  const drawer = page.getByRole("dialog", { name: "太平山顶" });
+  await expect(drawer.getByRole("link", { name: "开始导航" })).toHaveAttribute("href", /mode=walk/);
+  await expect(drawer.getByRole("button", { name: "复制地址" })).toBeVisible();
 });
 
 test("attraction drawer uses partial then full mobile states", async ({ page }, testInfo) => {

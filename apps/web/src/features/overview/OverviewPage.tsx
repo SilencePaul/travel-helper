@@ -1,7 +1,12 @@
-import type { Trip } from "@travel/contracts";
+import type { BudgetCategory, Trip } from "@travel/contracts";
+import type { OrderStatus } from "@travel/contracts";
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import { DayStrip } from "./DayStrip";
 import { getDayPanelId, getDayTabId } from "./dayTabIds";
+import { BudgetPanel } from "../budget/BudgetPanel";
+import { OrdersPanel } from "../budget/OrdersPanel";
+
+type AffectedOrder = { id: string; name: string; category: BudgetCategory; dayId: string };
 
 export type OverviewPageProps = {
   trip: Trip;
@@ -13,6 +18,8 @@ export type OverviewPageProps = {
   onMoveDay: (activeDayId: string, overDayId: string) => void | Promise<unknown>;
   isSaving?: boolean;
   onOpenHotels?: () => void;
+  onChangeDateRange?: (startDate: string, endDate: string, confirmed: boolean) => Promise<{ affectedOrders: AffectedOrder[] }>;
+  onOrderStatusChange?: (orderId: string, status: OrderStatus) => void | Promise<unknown>;
 };
 
 export function OverviewPage({
@@ -25,10 +32,16 @@ export function OverviewPage({
   onMoveDay,
   isSaving = false,
   onOpenHotels = () => undefined,
+  onChangeDateRange,
+  onOrderStatusChange = () => undefined,
 }: OverviewPageProps) {
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; dayNumber: number }>();
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string>();
+  const [rangeStart, setRangeStart] = useState(trip.startDate);
+  const [rangeEnd, setRangeEnd] = useState(trip.endDate);
+  const [rangeWarning, setRangeWarning] = useState<{ startDate: string; endDate: string; orders: AffectedOrder[] }>();
+  const [rangeError, setRangeError] = useState<string>();
   const deleteTriggerRef = useRef<HTMLButtonElement>(null);
   const confirmButtonRef = useRef<HTMLButtonElement>(null);
   const cancelButtonRef = useRef<HTMLButtonElement>(null);
@@ -50,6 +63,28 @@ export function OverviewPage({
     }
     cancelButtonRef.current?.focus();
   }, [dialogOpen]);
+
+  useEffect(() => {
+    /* oxlint-disable react/set-state-in-effect -- the form mirrors a persisted trip replacement. */
+    setRangeStart(trip.startDate);
+    setRangeEnd(trip.endDate);
+    /* oxlint-enable react/set-state-in-effect */
+  }, [trip.startDate, trip.endDate]);
+
+  async function requestDateRange(confirmed = false) {
+    if (!onChangeDateRange) return;
+    setRangeError(undefined);
+    try {
+      const result = await onChangeDateRange(rangeStart, rangeEnd, confirmed);
+      if (!confirmed && result.affectedOrders.length > 0) {
+        setRangeWarning({ startDate: rangeStart, endDate: rangeEnd, orders: result.affectedOrders });
+        return;
+      }
+      setRangeWarning(undefined);
+    } catch (error) {
+      setRangeError(error instanceof Error ? error.message : "日期修改失败，请重试");
+    }
+  }
 
   function closeDeleteDialog() {
     const dialog = deleteDialogRef.current;
@@ -121,8 +156,8 @@ export function OverviewPage({
           <p className="travelers">{trip.travelers.map((traveler) => traveler.name).join(" / ")}</p>
         </div>
         <dl className="trip-statuses">
-          <div><dt>预算</dt><dd>预算数据尚未接入</dd></div>
-          <div><dt>预订</dt><dd>预订数据尚未接入</dd></div>
+          <div><dt>预算</dt><dd>{(trip.orders ?? []).length ? "已汇总订单" : "暂无订单数据"}</dd></div>
+          <div><dt>预订</dt><dd>{(trip.orders ?? []).length ? "可在下方更新状态" : "尚未录入订单"}</dd></div>
         </dl>
         <button type="button" className="hotel-open" onClick={onOpenHotels}>酒店比较</button>
       </header>
@@ -217,6 +252,26 @@ export function OverviewPage({
           <p className="empty-state">请先新增一天</p>
         )}
       </section>
+
+      {onChangeDateRange ? <section className="date-range" aria-labelledby="date-range-heading">
+        <div><p className="eyebrow">日期</p><h2 id="date-range-heading">调整旅行日期</h2></div>
+        <label>开始日期<input type="date" value={rangeStart} onChange={(event) => setRangeStart(event.target.value)} /></label>
+        <label>结束日期<input type="date" value={rangeEnd} onChange={(event) => setRangeEnd(event.target.value)} /></label>
+        <button type="button" onClick={() => void requestDateRange()} disabled={isSaving}>更新日期</button>
+        {rangeError ? <p role="alert">{rangeError}</p> : null}
+      </section> : null}
+
+      {rangeWarning ? <dialog className="date-warning" open aria-modal="true" aria-labelledby="date-warning-title">
+        <h2 id="date-warning-title">这些订单关联的旅行日将被移除</h2>
+        <p>订单不会自动删除或改写。确认后只调整日期与行程日，请随后核对订单。</p>
+        <ul>{rangeWarning.orders.map((order) => <li key={order.id}>{order.category === "hotel" ? "酒店" : "门票"} · {order.name}</li>)}</ul>
+        <div><button type="button" className="danger-button" onClick={() => void requestDateRange(true)}>仍然调整日期</button><button type="button" onClick={() => setRangeWarning(undefined)}>保留当前日期</button></div>
+      </dialog> : null}
+
+      <div className="overview-sidepanels">
+        <BudgetPanel trip={trip} />
+        <OrdersPanel orders={trip.orders ?? []} onStatusChange={onOrderStatusChange} disabled={isSaving} />
+      </div>
 
       {trip.unscheduledItemIds.length > 0 ? (
         <section className="unscheduled" aria-labelledby="unscheduled-heading">

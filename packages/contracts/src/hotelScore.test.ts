@@ -37,7 +37,7 @@ describe("scoreHotels", () => {
 
   it("calculates nights from selected hotel dates rather than a fixed trip length", () => {
     const trip: Trip = {
-      id: "trip", title: "测试", startDate: "2026-10-03", endDate: "2026-10-10", travelers: [], version: 0, unscheduledItemIds: [],
+      id: "trip", title: "测试", startDate: "2026-10-03", endDate: "2026-10-10", travelers: [], version: 0, unscheduledItemIds: [], orders: [],
       days: [
         { id: "d1", date: "2026-10-03", city: "深圳", itemIds: [] },
         { id: "d2", date: "2026-10-04", city: "香港", itemIds: [], hotelId: "near" },

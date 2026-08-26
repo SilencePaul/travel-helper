@@ -39,7 +39,10 @@ test("restaurant drawer shows sourced food details and navigation", async () => 
   expect(screen.getByText("Caffè Latte")).toBeVisible();
   expect(screen.getByRole("link", { name: /官方资料.*2026年8月26日/ })).toBeVisible();
   expect(screen.getByRole("link", { name: "小红书搜索" })).toBeVisible();
-  await user.click(screen.getByRole("link", { name: "打开高德导航" }));
+  const navigation = screen.getByRole("link", { name: "开始导航" });
+  expect(navigation).toHaveAttribute("href", expect.stringContaining("uri.amap.com/navigation"));
+  expect(navigation).toHaveAttribute("href", expect.stringContaining("callnative=1"));
+  await user.click(navigation);
 });
 
 test("attraction drawer shows visit details and official booking", () => {

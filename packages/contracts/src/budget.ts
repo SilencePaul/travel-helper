@@ -1,0 +1,65 @@
+import { z } from "zod";
+import type { Trip } from "./trip";
+
+export const BudgetCategorySchema = z.enum(["flight", "hotel", "transport", "ticket", "food"]);
+export const OrderStatusSchema = z.enum(["unpaid", "partial", "paid"]);
+
+/** Monetary values are stored in the smallest unit (for example cents). */
+export const BudgetItemSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  category: BudgetCategorySchema,
+  estimated: z.number().int().nonnegative(),
+  paid: z.number().int().nonnegative(),
+  currency: z.string().min(1).max(8),
+  status: OrderStatusSchema,
+  dayId: z.string().min(1).optional(),
+});
+
+export type BudgetCategory = z.infer<typeof BudgetCategorySchema>;
+export type OrderStatus = z.infer<typeof OrderStatusSchema>;
+export type BudgetItem = z.infer<typeof BudgetItemSchema>;
+
+export type CurrencyTotals = Record<string, { estimated: number; paid: number }>;
+
+function addToTotals(totals: CurrencyTotals, item: BudgetItem) {
+  const current = totals[item.currency] ?? { estimated: 0, paid: 0 };
+  totals[item.currency] = {
+    estimated: current.estimated + item.estimated,
+    paid: current.paid + item.paid,
+  };
+}
+
+function emptyCategoryTotals(): Record<BudgetCategory, CurrencyTotals> {
+  return { flight: {}, hotel: {}, transport: {}, ticket: {}, food: {} };
+}
+
+export function budgetTotals(trip: Trip) {
+  const tripTotals: CurrencyTotals = {};
+  const byCategory = emptyCategoryTotals();
+  const byDay = Object.fromEntries(trip.days.map((day) => [day.id, {} as CurrencyTotals]));
+
+  // Older local drafts are parsed with the schema on persistence, but tolerate
+  // an in-memory legacy repository during migration.
+  (trip.orders ?? []).forEach((order) => {
+    addToTotals(tripTotals, order);
+    addToTotals(byCategory[order.category]!, order);
+    const dayTotals = order.dayId ? byDay[order.dayId] : undefined;
+    if (dayTotals) addToTotals(dayTotals, order);
+  });
+
+  return { trip: tripTotals, byCategory, byDay };
+}
+
+/** Orders are never implicitly deleted when the day range is shortened. */
+export function getDateRangeOrderWarning(trip: Trip, startDate: string, endDate: string) {
+  const keptDayIds = new Set(trip.days
+    .filter((day) => day.date >= startDate && day.date <= endDate)
+    .map((day) => day.id));
+
+  return (trip.orders ?? [])
+    .filter((order) => (order.category === "hotel" || order.category === "ticket")
+      && order.dayId
+      && !keptDayIds.has(order.dayId))
+    .map(({ id, name, category, dayId }) => ({ id, name, category, dayId: dayId! }));
+}

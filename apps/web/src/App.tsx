@@ -5,6 +5,9 @@ import {
   duplicateDay,
   moveDay,
   removeDay,
+  reconcileDays,
+  getDateRangeOrderWarning,
+  type OrderStatus,
   type TravelDay,
   type Trip,
   type TripRepository,
@@ -115,6 +118,30 @@ function TripRoutes({ createDayId = () => "day-ui", routeService }: Pick<AppProp
     })).then((saved) => Boolean(saved));
   }
 
+  function changeDateRange(startDate: string, endDate: string, confirmed: boolean) {
+    const affectedOrders = getDateRangeOrderWarning(trip, startDate, endDate);
+    if (!confirmed && affectedOrders.length > 0) return Promise.resolve({ affectedOrders });
+    return mutateTrip((current) => {
+      const result = reconcileDays(current.days, startDate, endDate, current.unscheduledItemIds);
+      return {
+        ...current,
+        startDate,
+        endDate,
+        days: result.days,
+        unscheduledItemIds: result.unscheduledItemIds,
+        // Keep orders exactly as entered: a warning requires a deliberate human review.
+        orders: current.orders ?? [],
+      };
+    }).then(() => ({ affectedOrders: [] }));
+  }
+
+  function changeOrderStatus(orderId: string, status: OrderStatus) {
+    return mutateTrip((current) => ({
+      ...current,
+      orders: (current.orders ?? []).map((order) => order.id === orderId ? { ...order, status } : order),
+    }));
+  }
+
   return (
     <div className="app-shell">
       <div className="sync-bar" role="status">{syncState}</div>
@@ -135,6 +162,8 @@ function TripRoutes({ createDayId = () => "day-ui", routeService }: Pick<AppProp
               onMoveDay={reorderDays}
               isSaving={syncState === "正在保存"}
               onOpenHotels={() => navigate("/hotels")}
+              onChangeDateRange={changeDateRange}
+              onOrderStatusChange={changeOrderStatus}
             />
           }
         />

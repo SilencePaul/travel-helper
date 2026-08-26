@@ -14,6 +14,7 @@ const trip: Trip = {
   travelers: [{ id: "yiming", name: "一鸣" }],
   days: [{ id: "hong-kong-day", date: "2026-10-05", city: "香港", itemIds: ["peak", "central-pier"] }],
   unscheduledItemIds: [],
+  orders: [],
   version: 0,
 };
 

@@ -23,7 +23,7 @@ function deferred<T>(): Deferred<T> {
 }
 
 function versionedTrip(version: number, title = `version-${version}`): Trip {
-  return { ...structuredClone(seed), version, title };
+  return { ...structuredClone(seed), orders: [], version, title };
 }
 
 class ControlledTripRepository implements TripRepository {
