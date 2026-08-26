@@ -1,1 +1,15 @@
 .worktrees/
+.env
+.env.*
+node_modules/
+test-results/
+playwright-report/
+
+**/.env
+**/.env.*
+!**/.env.example
+**/node_modules/
+**/test-results/
+**/playwright-report/
+!.env.example
+!apps/web/.env.example
