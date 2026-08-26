@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  appendDay,
   duplicateDay,
   insertDay,
   moveDay,
@@ -113,6 +114,19 @@ describe("manual day operations", () => {
       { id: "day-1", date: "2026-10-03", city: "深圳", itemIds: ["place-1"] },
       { id: "day-2", date: "2026-10-04", city: "香港", itemIds: ["place-2"] },
     ]);
+  });
+
+  it("appends after the latest date without shifting existing days", () => {
+    const gapped = [current[0]!, { ...current[1]!, date: "2026-10-05" }];
+
+    const result = appendDay(gapped, "2026-10-03", "day-new");
+
+    expect(result).toEqual([
+      gapped[0],
+      gapped[1],
+      { id: "day-new", date: "2026-10-06", city: "", itemIds: [] },
+    ]);
+    expect(gapped.map((day) => day.date)).toEqual(["2026-10-03", "2026-10-05"]);
   });
 
   it("duplicates with an injected stable ID and independent item IDs", () => {

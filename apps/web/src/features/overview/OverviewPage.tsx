@@ -37,8 +37,8 @@ export function OverviewPage({
           <p className="travelers">{trip.travelers.map((traveler) => traveler.name).join(" / ")}</p>
         </div>
         <dl className="trip-statuses">
-          <div><dt>预算</dt><dd>预算待完善</dd></div>
-          <div><dt>预订</dt><dd>预订待完善</dd></div>
+          <div><dt>预算</dt><dd>预算数据尚未接入</dd></div>
+          <div><dt>预订</dt><dd>预订数据尚未接入</dd></div>
         </dl>
       </header>
 

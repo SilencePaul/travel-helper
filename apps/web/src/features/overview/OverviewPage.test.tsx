@@ -25,6 +25,13 @@ const eightDayTrip: Trip = {
   version: 0,
 };
 
+const threeDayTrip: Trip = {
+  ...eightDayTrip,
+  id: "trip-three-days",
+  endDate: "2026-10-05",
+  days: eightDayTrip.days.slice(0, 3).map((day) => ({ ...day, itemIds: [] })),
+};
+
 test("renders every dynamic travel day and traveler", async () => {
   const onSelectDay = vi.fn();
 
@@ -43,6 +50,10 @@ test("renders every dynamic travel day and traveler", async () => {
   expect(screen.getAllByRole("tab", { name: /D\d/ })).toHaveLength(8);
   expect(screen.getByText("一鸣 / 美垚")).toBeVisible();
   expect(screen.getAllByText("待预报").length).toBeGreaterThan(0);
+  expect(screen.getByText("预算数据尚未接入")).toBeVisible();
+  expect(screen.getByText("预订数据尚未接入")).toBeVisible();
+  expect(screen.queryByText("预算待完善")).not.toBeInTheDocument();
+  expect(screen.queryByText("预订待完善")).not.toBeInTheDocument();
   expect(screen.getByRole("tab", { name: /D1/ })).toHaveAttribute("aria-selected", "true");
 
   await userEvent.click(screen.getByRole("tab", { name: /D3/ }));
@@ -84,4 +95,46 @@ test("persists day controls and keeps removed items available to arrange", async
   await user.click(screen.getByRole("button", { name: "新增一天" }));
   await waitFor(() => expect(screen.getAllByRole("tab", { name: /D\d/ })).toHaveLength(9));
   await expect(repository.load(eightDayTrip.id)).resolves.toMatchObject({ version: 3 });
+});
+
+test("appends after the last calendar date without shifting dates across a deletion gap", async () => {
+  const user = userEvent.setup();
+  const repository = new LocalTripRepository(threeDayTrip);
+
+  render(
+    <App
+      repository={repository}
+      tripId={threeDayTrip.id}
+      createDayId={() => "day-new"}
+    />,
+  );
+
+  await user.click(await screen.findByRole("tab", { name: /D2/ }));
+  await user.click(await screen.findByRole("button", { name: /返回行程总览/ }));
+  await user.click(await screen.findByRole("button", { name: "删除当天" }));
+  await user.click(screen.getByRole("button", { name: "确认删除" }));
+
+  await waitFor(async () => {
+    await expect(repository.load(threeDayTrip.id)).resolves.toMatchObject({
+      version: 1,
+      days: [
+        { id: "day-1", date: "2026-10-03" },
+        { id: "day-3", date: "2026-10-05" },
+      ],
+    });
+  });
+
+  await user.click(screen.getByRole("button", { name: "新增一天" }));
+
+  await waitFor(async () => {
+    await expect(repository.load(threeDayTrip.id)).resolves.toMatchObject({
+      version: 2,
+      endDate: "2026-10-06",
+      days: [
+        { id: "day-1", date: "2026-10-03" },
+        { id: "day-3", date: "2026-10-05" },
+        { id: "day-new", date: "2026-10-06", city: "", itemIds: [] },
+      ],
+    });
+  });
 });

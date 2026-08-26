@@ -1,8 +1,8 @@
 import { BrowserRouter, Route, Routes, useNavigate, useParams } from "react-router-dom";
 import { useState } from "react";
 import {
+  appendDay,
   duplicateDay,
-  insertDay,
   moveDay,
   removeDay,
   type TravelDay,
@@ -57,7 +57,7 @@ function TripRoutes({ createDayId = () => "day-ui" }: Pick<AppProps, "createDayI
 
   function addDay() {
     const id = uniqueDayId(trip.days, createDayId());
-    const days = insertDay(trip.days, trip.days.length, trip.startDate, id);
+    const days = appendDay(trip.days, trip.startDate, id);
     persist(withDayRange(trip, days));
   }
 

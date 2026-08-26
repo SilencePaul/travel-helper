@@ -130,6 +130,25 @@ export function insertDay(
   return reassignDates(days, start);
 }
 
+export function appendDay(
+  current: TravelDay[],
+  start: string,
+  id: string,
+): TravelDay[] {
+  const startDate = parseDate(start);
+  assertDayDates(current);
+  assertUnusedDayId(current, id);
+  const latestDate = current.reduce<string | undefined>(
+    (latest, day) => !latest || day.date > latest ? day.date : latest,
+    undefined,
+  );
+  const date = latestDate
+    ? formatISO(addDays(parseDate(latestDate), 1), { representation: "date" })
+    : formatISO(startDate, { representation: "date" });
+
+  return [...current, { id, date, city: "", itemIds: [] }];
+}
+
 export function duplicateDay(
   current: TravelDay[],
   index: number,
