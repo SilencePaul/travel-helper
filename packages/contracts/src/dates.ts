@@ -137,6 +137,7 @@ export function appendDay(
 ): TravelDay[] {
   const startDate = parseDate(start);
   assertDayDates(current);
+  assertUniqueDayDates(current);
   assertUnusedDayId(current, id);
   const latestDate = current.reduce<string | undefined>(
     (latest, day) => !latest || day.date > latest ? day.date : latest,
@@ -199,8 +200,12 @@ export function removeDay(
     throw new Error("日期索引无效");
   }
 
+  const days = current.filter((_, dayIndex) => dayIndex !== index);
+  const scheduledItemIds = new Set(days.flatMap((day) => day.itemIds));
+
   return {
-    days: current.filter((_, dayIndex) => dayIndex !== index),
-    unscheduledItemIds: [...new Set([...unscheduledItemIds, ...removed.itemIds])],
+    days,
+    unscheduledItemIds: [...new Set([...unscheduledItemIds, ...removed.itemIds])]
+      .filter((itemId) => !scheduledItemIds.has(itemId)),
   };
 }

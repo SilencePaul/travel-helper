@@ -13,26 +13,47 @@ import {
   sortableKeyboardCoordinates,
   useSortable,
 } from "@dnd-kit/sortable";
-import type { CSSProperties } from "react";
+import {
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent,
+  type RefCallback,
+} from "react";
 import type { TravelDay } from "@travel/contracts";
+import { getDayPanelId, getDayTabId } from "./dayTabIds";
 
 type DayStripProps = {
   days: TravelDay[];
   selectedDayId: string | undefined;
   onSelectDay: (dayId: string) => void;
   onMoveDay: (activeDayId: string, overDayId: string) => void;
+  disabled?: boolean;
 };
 
 type SortableDayProps = {
   day: TravelDay;
   dayNumber: number;
   selected: boolean;
+  tabStop: boolean;
   onSelectDay: (dayId: string) => void;
+  onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
+  tabRef: RefCallback<HTMLButtonElement>;
+  disabled: boolean;
 };
 
-function SortableDay({ day, dayNumber, selected, onSelectDay }: SortableDayProps) {
+function SortableDay({
+  day,
+  dayNumber,
+  selected,
+  tabStop,
+  onSelectDay,
+  onKeyDown,
+  tabRef,
+  disabled,
+}: SortableDayProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
-    useSortable({ id: day.id });
+    useSortable({ id: day.id, disabled });
   const style: CSSProperties = {
     transform: transform
       ? `translate3d(${String(transform.x)}px, ${String(transform.y)}px, 0)`
@@ -44,11 +65,16 @@ function SortableDay({ day, dayNumber, selected, onSelectDay }: SortableDayProps
   return (
     <li ref={setNodeRef} className="day-tab-wrap" style={style}>
       <button
+        ref={tabRef}
+        id={getDayTabId(day.id)}
         type="button"
         role="tab"
         aria-selected={selected}
+        aria-controls={getDayPanelId(day.id)}
+        tabIndex={tabStop ? 0 : -1}
         className="day-tab"
         onClick={() => onSelectDay(day.id)}
+        onKeyDown={onKeyDown}
       >
         <strong>D{dayNumber}</strong>
         <span>{day.date}</span>
@@ -61,6 +87,7 @@ function SortableDay({ day, dayNumber, selected, onSelectDay }: SortableDayProps
         aria-label={`拖动 D${dayNumber}`}
         {...attributes}
         {...listeners}
+        disabled={disabled}
       >
         拖动
       </button>
@@ -68,20 +95,47 @@ function SortableDay({ day, dayNumber, selected, onSelectDay }: SortableDayProps
   );
 }
 
-export function DayStrip({ days, selectedDayId, onSelectDay, onMoveDay }: DayStripProps) {
+export function DayStrip({
+  days,
+  selectedDayId,
+  onSelectDay,
+  onMoveDay,
+  disabled = false,
+}: DayStripProps) {
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const [requestedTabStopId, setRequestedTabStopId] = useState(selectedDayId);
+  const tabStopId = days.some((day) => day.id === requestedTabStopId)
+    ? requestedTabStopId
+    : selectedDayId;
   const sensors = useSensors(
     useSensor(PointerSensor),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
   function handleDragEnd(event: DragEndEvent) {
-    if (event.over && event.active.id !== event.over.id) {
+    if (!disabled && event.over && event.active.id !== event.over.id) {
       onMoveDay(String(event.active.id), String(event.over.id));
     }
   }
 
+  function handleTabKeyDown(index: number, event: KeyboardEvent<HTMLButtonElement>) {
+    let targetIndex: number | undefined;
+    if (event.key === "ArrowRight") targetIndex = (index + 1) % days.length;
+    if (event.key === "ArrowLeft") targetIndex = (index - 1 + days.length) % days.length;
+    if (event.key === "Home") targetIndex = 0;
+    if (event.key === "End") targetIndex = days.length - 1;
+    if (targetIndex === undefined) return;
+    event.preventDefault();
+    setRequestedTabStopId(days[targetIndex]?.id);
+    tabRefs.current[targetIndex]?.focus();
+  }
+
   return (
-    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+    <DndContext
+      sensors={disabled ? [] : sensors}
+      collisionDetection={closestCenter}
+      onDragEnd={handleDragEnd}
+    >
       <SortableContext items={days.map((day) => day.id)} strategy={horizontalListSortingStrategy}>
         <ol className="day-strip" role="tablist" aria-label="旅行日期">
           {days.map((day, index) => (
@@ -90,7 +144,13 @@ export function DayStrip({ days, selectedDayId, onSelectDay, onMoveDay }: DayStr
               day={day}
               dayNumber={index + 1}
               selected={day.id === selectedDayId}
+              tabStop={day.id === tabStopId}
               onSelectDay={onSelectDay}
+              onKeyDown={(event) => handleTabKeyDown(index, event)}
+              tabRef={(element) => {
+                tabRefs.current[index] = element;
+              }}
+              disabled={disabled}
             />
           ))}
         </ol>

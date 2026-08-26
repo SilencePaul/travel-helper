@@ -44,48 +44,55 @@ function withDayRange(trip: Trip, days: TravelDay[], unscheduledItemIds = trip.u
 }
 
 function TripRoutes({ createDayId = () => "day-ui" }: Pick<AppProps, "createDayId">) {
-  const { trip, saveTrip, syncState } = useTrip();
+  const { trip, mutateTrip, syncState } = useTrip();
   const navigate = useNavigate();
   const [requestedDayId, setRequestedDayId] = useState<string>();
   const selectedDayId = trip.days.some((day) => day.id === requestedDayId)
     ? requestedDayId
     : trip.days[0]?.id;
 
-  function persist(next: Trip) {
-    void saveTrip(next).catch(() => undefined);
-  }
-
   function addDay() {
-    const id = uniqueDayId(trip.days, createDayId());
-    const days = appendDay(trip.days, trip.startDate, id);
-    persist(withDayRange(trip, days));
+    return mutateTrip((current) => {
+      const id = uniqueDayId(current.days, createDayId());
+      const days = appendDay(current.days, current.startDate, id);
+      return withDayRange(current, days);
+    });
   }
 
   function duplicateSelectedDay() {
-    const selectedIndex = trip.days.findIndex((day) => day.id === selectedDayId);
-    if (selectedIndex < 0) return;
-    const days = duplicateDay(
-      trip.days,
-      selectedIndex,
-      trip.startDate,
-      () => uniqueDayId(trip.days, createDayId()),
-    );
-    persist(withDayRange(trip, days));
+    return mutateTrip((current) => {
+      const selectedIndex = current.days.findIndex((day) => day.id === selectedDayId);
+      if (selectedIndex < 0) return undefined;
+      const days = duplicateDay(
+        current.days,
+        selectedIndex,
+        current.startDate,
+        () => uniqueDayId(current.days, createDayId()),
+      );
+      return withDayRange(current, days);
+    });
   }
 
-  function deleteSelectedDay() {
-    const selectedIndex = trip.days.findIndex((day) => day.id === selectedDayId);
-    if (selectedIndex < 0 || trip.days.length <= 1) return;
-    const result = removeDay(trip.days, selectedIndex, trip.unscheduledItemIds);
-    persist(withDayRange(trip, result.days, result.unscheduledItemIds));
+  async function deleteSelectedDay() {
+    let adjacentDayId: string | undefined;
+    const saved = await mutateTrip((current) => {
+      const selectedIndex = current.days.findIndex((day) => day.id === selectedDayId);
+      if (selectedIndex < 0 || current.days.length <= 1) return undefined;
+      adjacentDayId = current.days[selectedIndex + 1]?.id ?? current.days[selectedIndex - 1]?.id;
+      const result = removeDay(current.days, selectedIndex, current.unscheduledItemIds);
+      return withDayRange(current, result.days, result.unscheduledItemIds);
+    });
+    if (saved && adjacentDayId) setRequestedDayId(adjacentDayId);
   }
 
   function reorderDays(activeDayId: string, overDayId: string) {
-    const fromIndex = trip.days.findIndex((day) => day.id === activeDayId);
-    const toIndex = trip.days.findIndex((day) => day.id === overDayId);
-    if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
-    const days = moveDay(trip.days, fromIndex, toIndex, trip.startDate);
-    persist(withDayRange(trip, days));
+    return mutateTrip((current) => {
+      const fromIndex = current.days.findIndex((day) => day.id === activeDayId);
+      const toIndex = current.days.findIndex((day) => day.id === overDayId);
+      if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return undefined;
+      const days = moveDay(current.days, fromIndex, toIndex, current.startDate);
+      return withDayRange(current, days);
+    });
   }
 
   return (
@@ -110,17 +117,27 @@ function TripRoutes({ createDayId = () => "day-ui" }: Pick<AppProps, "createDayI
             />
           }
         />
-        <Route path="/day/:dayId" element={<DayRoute trip={trip} />} />
+        <Route
+          path="/day/:dayId"
+          element={
+            <DayRoute
+              trip={trip}
+              onBack={(dayId) => {
+                setRequestedDayId(dayId);
+                navigate("/");
+              }}
+            />
+          }
+        />
         <Route path="*" element={<DayPage trip={trip} dayId={undefined} onBack={() => navigate("/")} />} />
       </Routes>
     </div>
   );
 }
 
-function DayRoute({ trip }: { trip: Trip }) {
+function DayRoute({ trip, onBack }: { trip: Trip; onBack: (dayId: string | undefined) => void }) {
   const { dayId } = useParams();
-  const navigate = useNavigate();
-  return <DayPage trip={trip} dayId={dayId} onBack={() => navigate("/")} />;
+  return <DayPage trip={trip} dayId={dayId} onBack={() => onBack(dayId)} />;
 }
 
 export default function App({ repository, createDayId, tripId }: AppProps) {

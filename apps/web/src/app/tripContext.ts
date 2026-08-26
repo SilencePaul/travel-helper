@@ -9,8 +9,11 @@ export type TripSyncState =
 export type TripContextValue = {
   trip: Trip;
   saveTrip: (next: Trip) => Promise<Trip>;
+  mutateTrip: (mutation: TripMutation) => Promise<Trip | undefined>;
   syncState: TripSyncState;
 };
+
+export type TripMutation = (current: Trip) => Trip | undefined;
 
 export const TripContext = createContext<TripContextValue | undefined>(undefined);
 

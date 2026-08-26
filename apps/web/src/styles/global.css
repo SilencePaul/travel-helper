@@ -97,9 +97,23 @@ h2 { margin: 0; font-size: 24px; }
 }
 .selected-day h3 { margin: 0; font-size: 22px; }
 .selected-day > p:last-child { margin-bottom: 0; color: #697169; }
-.delete-confirmation { display: flex; justify-content: space-between; gap: 16px; align-items: center; border-color: #e0bcb7; }
-.delete-confirmation p { margin: 0; }
-.delete-confirmation div { display: flex; gap: 8px; }
+.delete-confirmation {
+  position: fixed;
+  z-index: 10;
+  top: 50%;
+  left: 50%;
+  display: flex;
+  width: min(480px, calc(100vw - 32px));
+  justify-content: space-between;
+  gap: 24px;
+  align-items: center;
+  border-color: #e0bcb7;
+  box-shadow: 0 24px 80px rgb(35 29 25 / 24%);
+  transform: translate(-50%, -50%);
+}
+.delete-confirmation h3, .delete-confirmation p { margin: 0; }
+.delete-confirmation .delete-copy { display: grid; gap: 6px; }
+.delete-confirmation > div:last-child { display: flex; gap: 8px; }
 .unscheduled ul, .timeline { padding-left: 22px; }
 
 .day-page { padding-top: 44px; }

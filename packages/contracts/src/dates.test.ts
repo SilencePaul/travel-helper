@@ -129,6 +129,22 @@ describe("manual day operations", () => {
     expect(gapped.map((day) => day.date)).toEqual(["2026-10-03", "2026-10-05"]);
   });
 
+  it("rejects malformed or duplicate existing dates before append", () => {
+    expect(() => appendDay(
+      [{ id: "bad", date: "not-a-date", city: "", itemIds: [] }],
+      "2026-10-03",
+      "day-new",
+    )).toThrow("日期格式无效");
+    expect(() => appendDay(
+      [
+        current[0]!,
+        { ...current[1]!, date: current[0]!.date },
+      ],
+      "2026-10-03",
+      "day-new",
+    )).toThrow("日期不能重复");
+  });
+
   it("duplicates with an injected stable ID and independent item IDs", () => {
     const result = duplicateDay(current, 0, "2026-10-03", () => "day-copy");
 
@@ -187,6 +203,22 @@ describe("manual day operations", () => {
     const result = removeDay(current, 1, ["place-existing", "place-2"]);
 
     expect(result.unscheduledItemIds).toEqual(["place-existing", "place-2"]);
+  });
+
+  it("keeps scheduled item IDs out of the unscheduled bucket", () => {
+    const result = removeDay(
+      [
+        { ...current[0]!, itemIds: ["place-shared", "place-removed"] },
+        { ...current[1]!, itemIds: ["place-shared"] },
+      ],
+      0,
+      ["place-existing", "place-shared"],
+    );
+
+    expect(result.unscheduledItemIds).toEqual(["place-existing", "place-removed"]);
+    const scheduledItemIds = new Set(result.days.flatMap((day) => day.itemIds));
+    expect(result.unscheduledItemIds.every((itemId) => !scheduledItemIds.has(itemId))).toBe(true);
+    expect(result.unscheduledItemIds).not.toContain("place-shared");
   });
 
   it("rejects invalid indices", () => {

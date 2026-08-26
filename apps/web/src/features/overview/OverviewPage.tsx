@@ -1,15 +1,16 @@
 import type { Trip } from "@travel/contracts";
-import { useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { DayStrip } from "./DayStrip";
+import { getDayPanelId, getDayTabId } from "./dayTabIds";
 
 export type OverviewPageProps = {
   trip: Trip;
   selectedDayId: string | undefined;
   onSelectDay: (dayId: string) => void;
-  onAddDay: () => void;
-  onDuplicateDay: () => void;
-  onDeleteDay: () => void;
-  onMoveDay: (activeDayId: string, overDayId: string) => void;
+  onAddDay: () => void | Promise<unknown>;
+  onDuplicateDay: () => void | Promise<unknown>;
+  onDeleteDay: () => void | Promise<unknown>;
+  onMoveDay: (activeDayId: string, overDayId: string) => void | Promise<unknown>;
   isSaving?: boolean;
 };
 
@@ -24,9 +25,46 @@ export function OverviewPage({
   isSaving = false,
 }: OverviewPageProps) {
   const [deleteDayId, setDeleteDayId] = useState<string>();
+  const deleteTriggerRef = useRef<HTMLButtonElement>(null);
+  const confirmButtonRef = useRef<HTMLButtonElement>(null);
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
   const requestedIndex = trip.days.findIndex((day) => day.id === selectedDayId);
   const selectedIndex = requestedIndex >= 0 ? requestedIndex : trip.days.length > 0 ? 0 : -1;
   const selectedDay = trip.days[selectedIndex];
+  const dialogOpen = deleteDayId === selectedDay?.id && Boolean(selectedDay);
+
+  useEffect(() => {
+    if (dialogOpen) cancelButtonRef.current?.focus();
+  }, [dialogOpen]);
+
+  function cancelDelete() {
+    setDeleteDayId(undefined);
+    deleteTriggerRef.current?.focus();
+  }
+
+  function handleDialogKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelDelete();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    if (!event.shiftKey && document.activeElement === cancelButtonRef.current) {
+      event.preventDefault();
+      confirmButtonRef.current?.focus();
+    } else if (event.shiftKey && document.activeElement === confirmButtonRef.current) {
+      event.preventDefault();
+      cancelButtonRef.current?.focus();
+    }
+  }
+
+  async function confirmDelete() {
+    setDeleteDayId(undefined);
+    await onDeleteDay();
+    window.setTimeout(() => {
+      document.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]')?.focus();
+    }, 0);
+  }
 
   return (
     <main className="overview">
@@ -54,6 +92,7 @@ export function OverviewPage({
               复制当天
             </button>
             <button
+              ref={deleteTriggerRef}
               type="button"
               className="danger-button"
               onClick={() => setDeleteDayId(selectedDay?.id)}
@@ -69,29 +108,43 @@ export function OverviewPage({
           selectedDayId={selectedDay?.id}
           onSelectDay={onSelectDay}
           onMoveDay={onMoveDay}
+          disabled={isSaving}
         />
 
-        {deleteDayId === selectedDay?.id && selectedDay ? (
-          <div className="delete-confirmation" role="alertdialog" aria-label="确认删除日期">
-            <p>确定删除 D{selectedIndex + 1} 吗？</p>
+        {dialogOpen && selectedDay ? (
+          <div
+            className="delete-confirmation"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby={`delete-title-${selectedDay.id}`}
+            aria-describedby={`delete-description-${selectedDay.id}`}
+            onKeyDown={handleDialogKeyDown}
+          >
+            <div className="delete-copy">
+              <h3 id={`delete-title-${selectedDay.id}`}>删除 D{selectedIndex + 1}</h3>
+              <p id={`delete-description-${selectedDay.id}`}>确定删除 D{selectedIndex + 1} 吗？</p>
+            </div>
             <div>
               <button
+                ref={confirmButtonRef}
                 type="button"
                 className="danger-button"
-                onClick={() => {
-                  setDeleteDayId(undefined);
-                  onDeleteDay();
-                }}
+                onClick={() => void confirmDelete()}
               >
                 确认删除
               </button>
-              <button type="button" onClick={() => setDeleteDayId(undefined)}>取消</button>
+              <button ref={cancelButtonRef} type="button" onClick={cancelDelete}>取消</button>
             </div>
           </div>
         ) : null}
 
         {selectedDay ? (
-          <article className="selected-day" role="tabpanel">
+          <article
+            id={getDayPanelId(selectedDay.id)}
+            className="selected-day"
+            role="tabpanel"
+            aria-labelledby={getDayTabId(selectedDay.id)}
+          >
             <p className="eyebrow">当前选中</p>
             <h3>D{selectedIndex + 1} · {selectedDay.city || "待安排"}</h3>
             <p>{selectedDay.date} · 待预报</p>
