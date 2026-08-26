@@ -31,6 +31,28 @@ function assertDayDates(days: TravelDay[]) {
   days.forEach((day) => parseDate(day.date));
 }
 
+function assertUniqueDayDates(days: TravelDay[]) {
+  const dates = new Set<string>();
+  for (const day of days) {
+    if (dates.has(day.date)) {
+      throw new Error("日期不能重复");
+    }
+    dates.add(day.date);
+  }
+}
+
+function createGeneratedDayId(date: string, existingIds: Set<string>) {
+  const baseId = `day-${date}`;
+  let id = baseId;
+  let suffix = 2;
+  while (existingIds.has(id)) {
+    id = `${baseId}-${suffix}`;
+    suffix += 1;
+  }
+  existingIds.add(id);
+  return id;
+}
+
 function assertIndex(index: number, length: number, allowEnd = false) {
   const maximum = allowEnd ? length : length - 1;
   if (!Number.isInteger(index) || index < 0 || index > maximum) {
@@ -58,6 +80,7 @@ export function reconcileDays(
   current: TravelDay[],
   start: string,
   end: string,
+  existingUnscheduledItemIds: string[] = [],
 ): ReconcileDaysResult {
   const startDate = parseDate(start);
   const endDate = parseDate(end);
@@ -67,14 +90,16 @@ export function reconcileDays(
   }
 
   assertDayDates(current);
+  assertUniqueDayDates(current);
   const byDate = new Map(current.map((day) => [day.date, day]));
+  const existingIds = new Set(current.map((day) => day.id));
   const dates = Array.from({ length: count }, (_, index) =>
     formatISO(addDays(startDate, index), { representation: "date" }),
   );
   const days = dates.map(
     (date, index) =>
       byDate.get(date) ?? {
-        id: `day-${date}`,
+        id: createGeneratedDayId(date, existingIds),
         date,
         city: index === 0 ? "待安排" : "",
         itemIds: [],
@@ -85,7 +110,10 @@ export function reconcileDays(
     .filter((day) => !retained.has(day.date))
     .flatMap((day) => day.itemIds);
 
-  return { days, unscheduledItemIds };
+  return {
+    days,
+    unscheduledItemIds: [...new Set([...existingUnscheduledItemIds, ...unscheduledItemIds])],
+  };
 }
 
 export function insertDay(

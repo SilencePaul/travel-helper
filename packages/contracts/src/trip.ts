@@ -17,6 +17,26 @@ export const TripSchema = z.object({
   days: z.array(TravelDaySchema),
   unscheduledItemIds: z.array(z.string()),
   version: z.number().int().nonnegative(),
+}).superRefine((trip, context) => {
+  if (trip.endDate < trip.startDate) {
+    context.addIssue({
+      code: "custom",
+      message: "结束日期不能早于开始日期",
+      path: ["endDate"],
+    });
+  }
+
+  const dayIds = new Set<string>();
+  trip.days.forEach((day, index) => {
+    if (dayIds.has(day.id)) {
+      context.addIssue({
+        code: "custom",
+        message: "日期 ID 不能重复",
+        path: ["days", index, "id"],
+      });
+    }
+    dayIds.add(day.id);
+  });
 });
 
 export type TravelDay = z.infer<typeof TravelDaySchema>;
