@@ -26,8 +26,8 @@ describe("HotelComparePage", () => {
     await user.click(screen.getAllByRole("button", { name: "选择此酒店" }).at(-1)!);
 
     expect(onSelectHotel).toHaveBeenCalledWith("park-hotel-hong-kong");
-    expect(screen.getByRole("button", { name: "香港百乐酒店" })).toHaveAttribute("aria-current", "location");
-    expect(screen.getByTestId("hotel-total")).toHaveTextContent("CNY 2266.08");
+    expect(screen.getByRole("button", { name: "在地图中定位 香港百乐酒店" })).toHaveAttribute("aria-current", "location");
+    expect(screen.getByTestId("hotel-total")).toHaveTextContent("CNY 2266.09");
     expect(screen.getAllByText(/非 2026 十一实时可订价/)).toHaveLength(2);
     expect(screen.getAllByRole("link", { name: /Booking\.com/ })[1]).toHaveAttribute("href", "https://www.booking.com/hotel/hk/parkhotel.zh-tw.html");
   });

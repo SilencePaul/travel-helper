@@ -18,7 +18,8 @@ export const HotelSchema = z.object({
   }),
   neighborhood: z.string().min(1),
   nightlyPrice: z.object({
-    amount: z.number().positive(),
+    snapshotTotalMinor: z.number().int().positive(),
+    snapshotNights: z.number().int().positive(),
     currency: z.string().min(1),
     scope: z.string().min(1),
     source: HotelSourceSchema,
@@ -29,14 +30,6 @@ export const HotelSchema = z.object({
   stationWalk: z.string().min(1),
   strengths: z.array(z.string().min(1)).min(1),
   drawbacks: z.array(z.string().min(1)).min(1),
-  commuteByDay: z.array(z.object({
-    date: z.string().date(),
-    firstPlace: z.string().min(1),
-    lastPlace: z.string().min(1),
-    outboundMinutes: z.number().int().nonnegative(),
-    returnMinutes: z.number().int().nonnegative(),
-    estimatedSteps: z.number().int().nonnegative(),
-  })),
 });
 
 export type Hotel = z.infer<typeof HotelSchema>;

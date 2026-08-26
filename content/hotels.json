@@ -6,7 +6,8 @@
     "coordinate": { "lng": 114.1722, "lat": 22.2972, "coordinateSystem": "GCJ02" },
     "neighborhood": "尖沙咀",
     "nightlyPrice": {
-      "amount": 1152.57,
+      "snapshotTotalMinor": 345771,
+      "snapshotNights": 3,
       "currency": "CNY",
       "scope": "参考快照：2026-08-24 至 2026-08-27、2 位成人 1 间房、3 晚；总价 CNY 3,457.71（房价 CNY 3,021.71 + 税费及其他费用 CNY 436）折算。非 2026 十一实时可订价。",
       "source": { "label": "香港九龙酒店价格与房型", "url": "https://www.booking.com/hotel/hk/kowloon.zh-tw.html", "platform": "Booking.com", "checkedAt": "2026-08-26T12:00:00.000Z" }
@@ -16,11 +17,7 @@
     "cancellation": "参考快照：可部分退款；以实际订单页为准",
     "stationWalk": "与港铁尖沙咀站直接相连（来源描述）",
     "strengths": ["尖沙咀核心，去天星码头方便", "地铁连接明确"],
-    "drawbacks": ["参考快照房型面积 21 m²", "十一价格与可订政策需重新搜索"],
-    "commuteByDay": [
-      { "date": "2026-10-04", "firstPlace": "当天首站待安排", "lastPlace": "当天末站待安排", "outboundMinutes": 0, "returnMinutes": 0, "estimatedSteps": 0 },
-      { "date": "2026-10-05", "firstPlace": "太平山顶", "lastPlace": "尖沙咀天星码头", "outboundMinutes": 36, "returnMinutes": 7, "estimatedSteps": 3900 }
-    ]
+    "drawbacks": ["参考快照房型面积 21 m²", "十一价格与可订政策需重新搜索"]
   },
   {
     "id": "park-hotel-hong-kong",
@@ -29,7 +26,8 @@
     "coordinate": { "lng": 114.1747, "lat": 22.2989, "coordinateSystem": "GCJ02" },
     "neighborhood": "尖沙咀",
     "nightlyPrice": {
-      "amount": 1133.04,
+      "snapshotTotalMinor": 339913,
+      "snapshotNights": 3,
       "currency": "CNY",
       "scope": "参考快照：2026-08-24 至 2026-08-27、2 位成人 1 间房、3 晚；总价 CNY 3,399.13（房价 CNY 2,970.13 + 税费及其他费用 CNY 429）折算。非 2026 十一实时可订价。",
       "source": { "label": "香港百乐酒店价格与房型", "url": "https://www.booking.com/hotel/hk/parkhotel.zh-tw.html", "platform": "Booking.com", "checkedAt": "2026-08-26T12:00:00.000Z" }
@@ -39,10 +37,6 @@
     "cancellation": "参考快照：可部分退款；以实际订单页为准",
     "stationWalk": "距尖沙咀 B2 / 尖东 P3 出口步行约 5 分钟（来源描述）",
     "strengths": ["参考快照房型较大", "尖沙咀站与尖东站均在步行范围"],
-    "drawbacks": ["不是地铁直连", "十一价格与可订政策需重新搜索"],
-    "commuteByDay": [
-      { "date": "2026-10-04", "firstPlace": "当天首站待安排", "lastPlace": "当天末站待安排", "outboundMinutes": 0, "returnMinutes": 0, "estimatedSteps": 0 },
-      { "date": "2026-10-05", "firstPlace": "太平山顶", "lastPlace": "尖沙咀天星码头", "outboundMinutes": 39, "returnMinutes": 10, "estimatedSteps": 4700 }
-    ]
+    "drawbacks": ["不是地铁直连", "十一价格与可订政策需重新搜索"]
   }
 ]

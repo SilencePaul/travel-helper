@@ -2,6 +2,8 @@ import { scoreHotels, stayNightsForHotel, type Trip } from "@travel/contracts";
 import { useMemo, useState } from "react";
 import { HotelCard } from "./HotelCard";
 import { hongKongHotels } from "./hotelData";
+import { deriveHotelCommutes } from "./hotelCommutes";
+import { AmapHotelMap } from "./AmapHotelMap";
 
 type HotelComparePageProps = {
   trip: Trip;
@@ -19,7 +21,8 @@ export function HotelComparePage({ trip, onSelectHotel, onBack }: HotelComparePa
   const selectedId = trip.days.find((day) => day.hotelId)?.hotelId;
   const [highlightedId, setHighlightedId] = useState(selectedId ?? hongKongHotels[0]?.id);
   const nights = hotelNights(trip, highlightedId ?? "");
-  const scoredHotels = useMemo(() => scoreHotels(hongKongHotels, { nights }), [nights]);
+  const commutesByHotel = useMemo(() => Object.fromEntries(hongKongHotels.map((hotel) => [hotel.id, deriveHotelCommutes(trip, hotel)])), [trip]);
+  const scoredHotels = useMemo(() => scoreHotels(hongKongHotels, { nights, commutesByHotel }), [commutesByHotel, nights]);
   const selectedHotel = scoredHotels.find((hotel) => hotel.id === highlightedId) ?? scoredHotels[0];
 
   function selectHotel(hotelId: string) {
@@ -41,32 +44,19 @@ export function HotelComparePage({ trip, onSelectHotel, onBack }: HotelComparePa
           <h2 id="hotel-map-heading">尖沙咀酒店位置</h2>
           <p>选择卡片或位置标记会同步高亮；这是候选位置示意，路线时间仍需以高德实际路线复核。</p>
         </div>
-        <div className="hotel-map-stage" aria-label="酒店地图标记">
-          {scoredHotels.map((hotel, index) => (
-            <button
-              type="button"
-              key={hotel.id}
-              className="hotel-marker"
-              style={{ left: `${28 + index * 42}%`, top: `${55 - index * 25}%` }}
-              aria-current={highlightedId === hotel.id ? "location" : undefined}
-              onClick={() => selectHotel(hotel.id)}
-            >
-              {hotel.name}
-            </button>
-          ))}
-        </div>
+        <AmapHotelMap hotels={scoredHotels} selectedId={highlightedId} onSelect={selectHotel} />
       </section>
       {selectedHotel ? <section className="hotel-commute" aria-labelledby="hotel-commute-heading">
         <p className="eyebrow">选中酒店的通勤</p>
         <h2 id="hotel-commute-heading">{selectedHotel.name}</h2>
         <dl>
-          <div><dt>住宿参考总额</dt><dd data-testid="hotel-total">{selectedHotel.nightlyPrice.currency} {selectedHotel.stayTotal.toFixed(2)}</dd></div>
+          <div><dt>住宿参考总额</dt><dd data-testid="hotel-total">{selectedHotel.nightlyPrice.currency} {(selectedHotel.stayTotalMinor / 100).toFixed(2)}</dd></div>
           <div><dt>往返通勤</dt><dd data-testid="hotel-commute">{selectedHotel.totalCommuteMinutes} 分钟</dd></div>
           <div><dt>预计步数</dt><dd data-testid="hotel-steps">{selectedHotel.estimatedSteps.toLocaleString()} 步</dd></div>
         </dl>
         <p className="hotel-caveat">通勤为当前行程地点的本地估算，用于相对比较；待路线服务可用后应以高德实际路线复核。</p>
         <ul>
-          {selectedHotel.commuteByDay.map((commute) => <li key={commute.date}>{commute.date}：首站 {commute.firstPlace} {commute.outboundMinutes} 分钟；末站 {commute.lastPlace} 返回 {commute.returnMinutes} 分钟；约 {commute.estimatedSteps.toLocaleString()} 步</li>)}
+          {(commutesByHotel[selectedHotel.id] ?? []).map((commute) => <li key={commute.date}>{commute.date}：首站 {commute.firstPlace} {commute.outboundMinutes} 分钟；末站 {commute.lastPlace} 返回 {commute.returnMinutes} 分钟；约 {commute.estimatedSteps.toLocaleString()} 步</li>)}
         </ul>
       </section> : null}
       <section className="hotel-grid" aria-label="酒店候选">

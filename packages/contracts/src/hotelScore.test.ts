@@ -12,21 +12,21 @@ const source = {
 
 const nearHotel: Hotel = {
   id: "near", name: "近酒店", address: "香港", coordinate: { lng: 114.17, lat: 22.3, coordinateSystem: "GCJ02" },
-  neighborhood: "尖沙咀", nightlyPrice: { amount: 1200, currency: "HKD", scope: "含税费及其他费用的参考快照", source },
+  neighborhood: "尖沙咀", nightlyPrice: { snapshotTotalMinor: 360000, snapshotNights: 3, currency: "HKD", scope: "含税费及其他费用的参考快照", source },
   roomArea: "18–48 平方米", breakfast: "以订单页为准", cancellation: "以订单页为准", stationWalk: "步行约 3 分钟", strengths: ["近景点"], drawbacks: ["房间较紧凑"],
-  commuteByDay: [{ date: "2026-10-04", firstPlace: "码头", lastPlace: "山顶", outboundMinutes: 12, returnMinutes: 15, estimatedSteps: 2800 }],
 };
-const cheapFarHotel: Hotel = { ...nearHotel, id: "far", name: "远酒店", nightlyPrice: { ...nearHotel.nightlyPrice, amount: 900 }, commuteByDay: [{ ...nearHotel.commuteByDay[0]!, outboundMinutes: 35, returnMinutes: 40, estimatedSteps: 6200 }] };
+const cheapFarHotel: Hotel = { ...nearHotel, id: "far", name: "远酒店", nightlyPrice: { ...nearHotel.nightlyPrice, snapshotTotalMinor: 270000 } };
+const commutes = { near: [{ date: "2026-10-04", firstPlace: "码头", lastPlace: "山顶", outboundMinutes: 12, returnMinutes: 15, estimatedSteps: 2800 }], far: [{ date: "2026-10-04", firstPlace: "码头", lastPlace: "山顶", outboundMinutes: 35, returnMinutes: 40, estimatedSteps: 6200 }] };
 
 describe("scoreHotels", () => {
   it("labels the hotel with the lowest total commute as most energy-saving", () => {
-    const result = scoreHotels([nearHotel, cheapFarHotel], { nights: 3 });
+    const result = scoreHotels([nearHotel, cheapFarHotel], { nights: 3, commutesByHotel: commutes });
     expect(result.find((item) => item.id === nearHotel.id)?.badges).toContain("最省体力");
   });
 
   it("uses tax-inclusive stay total instead of headline nightly price", () => {
-    const result = scoreHotels([{ ...nearHotel, nightlyPrice: { ...nearHotel.nightlyPrice, amount: 1560 } }], { nights: 3 });
-    expect(result[0]?.stayTotal).toBe(4680);
+    const result = scoreHotels([{ ...nearHotel, nightlyPrice: { ...nearHotel.nightlyPrice, snapshotTotalMinor: 468000 } }], { nights: 3 });
+    expect(result[0]?.stayTotalMinor).toBe(468000);
   });
 
   it("calculates nights from selected hotel dates rather than a fixed trip length", () => {

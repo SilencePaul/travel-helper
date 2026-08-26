@@ -2,7 +2,7 @@ import type { Hotel } from "./hotel";
 import type { Trip } from "./trip";
 
 export type ScoredHotel = Hotel & {
-  stayTotal: number;
+  stayTotalMinor: number;
   totalCommuteMinutes: number;
   estimatedSteps: number;
   priceScore: number;
@@ -14,24 +14,26 @@ export function stayNightsForHotel(trip: Trip, hotelId: string) {
   return trip.days.filter((day) => day.hotelId === hotelId).length;
 }
 
-export function scoreHotels(hotels: Hotel[], { nights }: { nights: number }): ScoredHotel[] {
+export type HotelCommute = { date: string; firstPlace: string; lastPlace: string; outboundMinutes: number; returnMinutes: number; estimatedSteps: number };
+
+export function scoreHotels(hotels: Hotel[], { nights, commutesByHotel = {} }: { nights: number; commutesByHotel?: Record<string, HotelCommute[]> }): ScoredHotel[] {
   const raw = hotels.map((hotel) => ({
     hotel,
-    stayTotal: hotel.nightlyPrice.amount * nights,
-    totalCommuteMinutes: hotel.commuteByDay.reduce((total, day) => total + day.outboundMinutes + day.returnMinutes, 0),
-    estimatedSteps: hotel.commuteByDay.reduce((total, day) => total + day.estimatedSteps, 0),
+    stayTotalMinor: Math.round(hotel.nightlyPrice.snapshotTotalMinor * nights / hotel.nightlyPrice.snapshotNights),
+    totalCommuteMinutes: (commutesByHotel[hotel.id] ?? []).reduce((total, day) => total + day.outboundMinutes + day.returnMinutes, 0),
+    estimatedSteps: (commutesByHotel[hotel.id] ?? []).reduce((total, day) => total + day.estimatedSteps, 0),
   }));
-  const minimumPrice = Math.min(...raw.map((item) => item.stayTotal));
+  const minimumPrice = Math.min(...raw.map((item) => item.stayTotalMinor));
   const minimumCommute = Math.min(...raw.map((item) => item.totalCommuteMinutes));
-  return raw.map(({ hotel, stayTotal, totalCommuteMinutes, estimatedSteps }) => ({
+  return raw.map(({ hotel, stayTotalMinor, totalCommuteMinutes, estimatedSteps }) => ({
     ...hotel,
-    stayTotal,
+    stayTotalMinor,
     totalCommuteMinutes,
     estimatedSteps,
-    priceScore: minimumPrice / stayTotal,
+    priceScore: minimumPrice / stayTotalMinor,
     commuteScore: totalCommuteMinutes === 0 ? 1 : minimumCommute / totalCommuteMinutes,
     badges: [
-      ...(stayTotal === minimumPrice ? ["总价最低"] : []),
+      ...(stayTotalMinor === minimumPrice ? ["总价最低"] : []),
       ...(totalCommuteMinutes === minimumCommute ? ["最省体力"] : []),
     ],
   }));
