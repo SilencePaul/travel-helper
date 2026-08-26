@@ -25,7 +25,7 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, r
   const places = useMemo(() => getPlaces(day?.itemIds ?? []), [day?.itemIds]);
   const defaultRouteService = useMemo(() => createAmapRouteService(loadAmap, getPlace), []);
   const activeRouteService = routeService ?? defaultRouteService;
-  const routeKey = `${day?.id ?? ""}:${places.map((place) => place.id).join(",")}`;
+  const routeKey = `${day?.id ?? ""}:${(day?.itemIds ?? []).join(",")}:${places.map((place) => place.id).join(",")}`;
   const unresolvedItemIds = (day?.itemIds ?? []).filter((itemId) => !getPlace(itemId));
   const [routeResult, setRouteResult] = useState<{
     key: string;

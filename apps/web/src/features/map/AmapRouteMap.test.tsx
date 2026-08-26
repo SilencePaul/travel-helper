@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Trip } from "@travel/contracts";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DayPage } from "../itinerary/DayPage";
 import { AmapRouteMap } from "./AmapRouteMap";
 import type { MapInteractionAdapter } from "./types";
@@ -16,6 +16,13 @@ const trip: Trip = {
   unscheduledItemIds: [],
   version: 0,
 };
+
+const originalScrollIntoView = Object.getOwnPropertyDescriptor(Element.prototype, "scrollIntoView");
+
+afterEach(() => {
+  if (originalScrollIntoView) Object.defineProperty(Element.prototype, "scrollIntoView", originalScrollIntoView);
+  else Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+});
 
 describe("AmapRouteMap", () => {
   it("focuses the selected timeline place on the injected map adapter", async () => {
@@ -61,6 +68,21 @@ describe("AmapRouteMap", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("有未识别地点，无法串联道路路线：not-a-known-poi");
     expect(routeService.getSegments).not.toHaveBeenCalled();
+  });
+
+  it("clears a resolved route when the same known endpoints gain an unresolved item", async () => {
+    const routeService = { getSegments: vi.fn(async () => [{
+      id: "known-route", fromPlaceId: "peak", toPlaceId: "central-pier", mode: "transit" as const,
+      distanceMeters: 1800, durationMinutes: 15, summary: "高德公共交通路线",
+      path: [{ lng: 114.15, lat: 22.27, coordinateSystem: "GCJ02" as const }, { lng: 114.16, lat: 22.28, coordinateSystem: "GCJ02" as const }, { lng: 114.166177, lat: 22.284364, coordinateSystem: "GCJ02" as const }],
+    }]) };
+    const view = render(<DayPage trip={trip} dayId="hong-kong-day" onBack={() => undefined} routeService={routeService} />);
+
+    expect(await screen.findByText(/高德公共交通路线/)).toBeVisible();
+    view.rerender(<DayPage trip={{ ...trip, days: [{ ...trip.days[0]!, itemIds: ["peak", "missing", "central-pier"] }] }} dayId="hong-kong-day" onBack={() => undefined} routeService={routeService} />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("missing");
+    expect(screen.queryByText(/高德公共交通路线/)).not.toBeInTheDocument();
   });
 
   it("draws the provider path verbatim and syncs a real AMap marker after a deferred loader resolves", async () => {

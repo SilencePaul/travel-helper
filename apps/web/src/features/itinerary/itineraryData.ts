@@ -1,8 +1,24 @@
 import poiCatalog from "../../../../../content/amap-pois.json";
 import type { TimelinePlace, TravelMode } from "../map/types";
 
+export function validatePoiCatalog(catalog: unknown): TimelinePlace[] {
+  if (!Array.isArray(catalog)) throw new Error("AMAP_POI_CATALOG_INVALID");
+  const ids = new Set<string>();
+  const poiIds = new Set<string>();
+  return catalog.map((raw) => {
+    if (!raw || typeof raw !== "object") throw new Error("AMAP_POI_CATALOG_INVALID");
+    const place = raw as Partial<TimelinePlace>;
+    if (typeof place.id !== "string" || !place.id || ids.has(place.id) || typeof place.amapPoiId !== "string" || !place.amapPoiId || poiIds.has(place.amapPoiId) || typeof place.name !== "string" || !place.name || place.coordinateSystem !== "GCJ02" || !Number.isFinite(place.lng) || !Number.isFinite(place.lat) || place.lng! < -180 || place.lng! > 180 || place.lat! < -90 || place.lat! > 90) {
+      throw new Error("AMAP_POI_CATALOG_INVALID");
+    }
+    ids.add(place.id);
+    poiIds.add(place.amapPoiId);
+    return place as TimelinePlace;
+  });
+}
+
 export const itineraryPlaces: Record<string, TimelinePlace> = Object.fromEntries(
-  (poiCatalog as TimelinePlace[]).map((place) => [place.id, place]),
+  validatePoiCatalog(poiCatalog).map((place) => [place.id, place]),
 );
 
 export function getPlaces(itemIds: string[]) {

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAmapRouteService } from "./amapRouteService";
 import type { TimelinePlace } from "./types";
 
@@ -20,13 +20,15 @@ const centralPier: TimelinePlace = {
   coordinateSystem: "GCJ02",
 };
 
+afterEach(() => vi.useRealTimers());
+
 describe("createAmapRouteService", () => {
   it("uses provider-returned transit geometry instead of inventing a direct path", async () => {
     const search = vi.fn((_origin, _destination, callback) => callback("complete", {
       plans: [{
         distance: 1800,
         time: 900,
-        segments: [{ walking: { path: [[114.1454, 22.2757], [114.149, 22.279], [114.1596, 22.2864]] } }],
+        path: [[114.1454, 22.2757], [114.149, 22.279], [114.1596, 22.2864]],
       }],
     }));
     class Transfer {
@@ -93,6 +95,5 @@ describe("createAmapRouteService", () => {
     await vi.advanceTimersByTimeAsync(10);
     await rejection;
     callback?.("complete", { routes: [{ distance: 1, time: 1, steps: [] }] });
-    vi.useRealTimers();
   });
 });

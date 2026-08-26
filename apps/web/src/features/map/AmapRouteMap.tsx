@@ -35,6 +35,9 @@ export function AmapRouteMap({ places, segments, selectedPlaceId, onSelectPlace,
 
   useEffect(() => {
     let active = true;
+    /* oxlint-disable react/set-state-in-effect -- each replacement loader must expose loading before its async result. */
+    setState("loading");
+    /* oxlint-enable react/set-state-in-effect */
     void mapLoader()
       .then((AMap) => {
         if (!active || !elementRef.current) return;

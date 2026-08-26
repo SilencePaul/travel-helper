@@ -35,24 +35,9 @@ function routeStepsPath(route: RecordValue) {
 }
 
 function transitPlanPath(plan: RecordValue) {
+  if (Array.isArray(plan.path)) return coordinates(plan.path);
   const segments = Array.isArray(plan.segments) ? plan.segments : [];
-  const paths: unknown[] = [];
-  for (const rawSegment of segments) {
-    const segment = record(rawSegment);
-    const walking = record(segment?.walking);
-    if (walking?.path) paths.push(walking.path);
-    const bus = record(segment?.bus);
-    const buslines = Array.isArray(bus?.buslines) ? bus.buslines : [];
-    for (const line of buslines) {
-      const path = record(line)?.path;
-      if (path) paths.push(path);
-    }
-    const railway = record(segment?.railway);
-    if (railway?.path) paths.push(railway.path);
-    const taxi = record(segment?.taxi);
-    if (taxi?.path) paths.push(taxi.path);
-  }
-  return concatenate(paths);
+  return concatenate(segments.map((segment) => record(record(segment)?.transit)?.path));
 }
 
 function firstRoute(result: unknown, mode: TravelMode) {
