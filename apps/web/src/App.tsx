@@ -132,7 +132,10 @@ function TripRoutes({ createDayId = () => "day-ui", routeService }: Pick<AppProp
         // Keep orders exactly as entered: a warning requires a deliberate human review.
         orders: current.orders ?? [],
       };
-    }).then(() => ({ affectedOrders: [] }));
+    }).then((saved) => {
+      if (!saved) throw new Error("日期修改失败，请重试");
+      return { affectedOrders: [] };
+    });
   }
 
   function changeOrderStatus(orderId: string, status: OrderStatus) {

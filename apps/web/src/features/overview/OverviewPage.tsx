@@ -74,10 +74,13 @@ export function OverviewPage({
   async function requestDateRange(confirmed = false) {
     if (!onChangeDateRange) return;
     setRangeError(undefined);
+    const reviewedRange = confirmed ? rangeWarning : undefined;
+    const requestedStartDate = reviewedRange?.startDate ?? rangeStart;
+    const requestedEndDate = reviewedRange?.endDate ?? rangeEnd;
     try {
-      const result = await onChangeDateRange(rangeStart, rangeEnd, confirmed);
+      const result = await onChangeDateRange(requestedStartDate, requestedEndDate, confirmed);
       if (!confirmed && result.affectedOrders.length > 0) {
-        setRangeWarning({ startDate: rangeStart, endDate: rangeEnd, orders: result.affectedOrders });
+        setRangeWarning({ startDate: requestedStartDate, endDate: requestedEndDate, orders: result.affectedOrders });
         return;
       }
       setRangeWarning(undefined);
@@ -255,16 +258,17 @@ export function OverviewPage({
 
       {onChangeDateRange ? <section className="date-range" aria-labelledby="date-range-heading">
         <div><p className="eyebrow">日期</p><h2 id="date-range-heading">调整旅行日期</h2></div>
-        <label>开始日期<input type="date" value={rangeStart} onChange={(event) => setRangeStart(event.target.value)} /></label>
-        <label>结束日期<input type="date" value={rangeEnd} onChange={(event) => setRangeEnd(event.target.value)} /></label>
+        <label>开始日期<input type="date" value={rangeStart} aria-describedby={rangeError ? "date-range-error" : undefined} onChange={(event) => setRangeStart(event.target.value)} /></label>
+        <label>结束日期<input type="date" value={rangeEnd} aria-describedby={rangeError ? "date-range-error" : undefined} onChange={(event) => setRangeEnd(event.target.value)} /></label>
         <button type="button" onClick={() => void requestDateRange()} disabled={isSaving}>更新日期</button>
-        {rangeError ? <p role="alert">{rangeError}</p> : null}
+        {rangeError ? <p id="date-range-error" role="alert">{rangeError}</p> : null}
       </section> : null}
 
       {rangeWarning ? <dialog className="date-warning" open aria-modal="true" aria-labelledby="date-warning-title">
         <h2 id="date-warning-title">这些订单关联的旅行日将被移除</h2>
         <p>订单不会自动删除或改写。确认后只调整日期与行程日，请随后核对订单。</p>
         <ul>{rangeWarning.orders.map((order) => <li key={order.id}>{order.category === "hotel" ? "酒店" : "门票"} · {order.name}</li>)}</ul>
+        {rangeError ? <p role="alert">{rangeError}</p> : null}
         <div><button type="button" className="danger-button" onClick={() => void requestDateRange(true)}>仍然调整日期</button><button type="button" onClick={() => setRangeWarning(undefined)}>保留当前日期</button></div>
       </dialog> : null}
 

@@ -165,6 +165,37 @@ test("warns about removed hotel and ticket orders before a date reduction, then 
   });
 });
 
+test("confirms the captured reviewed date range and keeps the warning retryable after a rejected save", async () => {
+  const user = userEvent.setup();
+  const tripWithOrders: Trip = {
+    ...threeDayTrip,
+    orders: [{ id: "hotel-order", name: "香港酒店", category: "hotel", estimated: 100000, paid: 0, currency: "HKD", status: "unpaid", dayId: "day-3" }],
+  };
+  const repository = new DelayedSaveRepository(tripWithOrders);
+  render(<App repository={repository} tripId={tripWithOrders.id} />);
+
+  await screen.findByRole("button", { name: "更新日期" });
+  await user.clear(screen.getByLabelText("结束日期"));
+  await user.type(screen.getByLabelText("结束日期"), "2026-10-04");
+  await user.click(screen.getByRole("button", { name: "更新日期" }));
+  await screen.findByRole("dialog", { name: "这些订单关联的旅行日将被移除" });
+
+  // A background field change must not let confirmation apply an unreviewed range.
+  await user.clear(screen.getByLabelText("结束日期"));
+  await user.type(screen.getByLabelText("结束日期"), "2026-10-03");
+  await user.click(screen.getByRole("button", { name: "仍然调整日期" }));
+  await waitFor(() => expect(repository.saveRequests).toHaveLength(1));
+  expect(repository.saveRequests[0]!.next.endDate).toBe("2026-10-04");
+
+  await act(async () => repository.saveRequests[0]!.reject(new Error("offline")));
+  const warningDialog = screen.getByRole("dialog", { name: "这些订单关联的旅行日将被移除" });
+  expect(screen.getAllByRole("alert").at(-1)).toHaveTextContent("日期修改失败");
+  expect(screen.getByLabelText("结束日期")).toHaveAccessibleDescription("日期修改失败，请重试");
+  expect(warningDialog).toBeVisible();
+  await user.click(screen.getByRole("button", { name: "仍然调整日期" }));
+  await waitFor(() => expect(repository.saveRequests).toHaveLength(2));
+});
+
 test("persists day controls and keeps removed items available to arrange", async () => {
   const user = userEvent.setup();
   const repository = new LocalTripRepository(eightDayTrip);
