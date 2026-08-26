@@ -1,0 +1,14 @@
+{
+  "name": "@travel/contracts",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "lint": "eslint src",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": { "date-fns": "latest", "zod": "latest" },
+  "devDependencies": { "eslint": "latest", "typescript": "latest", "vitest": "latest" }
+}
