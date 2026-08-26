@@ -27,7 +27,7 @@ export function HotelCard({ hotel, nights, selected, onSelect }: HotelCardProps)
         <div><dt>车站</dt><dd>{hotel.stationWalk}</dd></div>
       </dl>
       <p className="hotel-caveat">{hotel.nightlyPrice.scope}</p>
-      <p className="hotel-source">原始分数：价格 {hotel.priceScore.toFixed(3)} · 通勤 {hotel.commuteScore.toFixed(3)}；通勤 {hotel.totalCommuteMinutes > 0 ? `${hotel.totalCommuteMinutes} 分钟（高德已返回部分路线）` : "待高德路线确认"}</p>
+      <p className="hotel-source">原始分数：价格 {hotel.priceScore.toFixed(3)} · 通勤 {hotel.commuteComplete ? hotel.commuteScore?.toFixed(3) : "待全部高德路线确认"}；通勤 {hotel.commuteComplete ? `${hotel.totalCommuteMinutes} 分钟（高德已确认）` : "待高德路线确认"}</p>
       <p className="hotel-source">平台：<a href={hotel.nightlyPrice.source.url} target="_blank" rel="noreferrer">{hotel.nightlyPrice.source.platform} · {hotel.nightlyPrice.source.label}</a> · 核查于 {new Date(hotel.nightlyPrice.source.checkedAt).toLocaleDateString("zh-CN")}</p>
       <p className="hotel-strength">适合：{hotel.strengths.join("；")}</p>
       <p className="hotel-drawback">留意：{hotel.drawbacks.join("；")}</p>

@@ -29,6 +29,12 @@ describe("scoreHotels", () => {
     expect(result[0]?.stayTotalMinor).toBe(468000);
   });
 
+  it("withholds commute score and energy badge until every provider leg is confirmed", () => {
+    const result = scoreHotels([nearHotel], { nights: 3, commutesByHotel: { near: [{ ...commutes.near[0]!, status: "pending" }] } });
+    expect(result[0]).toMatchObject({ commuteComplete: false, commuteScore: undefined });
+    expect(result[0]?.badges).not.toContain("最省体力");
+  });
+
   it("calculates nights from selected hotel dates rather than a fixed trip length", () => {
     const trip: Trip = {
       id: "trip", title: "测试", startDate: "2026-10-03", endDate: "2026-10-10", travelers: [], version: 0, unscheduledItemIds: [],

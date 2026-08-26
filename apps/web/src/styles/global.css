@@ -191,13 +191,10 @@ h2 { margin: 0; font-size: 24px; }
 .hotel-map { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 20px; align-items: center; }
 .hotel-map h2, .hotel-commute h2 { font-size: 21px; }
 .hotel-map p, .hotel-commute p { color: #536057; line-height: 1.55; }
-.hotel-map-stage { position: relative; min-height: 180px; overflow: hidden; border-radius: 14px; background: linear-gradient(145deg, #d9e7e0, #dce9ed 52%, #b9d8e3); }
 .hotel-amap-canvas { min-height: 220px; overflow: hidden; border-radius: 14px; background: #e9eee7; }
 .hotel-amap-marker { display: inline-block; padding: 6px 9px; border: 1px solid #31594d; border-radius: 999px; color: #31594d; background: #faf9f5; font-size: 12px; white-space: nowrap; box-shadow: 0 2px 8px rgb(35 49 42 / 20%); }
 .hotel-amap-marker.is-selected { color: #fff; background: #24594d; outline: 3px solid #b6d0bf; }
 .hotel-map-stage::before { position: absolute; inset: 50% -10% auto; height: 2px; background: rgb(49 89 77 / 35%); content: ""; transform: rotate(-12deg); }
-.hotel-marker { position: absolute; z-index: 1; max-width: 42%; padding: 7px 10px; border: 1px solid #305b4e; border-radius: 999px; color: #244e42; background: #faf9f5; font-size: 12px; box-shadow: 0 3px 12px rgb(35 49 42 / 18%); }
-.hotel-marker[aria-current="location"] { color: #fff; background: #24594d; outline: 3px solid #b6d0bf; }
 .hotel-commute dl, .hotel-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 16px 0; }
 .hotel-commute dl div, .hotel-facts div { padding: 12px; border: 1px solid #e1e3dd; border-radius: 12px; }
 .hotel-commute dt, .hotel-facts dt { color: #6b736c; font-size: 12px; }

@@ -6,7 +6,8 @@ export type ScoredHotel = Hotel & {
   totalCommuteMinutes: number;
   estimatedSteps: number;
   priceScore: number;
-  commuteScore: number;
+  commuteScore?: number;
+  commuteComplete: boolean;
   badges: string[];
 };
 
@@ -20,21 +21,24 @@ export function scoreHotels(hotels: Hotel[], { nights, commutesByHotel = {} }: {
   const raw = hotels.map((hotel) => ({
     hotel,
     stayTotalMinor: Math.round(hotel.nightlyPrice.snapshotTotalMinor * nights / hotel.nightlyPrice.snapshotNights),
+    commutes: commutesByHotel[hotel.id] ?? [],
     totalCommuteMinutes: (commutesByHotel[hotel.id] ?? []).reduce((total, day) => total + day.outboundMinutes + day.returnMinutes, 0),
     estimatedSteps: 0,
   }));
   const minimumPrice = Math.min(...raw.map((item) => item.stayTotalMinor));
-  const minimumCommute = Math.min(...raw.map((item) => item.totalCommuteMinutes));
-  return raw.map(({ hotel, stayTotalMinor, totalCommuteMinutes, estimatedSteps }) => ({
+  const complete = raw.filter((item) => item.commutes.length > 0 && item.commutes.every((commute) => commute.status === "confirmed"));
+  const minimumCommute = complete.length > 0 ? Math.min(...complete.map((item) => item.totalCommuteMinutes)) : undefined;
+  return raw.map(({ hotel, stayTotalMinor, totalCommuteMinutes, estimatedSteps, commutes }) => ({
     ...hotel,
     stayTotalMinor,
     totalCommuteMinutes,
     estimatedSteps,
     priceScore: minimumPrice / stayTotalMinor,
-    commuteScore: totalCommuteMinutes === 0 ? 1 : minimumCommute / totalCommuteMinutes,
+    commuteComplete: commutes.length > 0 && commutes.every((commute) => commute.status === "confirmed"),
+    commuteScore: minimumCommute !== undefined && commutes.length > 0 && commutes.every((commute) => commute.status === "confirmed") ? minimumCommute / totalCommuteMinutes : undefined,
     badges: [
       ...(stayTotalMinor === minimumPrice ? ["总价最低"] : []),
-      ...(totalCommuteMinutes === minimumCommute ? ["最省体力"] : []),
+      ...(minimumCommute !== undefined && commutes.length > 0 && commutes.every((commute) => commute.status === "confirmed") && totalCommuteMinutes === minimumCommute ? ["最省体力"] : []),
     ],
   }));
 }
