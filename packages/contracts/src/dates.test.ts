@@ -169,6 +169,12 @@ describe("manual day operations", () => {
     ]);
   });
 
+  it("does not duplicate removed items already in unscheduled", () => {
+    const result = removeDay(current, 1, ["place-existing", "place-2"]);
+
+    expect(result.unscheduledItemIds).toEqual(["place-existing", "place-2"]);
+  });
+
   it("rejects invalid indices", () => {
     expect(() => insertDay(current, 3, "2026-10-03", "day-new")).toThrow(
       "日期索引无效",

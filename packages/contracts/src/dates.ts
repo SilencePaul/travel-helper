@@ -182,6 +182,6 @@ export function removeDay(
 
   return {
     days: current.filter((_, dayIndex) => dayIndex !== index),
-    unscheduledItemIds: [...unscheduledItemIds, ...removed.itemIds],
+    unscheduledItemIds: [...new Set([...unscheduledItemIds, ...removed.itemIds])],
   };
 }
