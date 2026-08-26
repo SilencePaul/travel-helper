@@ -48,6 +48,12 @@ describe("HotelComparePage", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "在地图中定位 九龙酒店" })).toHaveAttribute("aria-current", "location"));
   });
 
+  it("reconciles a later persisted hotel selection from a trip subscription", async () => {
+    const view = render(<HotelComparePage trip={trip} onSelectHotel={() => true} onBack={() => undefined} />);
+    view.rerender(<HotelComparePage trip={{ ...trip, days: trip.days.map((day) => day.city === "香港" ? { ...day, hotelId: "park-hotel-hong-kong" } : day) }} onSelectHotel={() => true} onBack={() => undefined} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "在地图中定位 香港百乐酒店" })).toHaveAttribute("aria-current", "location"));
+  });
+
   it("recalculates selected stay nights when the trip has more assigned hotel days", () => {
     const extended: Trip = {
       ...trip,

@@ -1,5 +1,5 @@
 import { scoreHotels, stayNightsForHotel, type Trip } from "@travel/contracts";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { HotelCard } from "./HotelCard";
 import { hongKongHotels } from "./hotelData";
 import { deriveHotelCommutes } from "./hotelCommutes";
@@ -25,6 +25,12 @@ function hotelNights(trip: Trip, hotelId: string) {
 export function HotelComparePage({ trip, onSelectHotel, onBack, routeService }: HotelComparePageProps) {
   const selectedId = trip.days.find((day) => day.hotelId)?.hotelId;
   const [highlightedId, setHighlightedId] = useState(selectedId ?? hongKongHotels[0]?.id);
+  const pendingSelectionRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (pendingSelectionRef.current) return;
+    const persisted = selectedId && hongKongHotels.some((hotel) => hotel.id === selectedId) ? selectedId : hongKongHotels[0]?.id;
+    setHighlightedId(persisted);
+  }, [selectedId]);
   const nights = hotelNights(trip, highlightedId ?? "");
   const defaultRouteService = useMemo(() => createAmapRouteService(loadAmap, (id) => {
     const hotel = hongKongHotels.find((item) => item.id === id);
@@ -49,8 +55,9 @@ export function HotelComparePage({ trip, onSelectHotel, onBack, routeService }: 
 
   const selectHotel = useCallback(async (hotelId: string) => {
     const previousId = highlightedId;
+    pendingSelectionRef.current = hotelId;
     setHighlightedId(hotelId);
-    try { if (!await onSelectHotel(hotelId)) setHighlightedId(previousId); } catch { setHighlightedId(previousId); }
+    try { if (!await onSelectHotel(hotelId)) setHighlightedId(previousId); } catch { setHighlightedId(previousId); } finally { pendingSelectionRef.current = undefined; }
   }, [highlightedId, onSelectHotel]);
 
   return (
