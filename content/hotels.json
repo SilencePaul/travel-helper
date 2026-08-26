@@ -3,8 +3,10 @@
     "id": "kowloon-hotel",
     "name": "香港九龙酒店",
     "address": "香港九龙尖沙咀弥敦道 19–21 号",
-    "coordinate": { "lng": 114.1722, "lat": 22.2972, "coordinateSystem": "GCJ02" },
+    "amapPoiId": "B073C044UE",
+    "coordinate": { "lng": 114.176707, "lat": 22.293025, "coordinateSystem": "GCJ02" },
     "neighborhood": "尖沙咀",
+    "locationSource": { "label": "高德地点检索：九龙酒店", "url": "https://www.amap.com/search?query=%E4%B9%9D%E9%BE%99%E9%85%92%E5%BA%97", "platform": "高德地图 Web 服务", "checkedAt": "2026-08-26T12:00:00.000Z" },
     "nightlyPrice": {
       "snapshotTotalMinor": 345771,
       "snapshotNights": 3,
@@ -23,8 +25,10 @@
     "id": "park-hotel-hong-kong",
     "name": "香港百乐酒店",
     "address": "香港九龙尖沙咀漆咸道南 61–65 号",
-    "coordinate": { "lng": 114.1747, "lat": 22.2989, "coordinateSystem": "GCJ02" },
+    "amapPoiId": "B073C0499H",
+    "coordinate": { "lng": 114.180581, "lat": 22.296993, "coordinateSystem": "GCJ02" },
     "neighborhood": "尖沙咀",
+    "locationSource": { "label": "高德地点检索：香港百乐酒店", "url": "https://www.amap.com/search?query=%E9%A6%99%E6%B8%AF%E7%99%BE%E4%B9%90%E9%85%92%E5%BA%97", "platform": "高德地图 Web 服务", "checkedAt": "2026-08-26T12:00:00.000Z" },
     "nightlyPrice": {
       "snapshotTotalMinor": 339913,
       "snapshotNights": 3,

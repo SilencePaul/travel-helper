@@ -14,7 +14,7 @@ export async function deriveHotelCommutes(trip: Trip, hotel: Hotel, routeService
       outboundMinutes: 0, returnMinutes: 0, distanceMeters: 0, status: "pending",
     });
     if (!first || !last) return pending();
-    const hotelPlace: TimelinePlace = { id: hotel.id, name: hotel.name, amapPoiId: hotel.id, ...hotel.coordinate };
+    const hotelPlace: TimelinePlace = { id: hotel.id, name: hotel.name, amapPoiId: hotel.amapPoiId, ...hotel.coordinate };
     try {
       const [outbound, inbound] = await Promise.all([
         routeService.getSegments({ dayId: `${day.id}:hotel-out`, placeIds: [hotelPlace.id, first.id], modeByLeg: ["transit"] }),

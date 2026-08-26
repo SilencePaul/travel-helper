@@ -21,6 +21,7 @@ export function HotelCard({ hotel, nights, selected, onSelect }: HotelCardProps)
       <dl className="hotel-facts">
         <div><dt>住宿 {nights} 晚（含税参考总额）</dt><dd>{hotel.nightlyPrice.currency} {(hotel.stayTotalMinor / 100).toFixed(2)}</dd></div>
         <div><dt>3 晚含税快照总额</dt><dd>{hotel.nightlyPrice.currency} {(hotel.nightlyPrice.snapshotTotalMinor / 100).toFixed(2)}</dd></div>
+        <div><dt>每晚平均（快照均摊）</dt><dd>{hotel.nightlyPrice.currency} {(hotel.nightlyPrice.snapshotTotalMinor / hotel.nightlyPrice.snapshotNights / 100).toFixed(2)}</dd></div>
         <div><dt>房型 / 面积</dt><dd>{hotel.roomArea}</dd></div>
         <div><dt>早餐</dt><dd>{hotel.breakfast}</dd></div>
         <div><dt>取消</dt><dd>{hotel.cancellation}</dd></div>

@@ -11,12 +11,14 @@ export const HotelSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   address: z.string().min(1),
+  amapPoiId: z.string().min(1),
   coordinate: z.object({
     lng: z.number().gte(-180).lte(180),
     lat: z.number().gte(-90).lte(90),
     coordinateSystem: z.literal("GCJ02"),
   }),
   neighborhood: z.string().min(1),
+  locationSource: HotelSourceSchema,
   nightlyPrice: z.object({
     snapshotTotalMinor: z.number().int().positive(),
     snapshotNights: z.number().int().positive(),

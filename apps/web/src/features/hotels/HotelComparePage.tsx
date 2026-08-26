@@ -28,7 +28,7 @@ export function HotelComparePage({ trip, onSelectHotel, onBack, routeService }: 
   const nights = hotelNights(trip, highlightedId ?? "");
   const defaultRouteService = useMemo(() => createAmapRouteService(loadAmap, (id) => {
     const hotel = hongKongHotels.find((item) => item.id === id);
-    return getPlace(id) ?? (hotel ? { id: hotel.id, name: hotel.name, amapPoiId: hotel.id, ...hotel.coordinate } : undefined);
+    return getPlace(id) ?? (hotel ? { id: hotel.id, name: hotel.name, amapPoiId: hotel.amapPoiId, ...hotel.coordinate } : undefined);
   }), []);
   const activeRouteService = routeService ?? defaultRouteService;
   const [commutesByHotel, setCommutesByHotel] = useState<Record<string, import("@travel/contracts").HotelCommute[]>>({});
@@ -45,9 +45,10 @@ export function HotelComparePage({ trip, onSelectHotel, onBack, routeService }: 
   const selectedCommutes = selectedHotel ? commutesByHotel[selectedHotel.id] : undefined;
   const allRoutesConfirmed = Boolean(selectedCommutes?.length) && selectedCommutes!.every((item) => item.status === "confirmed");
 
-  function selectHotel(hotelId: string) {
+  async function selectHotel(hotelId: string) {
+    const previousId = highlightedId;
     setHighlightedId(hotelId);
-    void onSelectHotel(hotelId);
+    try { await onSelectHotel(hotelId); } catch { setHighlightedId(previousId); }
   }
 
   return (

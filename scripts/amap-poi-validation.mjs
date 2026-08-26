@@ -31,7 +31,9 @@ export async function validatePoiCatalog({ pois, key, fetchImpl = fetch, print =
 
 async function main() {
   const catalog = JSON.parse(await readFile(new URL("../content/amap-pois.json", import.meta.url), "utf8"));
-  const result = await validatePoiCatalog({ pois: catalog, key: process.env.AMAP_WEB_SERVICE_KEY });
+  const hotels = JSON.parse(await readFile(new URL("../content/hotels.json", import.meta.url), "utf8"));
+  const hotelPois = hotels.map((hotel) => ({ id: hotel.id, name: hotel.name, amapPoiId: hotel.amapPoiId, lng: hotel.coordinate.lng, lat: hotel.coordinate.lat }));
+  const result = await validatePoiCatalog({ pois: [...catalog, ...hotelPois], key: process.env.AMAP_WEB_SERVICE_KEY });
   process.exitCode = result.exitCode;
 }
 

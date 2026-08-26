@@ -11,7 +11,7 @@ const source = {
 };
 
 const nearHotel: Hotel = {
-  id: "near", name: "近酒店", address: "香港", coordinate: { lng: 114.17, lat: 22.3, coordinateSystem: "GCJ02" },
+  id: "near", name: "近酒店", address: "香港", amapPoiId: "poi-near", coordinate: { lng: 114.17, lat: 22.3, coordinateSystem: "GCJ02" }, locationSource: source,
   neighborhood: "尖沙咀", nightlyPrice: { snapshotTotalMinor: 360000, snapshotNights: 3, currency: "HKD", scope: "含税费及其他费用的参考快照", source },
   roomArea: "18–48 平方米", breakfast: "以订单页为准", cancellation: "以订单页为准", stationWalk: "步行约 3 分钟", strengths: ["近景点"], drawbacks: ["房间较紧凑"],
 };
