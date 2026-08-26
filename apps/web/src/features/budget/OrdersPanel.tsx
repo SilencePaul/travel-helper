@@ -14,9 +14,10 @@ export function OrdersPanel({ orders, onStatusChange, disabled = false }: {
       {orders.length === 0 ? <p className="empty-state">尚未录入订单；酒店候选价格仅作比较，不会被当作已预订或已付款。</p> : <ul className="order-list">
         {orders.map((order) => <li key={order.id}>
           <div><strong>{order.name}</strong><span>{amount(order.estimated, order.currency)} · 已付 {amount(order.paid, order.currency)}</span></div>
-          <label>{order.name}状态<select aria-label={`${order.name}状态`} value={order.status} disabled={disabled} onChange={(event) => void onStatusChange(order.id, event.target.value as OrderStatus)}>
-            {(Object.keys(labels) as OrderStatus[]).map((status) => <option key={status} value={status}>{labels[status]}</option>)}
+          <label>{order.name}状态<select aria-label={`${order.name}状态`} aria-describedby={order.status !== "partial" ? `${order.id}-partial-help` : undefined} value={order.status} disabled={disabled} onChange={(event) => void onStatusChange(order.id, event.target.value as OrderStatus)}>
+            {(Object.keys(labels) as OrderStatus[]).map((status) => <option key={status} value={status} disabled={status === "partial" && order.status !== "partial"}>{labels[status]}</option>)}
           </select></label>
+          {order.status !== "partial" ? <span id={`${order.id}-partial-help`} className="order-status-help">请先录入介于 0 与预计金额之间的已付金额，才能标记为部分支付。</span> : null}
         </li>)}
       </ul>}
     </section>
