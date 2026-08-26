@@ -16,15 +16,18 @@ export async function deriveHotelCommutes(trip: Trip, hotel: Hotel, routeService
     if (!first || !last) return pending();
     const hotelPlace: TimelinePlace = { id: hotel.id, name: hotel.name, amapPoiId: hotel.amapPoiId, ...hotel.coordinate };
     try {
-      const [outbound, inbound, outboundWalk, inboundWalk] = await Promise.all([
+      const [outbound, inbound] = await Promise.all([
         routeService.getSegments({ dayId: `${day.id}:hotel-out`, placeIds: [hotelPlace.id, first.id], modeByLeg: ["transit"] }),
         routeService.getSegments({ dayId: `${day.id}:hotel-back`, placeIds: [last.id, hotelPlace.id], modeByLeg: ["transit"] }),
+      ]);
+      const [outboundWalk, inboundWalk] = await Promise.allSettled([
         routeService.getSegments({ dayId: `${day.id}:hotel-out-walk`, placeIds: [hotelPlace.id, first.id], modeByLeg: ["walking"] }),
         routeService.getSegments({ dayId: `${day.id}:hotel-back-walk`, placeIds: [last.id, hotelPlace.id], modeByLeg: ["walking"] }),
       ]);
       if (!outbound[0] || !inbound[0] || !Number.isFinite(outbound[0].durationMinutes) || !Number.isFinite(inbound[0].durationMinutes) || !Number.isFinite(outbound[0].distanceMeters) || !Number.isFinite(inbound[0].distanceMeters) || outbound[0].durationMinutes <= 0 || inbound[0].durationMinutes <= 0 || outbound[0].distanceMeters <= 0 || inbound[0].distanceMeters <= 0) return pending();
-      const walking = [outboundWalk[0], inboundWalk[0]].every((segment) => segment?.mode === "walking" && Number.isFinite(segment.distanceMeters) && segment.distanceMeters > 0);
-      const walkingDistanceMeters = walking ? outboundWalk[0]!.distanceMeters + inboundWalk[0]!.distanceMeters : undefined;
+      const walkingSegments = [outboundWalk, inboundWalk].map((result) => result.status === "fulfilled" ? result.value[0] : undefined);
+      const walking = walkingSegments.every((segment) => segment?.mode === "walking" && Number.isFinite(segment.distanceMeters) && segment.distanceMeters > 0);
+      const walkingDistanceMeters = walking ? walkingSegments[0]!.distanceMeters + walkingSegments[1]!.distanceMeters : undefined;
       return { date: day.date, firstPlace: first.name, lastPlace: last.name, outboundMinutes: outbound[0].durationMinutes, returnMinutes: inbound[0].durationMinutes, distanceMeters: outbound[0].distanceMeters + inbound[0].distanceMeters, walkingDistanceMeters, estimatedSteps: walkingDistanceMeters ? Math.round(walkingDistanceMeters / 0.76) : undefined, sourceCheckedAt: new Date().toISOString(), status: "confirmed" };
     } catch { return pending(); }
   }));
