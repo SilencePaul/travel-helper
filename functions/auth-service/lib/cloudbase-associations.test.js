@@ -44,6 +44,48 @@ test("CloudBase bootstrap uses direct membership index reads without transaction
   assert.deepEqual(db.data.get("members").get(uidForOpenId("ou_admin")).sessionIds, []);
 });
 
+test("CloudBase bootstrap fails closed when the administrator index is missing or stale", async () => {
+  const uid = uidForOpenId("ou_admin");
+  for (const membershipIndex of [undefined, { admins: { adminUids: ["fs_missing"] } }]) {
+    const db = createDb({
+      auth_bootstrap: { singleton: { codeHash: sha256("correct"), consumed: false } },
+      ...(membershipIndex ? { membership_index: membershipIndex } : {}),
+      members: { [uid]: { uid, role: "pending", tripIds: [], sessionIds: [] } },
+    });
+    const store = createCloudBaseMemberStore({ db, bootstrapCode: "correct" });
+
+    await assert.rejects(() => store.consumeBootstrap({ identity: { openId: "ou_admin", displayName: "一鸣" }, code: "correct" }), { code: "MEMBERSHIP_INDEX_UNAVAILABLE" });
+    assert.equal(db.data.get("members").get(uid).role, "pending");
+    assert.equal(db.data.get("auth_bootstrap").get("singleton").consumed, false);
+  }
+});
+
+test("CloudBase setRole fails closed for missing or inconsistent administrator indexes", async () => {
+  const uid = "fs_member";
+  for (const membershipIndex of [undefined, { admins: { adminUids: [uid] } }, { admins: {} }]) {
+    const db = createDb({
+      members: { [uid]: { uid, role: "pending", tripIds: [], sessionIds: [], version: 0 } },
+      ...(membershipIndex ? { membership_index: membershipIndex } : {}),
+    });
+    const store = createCloudBaseMemberStore({ db });
+
+    await assert.rejects(() => store.setRole(uid, "admin"), { code: "MEMBERSHIP_INDEX_UNAVAILABLE" });
+    assert.equal(db.data.get("members").get(uid).role, "pending");
+  }
+});
+
+test("CloudBase setRole rejects an administrator omitted from the index", async () => {
+  const uid = "fs_admin";
+  const db = createDb({
+    members: { [uid]: { uid, role: "admin", tripIds: [], sessionIds: [], version: 1 } },
+    membership_index: { admins: { adminUids: [] } },
+  });
+  const store = createCloudBaseMemberStore({ db });
+
+  await assert.rejects(() => store.setRole(uid, "member"), { code: "MEMBERSHIP_INDEX_UNAVAILABLE" });
+  assert.equal(db.data.get("members").get(uid).role, "admin");
+});
+
 test("CloudBase session creation records the session ID on the member document", async () => {
   const uid = "fs_member";
   const db = createDb({ members: { [uid]: { uid, role: "member", sessionIds: [], tripIds: [] } } });

@@ -19,6 +19,24 @@ function memberForIdentity(identity, role = "pending", now = new Date()) {
   };
 }
 
+function membershipIndexUnavailable() {
+  const error = new Error("MEMBERSHIP_INDEX_UNAVAILABLE"); error.code = error.message; return error;
+}
+
+async function readAndValidateAdminIndex(transaction, transactionMembers) {
+  const indexResult = await transaction.collection("membership_index").doc("admins").get();
+  const index = indexResult?.data?.[0] || indexResult?.data;
+  if (!index || typeof index !== "object" || Array.isArray(index) || !Array.isArray(index.adminUids) || index.adminUids.some((item) => typeof item !== "string") || new Set(index.adminUids).size !== index.adminUids.length) {
+    throw membershipIndexUnavailable();
+  }
+  for (const adminUid of index.adminUids) {
+    const result = await transactionMembers.doc(adminUid).get();
+    const member = result?.data?.[0] || result?.data;
+    if (!member || member.role !== "admin") throw membershipIndexUnavailable();
+  }
+  return index;
+}
+
 function createMemoryMemberStore({ now = () => new Date(), bootstrapCode } = {}) {
   const members = new Map();
   let bootstrap = bootstrapCode ? { hash: sha256(bootstrapCode), consumed: false } : undefined;
@@ -143,18 +161,17 @@ function createCloudBaseMemberStore({ db, now = () => new Date(), bootstrapCode 
         if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
           const error = new Error("INVALID_BOOTSTRAP_CODE"); error.code = error.message; throw error;
         }
-        const adminIndexResult = await transactionMembershipIndex.doc("admins").get();
-        const adminIndex = adminIndexResult.data?.[0] || adminIndexResult.data || undefined;
-        const adminUids = adminIndex?.adminUids || adminIndex?.uids || record.adminUids || [];
-        if (!Array.isArray(adminUids) || adminUids.some((item) => typeof item !== "string") || new Set(adminUids).size !== adminUids.length) {
-          const error = new Error("MEMBERSHIP_INDEX_UNAVAILABLE"); error.code = error.message; throw error;
-        }
+        const adminIndex = await readAndValidateAdminIndex(transaction, transactionMembers);
+        const adminUids = adminIndex.adminUids;
         if (record.consumed || adminUids.length > 0) {
           const error = new Error("BOOTSTRAP_ALREADY_CONSUMED"); error.code = error.message; throw error;
         }
         const targetUid = uid || uidForOpenId(identity.openId);
         const result = await transactionMembers.doc(targetUid).get();
         const existing = result.data?.[0] || result.data || member || memberForIdentity(identity, "pending", now());
+        if (existing.role === "admin") {
+          const error = new Error("BOOTSTRAP_ALREADY_CONSUMED"); error.code = error.message; throw error;
+        }
         const admin = { ...existing, role: "admin", tripIds: existing.tripIds === undefined ? [] : existing.tripIds, sessionIds: existing.sessionIds === undefined ? [] : existing.sessionIds, approvedAt: now().toISOString(), version: (existing.version || 0) + 1 };
         await transactionMembers.doc(targetUid).set(admin);
         await transactionBootstrap.doc("singleton").set({ ...record, consumed: true, adminUids: [targetUid], consumedAt: now().toISOString() });
@@ -164,16 +181,16 @@ function createCloudBaseMemberStore({ db, now = () => new Date(), bootstrapCode 
     },
     async setRole(uid, role) {
       return db.runTransaction(async (transaction) => {
-        const current = (await transaction.collection("members").doc(uid).get()).data?.[0] || undefined; if (!current) return undefined;
+        const transactionMembers = transaction.collection("members");
+        const index = await readAndValidateAdminIndex(transaction, transactionMembers);
+        const currentResult = await transactionMembers.doc(uid).get();
+        const current = currentResult.data?.[0] || currentResult.data || undefined; if (!current) return undefined;
         const indexDoc = transaction.collection("membership_index").doc("admins");
-        const index = (await indexDoc.get()).data?.[0] || { adminUids: [] };
-        const adminUids = index.adminUids || index.uids || [];
-        if (adminUids.some((item) => typeof item !== "string") || new Set(adminUids).size !== adminUids.length) {
-          const error = new Error("MEMBERSHIP_INDEX_UNAVAILABLE"); error.code = error.message; throw error;
-        }
+        const adminUids = index.adminUids;
+        if ((current.role === "admin") !== adminUids.includes(uid)) throw membershipIndexUnavailable();
         const nextAdminUids = role === "admin" ? [...new Set([...adminUids, uid])] : adminUids.filter((item) => item !== uid);
         const next = { ...current, role, tripIds: current.tripIds === undefined ? [] : current.tripIds, sessionIds: current.sessionIds === undefined ? [] : current.sessionIds, version: (current.version || 0) + 1, ...(role === "member" || role === "admin" ? { approvedAt: now().toISOString() } : {}) };
-        await transaction.collection("members").doc(uid).set(next);
+        await transactionMembers.doc(uid).set(next);
         await indexDoc.set({ ...index, adminUids: nextAdminUids });
         return next;
       });
