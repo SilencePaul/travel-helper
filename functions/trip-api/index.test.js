@@ -12,6 +12,16 @@ test("uses the authenticated custom UID and ignores a payload actor UID", async 
   assert.deepEqual(await handler({ action: "listMembers", actorUid: "attacker" }), { error: "AUTH_REQUIRED" });
 });
 
+test("trusts only the CloudBase userInfo UID as the actor", async () => {
+  const calls = [];
+  const handler = createTripHandler({ commands: { execute: async (payload, actorUid) => { calls.push(actorUid); return { ok: true }; } } });
+
+  assert.deepEqual(await handler({ data: { action: "listMembers" }, authInfo: { uid: "spoofed-auth-info" } }), { error: "AUTH_REQUIRED" });
+  assert.deepEqual(await handler({ data: { action: "listMembers" }, auth: { uid: "spoofed-auth" } }), { error: "AUTH_REQUIRED" });
+  assert.deepEqual(await handler({ data: { action: "listMembers" }, userInfo: { uid: "fs_member" }, authInfo: { uid: "spoofed-auth-info" }, auth: { uid: "spoofed-auth" } }), { ok: true });
+  assert.deepEqual(calls, ["fs_member"]);
+});
+
 test("returns only stable command errors", async () => {
   const handler = createTripHandler({ commands: { execute: async () => { const error = new Error("provider details"); error.code = "UNEXPECTED_PROVIDER_ERROR"; throw error; } } });
   assert.deepEqual(await handler({ action: "listMembers", userInfo: { uid: "fs_member" } }), { error: "TRIP_API_UNAVAILABLE" });

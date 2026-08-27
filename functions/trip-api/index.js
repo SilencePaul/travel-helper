@@ -1,7 +1,7 @@
 const { createTripCommands } = require("./lib/commands.js");
 
 function actorUidFromEvent(event) {
-  return event?.userInfo?.uid || event?.authInfo?.uid || event?.auth?.uid;
+  return event?.userInfo?.uid;
 }
 
 function payloadFromEvent(event) {

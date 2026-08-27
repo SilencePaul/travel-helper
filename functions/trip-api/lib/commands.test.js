@@ -69,7 +69,7 @@ test("saveTrip writes once per idempotency key and rejects stale versions", asyn
   const event = { action: "saveTrip", trip: { ...trip(), title: "更新后的旅行" }, expectedVersion: 0, idempotencyKey: "save-001" };
 
   const saved = await commands.execute(event, "fs_admin");
-  assert.deepEqual(db.data.idempotency.get("save-001"), { actorUid: "fs_admin", tripId: "trip-2026-autumn", trip: saved.trip, createdAt: "2026-08-27T12:00:00.000Z" });
+  assert.deepEqual(db.data.idempotency.get("save-001"), { actorUid: "fs_admin", tripId: "trip-2026-autumn", expectedVersion: 0, trip: saved.trip, createdAt: "2026-08-27T12:00:00.000Z" });
   const replay = await commands.execute(event, "fs_admin");
 
   assert.equal(saved.trip.version, 1);
@@ -90,6 +90,24 @@ test("saveTrip requires the actor to belong to the trip", async () => {
     { code: "FORBIDDEN" },
   );
   assert.equal(db.data.trips.get("trip-2026-autumn").title, "秋日旅行");
+});
+
+test("a member cannot alter the server-owned trip membership list", async () => {
+  const db = createDb({
+    members: [member("fs_member", "member")],
+    trips: [{ ...trip(), memberUids: ["fs_member"] }],
+  });
+  const commands = createTripCommands({ db });
+
+  const result = await commands.execute({
+    action: "saveTrip",
+    trip: { ...trip(), memberUids: ["fs_attacker"], title: "越权加入" },
+    expectedVersion: 0,
+    idempotencyKey: "member-membership",
+  }, "fs_member");
+
+  assert.deepEqual(result.trip.memberUids, ["fs_member"]);
+  assert.deepEqual(db.data.trips.get("trip-2026-autumn").memberUids, ["fs_member"]);
 });
 
 test("saveTrip validates orders with the TripSchema contract", async () => {

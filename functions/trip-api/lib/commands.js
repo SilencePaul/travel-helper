@@ -61,8 +61,8 @@ function canonical(value) {
   return JSON.stringify(value);
 }
 function requestTrip(trip) {
-  const { version, ...withoutServerVersion } = trip;
-  return withoutServerVersion;
+  const { version, memberUids, ...withoutServerOwnedFields } = trip;
+  return withoutServerOwnedFields;
 }
 function safeMember(member) {
   if (!member) return undefined;
@@ -128,10 +128,11 @@ function createTripCommands({ db, now = () => new Date() } = {}) {
       if (current.version !== input.expectedVersion) throw codedError("VERSION_CONFLICT", { currentVersion: current.version });
       const parsed = TripSchema.safeParse(input.trip);
       if (!parsed.success) throw codedError("INVALID_TRIP");
-      const next = { ...parsed.data, version: current.version + 1 };
+      const memberUids = Array.isArray(current.memberUids) ? [...current.memberUids] : [actorUid];
+      const next = { ...parsed.data, memberUids, version: current.version + 1 };
       if (next.version !== input.expectedVersion + 1) throw codedError("INVALID_TRIP");
       await trips.doc(next.id).set(next);
-      await idempotency.doc(input.idempotencyKey).set({ actorUid, tripId: next.id, trip: next, createdAt: now().toISOString() });
+      await idempotency.doc(input.idempotencyKey).set({ actorUid, tripId: next.id, expectedVersion: input.expectedVersion, trip: next, createdAt: now().toISOString() });
       await audit(transaction, actor, "saveTrip", undefined, ["trip"]);
       return { trip: next };
     });
