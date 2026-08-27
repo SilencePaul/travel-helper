@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getPlaceDetail, validatePoiCatalog } from "./itineraryData";
+import { getPlaceDetail, getRouteModes, validatePoiCatalog } from "./itineraryData";
 
 const poi = { id: "peak", name: "太平山顶", amapPoiId: "B073C0YCF7", lng: 114.15, lat: 22.27, coordinateSystem: "GCJ02" };
 
@@ -11,6 +11,9 @@ describe("validatePoiCatalog", () => {
 });
 
 describe("sourced D3 place details", () => {
+  it("marks the short Peak Tower coffee connector as walking", () => {
+    expect(getRouteModes(["peak", "arabica-peak", "central-pier", "star-ferry"])).toEqual(["walking", "transit", "transit"]);
+  });
   it("does not present another branch menu as the Peak Tower cafe menu", () => {
     const restaurant = getPlaceDetail("arabica-peak");
     expect(restaurant?.type).toBe("restaurant");

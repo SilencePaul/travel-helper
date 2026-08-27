@@ -50,6 +50,10 @@ export function getPlaceDetail(placeId: string) {
   return placeDetails[placeId];
 }
 
+const routeModeByConnector: Record<string, TravelMode> = {
+  "peak:arabica-peak": "walking",
+};
+
 export function getRouteModes(placeIds: string[]): TravelMode[] {
-  return placeIds.slice(0, -1).map(() => "transit");
+  return placeIds.slice(0, -1).map((from, index) => routeModeByConnector[`${from}:${placeIds[index + 1]}`] ?? "transit");
 }
