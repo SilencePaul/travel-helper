@@ -1,6 +1,14 @@
-[
+[ 
+  { "id": "shenzhen-civic-center", "name": "市民中心(地铁站)", "amapPoiId": "BV10243488", "lng": 114.060970, "lat": 22.541834, "coordinateSystem": "GCJ02" },
+  { "id": "shenzhen-bay", "name": "深圳湾公园", "amapPoiId": "B0FFFRDS71", "lng": 113.972602, "lat": 22.518968, "coordinateSystem": "GCJ02" },
+  { "id": "avenue-stars", "name": "星光大道", "amapPoiId": "B0FFGQQRBW", "lng": 114.178304, "lat": 22.290228, "coordinateSystem": "GCJ02" },
   { "id": "peak", "name": "太平山顶", "amapPoiId": "B073C0YCF7", "lng": 114.150192, "lat": 22.270851, "coordinateSystem": "GCJ02" },
   { "id": "arabica-peak", "name": "%Arabica(香港凌霄阁店)", "amapPoiId": "B0KDVZTL37", "lng": 114.154678, "lat": 22.268561, "coordinateSystem": "GCJ02" },
   { "id": "central-pier", "name": "中环天星码头", "amapPoiId": "B0FFGQPCXF", "lng": 114.166177, "lat": 22.284364, "coordinateSystem": "GCJ02" },
-  { "id": "star-ferry", "name": "尖沙咀天星码头", "amapPoiId": "B073C0TWVV", "lng": 114.173827, "lat": 22.29081, "coordinateSystem": "GCJ02" }
+  { "id": "star-ferry", "name": "尖沙咀天星码头", "amapPoiId": "B073C0TWVV", "lng": 114.173827, "lat": 22.29081, "coordinateSystem": "GCJ02" },
+  { "id": "ruins-st-pauls", "name": "大三巴牌坊", "amapPoiId": "B073D00ASB", "lng": 113.545883, "lat": 22.194627, "coordinateSystem": "GCJ02" },
+  { "id": "mount-fort", "name": "大炮台", "amapPoiId": "B073D00AS7", "lng": 113.547215, "lat": 22.194171, "coordinateSystem": "GCJ02" },
+  { "id": "rua-cunha", "name": "官也街", "amapPoiId": "B073D0ME04", "lng": 113.562072, "lat": 22.150743, "coordinateSystem": "GCJ02" },
+  { "id": "hzmb-zhuhai", "name": "港珠澳大桥珠海公路口岸", "amapPoiId": "B0FFI6TZR4", "lng": 113.581683, "lat": 22.204423, "coordinateSystem": "GCJ02" },
+  { "id": "zhuhai-airport", "name": "珠海金湾机场", "amapPoiId": "B02F402PGU", "lng": 113.380780, "lat": 22.007696, "coordinateSystem": "GCJ02" }
 ]
