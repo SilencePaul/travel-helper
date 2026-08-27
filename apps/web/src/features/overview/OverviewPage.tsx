@@ -67,7 +67,6 @@ export function OverviewPage({
       if (typeof dialog.showModal === "function") dialog.showModal();
       else dialog.setAttribute("open", "");
     }
-    rangeCancelRef.current?.focus();
     cancelButtonRef.current?.focus();
   }, [dialogOpen]);
 
@@ -86,6 +85,7 @@ export function OverviewPage({
       if (typeof dialog.showModal === "function") dialog.showModal();
       else dialog.setAttribute("open", "");
     }
+    rangeCancelRef.current?.focus();
     return () => { if (dialog.open) dialog.close?.(); };
   }, [rangeWarning]);
 
