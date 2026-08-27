@@ -6,6 +6,8 @@ const { createCloudBaseMemberStore, sha256, uidForOpenId } = require("./members.
 
 function createDb(initial = {}) {
   const data = new Map(Object.entries(initial).map(([name, records]) => [name, new Map(Object.entries(records))]));
+  let mutation = Promise.resolve();
+  let transactionCalls = 0;
   const collection = (name, allowQueries = true) => ({
     doc(id) {
       const store = data.get(name) || new Map();
@@ -23,8 +25,14 @@ function createDb(initial = {}) {
   });
   return {
     data,
+    get transactionCalls() { return transactionCalls; },
     collection,
-    async runTransaction(callback) { return callback({ collection: (name) => collection(name, false) }); },
+    async runTransaction(callback) {
+      transactionCalls += 1;
+      const result = mutation.then(() => callback({ collection: (name) => collection(name, false) }));
+      mutation = result.catch(() => undefined);
+      return result;
+    },
   };
 }
 
@@ -58,6 +66,35 @@ test("CloudBase bootstrap fails closed when the administrator index is missing o
     assert.equal(db.data.get("members").get(uid).role, "pending");
     assert.equal(db.data.get("auth_bootstrap").get("singleton").consumed, false);
   }
+});
+
+test("CloudBase pending upsert fails closed before writing a member when membership indexes are malformed", async () => {
+  const uid = uidForOpenId("ou_pending");
+  for (const membershipIndex of [undefined, { admins: { adminUids: [] }, members: {} }, { admins: { adminUids: [] }, members: { memberUids: ["fs_missing"] } }]) {
+    const db = createDb({
+      ...(membershipIndex ? { membership_index: membershipIndex } : {}),
+      members: {},
+    });
+    const store = createCloudBaseMemberStore({ db });
+
+    await assert.rejects(() => store.upsertPending({ openId: "ou_pending", displayName: "待审核" }), { code: "MEMBERSHIP_INDEX_UNAVAILABLE" });
+    assert.equal(db.data.get("members").has(uid), false);
+  }
+});
+
+test("CloudBase pending upserts atomically preserve concurrent member associations", async () => {
+  const db = createDb({ membership_index: { admins: { adminUids: [] }, members: { memberUids: [] } } });
+  const store = createCloudBaseMemberStore({ db });
+
+  await Promise.all([
+    store.upsertPending({ openId: "ou_first", displayName: "第一位" }),
+    store.upsertPending({ openId: "ou_second", displayName: "第二位" }),
+  ]);
+
+  assert.equal(db.transactionCalls, 2);
+  assert.deepEqual(db.data.get("membership_index").get("members").memberUids.sort(), [uidForOpenId("ou_first"), uidForOpenId("ou_second")].sort());
+  assert.equal(db.data.get("members").has(uidForOpenId("ou_first")), true);
+  assert.equal(db.data.get("members").has(uidForOpenId("ou_second")), true);
 });
 
 test("CloudBase setRole fails closed for missing or inconsistent administrator indexes", async () => {

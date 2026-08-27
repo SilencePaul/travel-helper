@@ -36,7 +36,7 @@ async function readAndValidateMembershipIndexes(transaction, transactionMembers)
   const actualAdmins = [];
   for (const memberUid of members.memberUids) {
     const result = await transactionMembers.doc(memberUid).get();
-    const member = result?.data?.[0] || result?.data;
+    const member = readRecord(result);
     if (!member) throw membershipIndexUnavailable();
     if (member.role === "admin") actualAdmins.push(memberUid);
   }
@@ -117,15 +117,15 @@ function createCloudBaseMemberStore({ db, now = () => new Date(), bootstrapCode 
   const membershipIndex = db.collection("membership_index");
   const memberDoc = members?.doc?.("__capability_check__");
   const bootstrapDoc = bootstrap?.doc?.("__capability_check__");
-  const memberQuery = members?.where?.({ role: "admin" });
   const membershipIndexDoc = membershipIndex?.doc?.("__capability_check__");
-  if (!members || typeof members.doc !== "function" || typeof members.where !== "function" || !memberQuery || typeof memberQuery.limit !== "function" || !memberDoc || typeof memberDoc.get !== "function" || typeof memberDoc.set !== "function" || !bootstrap || typeof bootstrap.doc !== "function" || !bootstrapDoc || typeof bootstrapDoc.get !== "function" || typeof bootstrapDoc.set !== "function" || !membershipIndex || typeof membershipIndex.doc !== "function" || !membershipIndexDoc || typeof membershipIndexDoc.get !== "function" || typeof membershipIndexDoc.set !== "function") {
+  if (!members || typeof members.doc !== "function" || !memberDoc || typeof memberDoc.get !== "function" || typeof memberDoc.set !== "function" || !bootstrap || typeof bootstrap.doc !== "function" || !bootstrapDoc || typeof bootstrapDoc.get !== "function" || typeof bootstrapDoc.set !== "function" || !membershipIndex || typeof membershipIndex.doc !== "function" || !membershipIndexDoc || typeof membershipIndexDoc.get !== "function" || typeof membershipIndexDoc.set !== "function") {
     const error = new Error("CLOUDBASE_TRANSACTION_UNAVAILABLE"); error.code = error.message; throw error;
   }
   return {
     async hasAdmin() {
-      const result = await members.where({ role: "admin" }).limit(1).get();
-      return (result.data || []).length > 0;
+      const result = await membershipIndex.doc("admins").get();
+      const index = readRecord(result);
+      return Array.isArray(index?.adminUids) && index.adminUids.length > 0;
     },
     async findByUid(uid) {
       const result = await members.doc(uid).get();
@@ -133,23 +133,28 @@ function createCloudBaseMemberStore({ db, now = () => new Date(), bootstrapCode 
     },
     async findByOpenId(openId) { return this.findByUid(uidForOpenId(openId)); },
     async upsertPending(identity) {
-      const existing = await this.findByOpenId(identity.openId);
-      if (existing) {
-        const next = { ...existing, tripIds: existing.tripIds === undefined ? [] : existing.tripIds, sessionIds: existing.sessionIds === undefined ? [] : existing.sessionIds };
-        if (next.tripIds !== existing.tripIds || next.sessionIds !== existing.sessionIds) await members.doc(existing.uid).set(next);
-        const indexResult = await membershipIndex.doc("members").get();
-        const index = readRecord(indexResult) || { memberUids: [] };
-        if (!Array.isArray(index.memberUids) || index.memberUids.some((item) => typeof item !== "string") || new Set(index.memberUids).size !== index.memberUids.length) throw membershipIndexUnavailable();
-        await membershipIndex.doc("members").set({ ...index, memberUids: [...new Set([...index.memberUids, existing.uid])] });
+      return db.runTransaction(async (transaction) => {
+        if (!transaction || typeof transaction.collection !== "function") {
+          const error = new Error("CLOUDBASE_TRANSACTION_UNAVAILABLE"); error.code = error.message; throw error;
+        }
+        const transactionMembers = transaction.collection("members");
+        const transactionMembershipIndex = transaction.collection("membership_index");
+        const transactionMemberDoc = transactionMembers?.doc?.("__capability_check__");
+        const transactionMembershipIndexDoc = transactionMembershipIndex?.doc?.("__capability_check__");
+        if (!transactionMembers || typeof transactionMembers.doc !== "function" || !transactionMemberDoc || typeof transactionMemberDoc.get !== "function" || typeof transactionMemberDoc.set !== "function" || !transactionMembershipIndex || typeof transactionMembershipIndex.doc !== "function" || !transactionMembershipIndexDoc || typeof transactionMembershipIndexDoc.get !== "function" || typeof transactionMembershipIndexDoc.set !== "function") {
+          const error = new Error("CLOUDBASE_TRANSACTION_UNAVAILABLE"); error.code = error.message; throw error;
+        }
+        const indexes = await readAndValidateMembershipIndexes(transaction, transactionMembers);
+        const uid = uidForOpenId(identity.openId);
+        const result = await transactionMembers.doc(uid).get();
+        const existing = readRecord(result);
+        const next = existing
+          ? { ...existing, tripIds: existing.tripIds === undefined ? [] : existing.tripIds, sessionIds: existing.sessionIds === undefined ? [] : existing.sessionIds }
+          : memberForIdentity(identity, "pending", now());
+        await transactionMembers.doc(uid).set(next);
+        await transactionMembershipIndex.doc("members").set({ ...indexes.members, memberUids: [...new Set([...indexes.members.memberUids, uid])] });
         return next;
-      }
-      const member = memberForIdentity(identity, "pending", now());
-      await members.doc(member.uid).set(member);
-      const indexResult = await membershipIndex.doc("members").get();
-      const index = readRecord(indexResult) || { memberUids: [] };
-      if (!Array.isArray(index.memberUids) || index.memberUids.some((item) => typeof item !== "string") || new Set(index.memberUids).size !== index.memberUids.length) throw membershipIndexUnavailable();
-      await membershipIndex.doc("members").set({ ...index, memberUids: [...new Set([...index.memberUids, member.uid])] });
-      return member;
+      });
     },
     async consumeBootstrap({ identity, uid, member, code }) {
       return db.runTransaction(async (transaction) => {
