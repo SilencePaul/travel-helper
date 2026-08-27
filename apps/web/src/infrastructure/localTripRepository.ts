@@ -6,6 +6,7 @@ import {
 } from "@travel/contracts";
 
 export class LocalTripRepository implements TripRepository {
+  readonly syncMode = "local" as const;
   private trip: Trip;
   private readonly listeners = new Set<(change: TripChange) => void>();
   private readonly pendingNotifications: Array<{

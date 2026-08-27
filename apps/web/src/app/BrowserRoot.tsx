@@ -117,7 +117,7 @@ export function BrowserRoot() {
 function DevBrowserRoot() {
   const [repository] = useState(createBrowserTestRepository);
   const [routeService] = useState(createBrowserTestRouteService);
-  return <TripApp repository={repository} routeService={routeService} />;
+  return <BrowserRouter><TripApp repository={repository} routeService={routeService} /></BrowserRouter>;
 }
 
 export function ProductionAuthGate() {

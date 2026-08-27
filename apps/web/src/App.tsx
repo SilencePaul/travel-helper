@@ -21,6 +21,7 @@ import { DayPage } from "./features/itinerary/DayPage";
 import { OverviewPage } from "./features/overview/OverviewPage";
 import { HotelComparePage } from "./features/hotels/HotelComparePage";
 import "./styles/global.css";
+import { MemberManagementPage } from "./features/members/MemberManagementPage";
 
 type AppProps = {
   repository?: TripRepository;
@@ -195,6 +196,7 @@ function TripRoutes({ createDayId = () => "day-ui", routeService }: Pick<AppProp
           }
         />
         <Route path="/hotels" element={<HotelComparePage trip={trip} routeService={routeService} onSelectHotel={selectHotel} onBack={() => navigate("/")} />} />
+        <Route path="/admin/members" element={<MemberManagementPage />} />
         <Route
           path="/day/:dayId"
           element={

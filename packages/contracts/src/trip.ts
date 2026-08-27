@@ -18,6 +18,7 @@ export const TripSchema = z.object({
   days: z.array(TravelDaySchema),
   unscheduledItemIds: z.array(z.string()),
   orders: z.array(BudgetItemSchema).default([]),
+  memberUids: z.array(z.string().min(4).max(64)).optional(),
   version: z.number().int().nonnegative(),
 }).superRefine((trip, context) => {
   if (trip.endDate < trip.startDate) {

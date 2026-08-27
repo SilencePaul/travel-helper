@@ -3,7 +3,9 @@ import type { Trip } from "@travel/contracts";
 
 export type TripSyncState =
   | "正在使用本地计划"
+  | "已同步"
   | "正在保存"
+  | "正在重连"
   | "保存失败，请重试";
 
 export type TripContextValue = {
