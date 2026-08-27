@@ -13,15 +13,34 @@ function json(statusCode, body, headers = {}) { return { statusCode, headers: { 
 function pathOf(event) { return new URL(event.path || event.requestContext?.http?.path || event.requestContext?.path || "/", "http://auth.local"); }
 function bodyOf(event) { if (!event.body) return {}; try { return typeof event.body === "string" ? JSON.parse(event.body) : event.body; } catch { return undefined; } }
 function errorCode(error) { return error && typeof error.code === "string" ? error.code : "AUTH_REQUEST_FAILED"; }
+function unavailableError() { const error = new Error("AUTH_SERVICE_UNAVAILABLE"); error.code = "AUTH_SERVICE_UNAVAILABLE"; return error; }
 
 function createAuthHandler({ env = process.env, fetchImpl, memberStore, cloudbase, authStore, now = () => Date.now(), randomBytes, createTicket } = {}) {
+  const cloudbaseMode = env.VITE_DATA_MODE === "cloudbase"
+    || env.NODE_ENV === "production"
+    || Boolean(env.VITE_CLOUDBASE_ENV_ID && env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS);
+  const explicitStores = Boolean(memberStore && authStore);
   let effectiveCloudbase = cloudbase;
-  if (!effectiveCloudbase && env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS && env.VITE_CLOUDBASE_ENV_ID) {
+  if (!effectiveCloudbase && !explicitStores && cloudbaseMode) {
+    try {
+      if (!env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS || !env.VITE_CLOUDBASE_ENV_ID) throw unavailableError();
+      effectiveCloudbase = require("@cloudbase/node-sdk").init({ env: env.VITE_CLOUDBASE_ENV_ID, credentials: JSON.parse(env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS) });
+    } catch {
+      throw unavailableError();
+    }
+  } else if (!effectiveCloudbase && env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS && env.VITE_CLOUDBASE_ENV_ID) {
     try { effectiveCloudbase = require("@cloudbase/node-sdk").init({ env: env.VITE_CLOUDBASE_ENV_ID, credentials: JSON.parse(env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS) }); } catch { effectiveCloudbase = undefined; }
   }
-  const store = memberStore || (effectiveCloudbase ? createCloudBaseMemberStore({ db: effectiveCloudbase.database(), bootstrapCode: env.ADMIN_BOOTSTRAP_CODE }) : createMemoryMemberStore({ bootstrapCode: env.ADMIN_BOOTSTRAP_CODE }));
+  let store;
+  let sessions;
+  try {
+    store = memberStore || (effectiveCloudbase ? createCloudBaseMemberStore({ db: effectiveCloudbase.database(), bootstrapCode: env.ADMIN_BOOTSTRAP_CODE }) : createMemoryMemberStore({ bootstrapCode: env.ADMIN_BOOTSTRAP_CODE }));
+    sessions = authStore || (effectiveCloudbase ? createCloudBaseAuthStore({ db: effectiveCloudbase.database(), now, randomBytes }) : createMemoryAuthStore({ now, randomBytes }));
+  } catch {
+    if (cloudbaseMode && !explicitStores) throw unavailableError();
+    throw unavailableError();
+  }
   const feishu = createFeishuClient({ env, fetchImpl });
-  const sessions = authStore || (effectiveCloudbase ? createCloudBaseAuthStore({ db: effectiveCloudbase.database(), now, randomBytes }) : createMemoryAuthStore({ now, randomBytes }));
   const tickets = createTicketService({ cloudbase: effectiveCloudbase, memberStore: store, createTicket: createTicket || ((uid) => effectiveCloudbase?.auth().createTicket(uid)) });
   const secure = String(env.PUBLIC_APP_URL || "").startsWith("https://");
   const cors = { "access-control-allow-origin": env.PUBLIC_APP_URL || "*", "access-control-allow-credentials": "true", "access-control-allow-methods": "GET,POST,OPTIONS", "access-control-allow-headers": "content-type", vary: "Origin" };

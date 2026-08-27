@@ -155,3 +155,20 @@ test("state and session records are shared across service instances and expire",
   const expired = await makeRequest(secondInstance, "POST", "/api/auth/ticket", undefined, { cookie: sessionCookie });
   assert.equal(expired.statusCode, 401);
 });
+
+test("CloudBase mode fails closed when CloudBase initialization is unavailable", () => {
+  assert.throws(() => createAuthHandler({
+    env: {
+      VITE_DATA_MODE: "cloudbase",
+      VITE_CLOUDBASE_ENV_ID: "travel-prod",
+      CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS: "not-json",
+      FEISHU_APP_ID: "cli",
+      FEISHU_APP_SECRET: "secret",
+      FEISHU_REDIRECT_URI: "https://auth/callback",
+      PUBLIC_APP_URL: "https://trip",
+      ADMIN_BOOTSTRAP_CODE: "code",
+      AUTH_SESSION_SECRET: "secret",
+    },
+    fetchImpl: async () => new Response("{}"),
+  }), (error) => error && error.code === "AUTH_SERVICE_UNAVAILABLE");
+});
