@@ -6,6 +6,8 @@ import seed from "../../../../content/trip.seed.json";
 import { TripProvider } from "./TripProvider";
 import { useTrip, type TripContextValue } from "./tripContext";
 import { UnauthorizedError } from "../infrastructure/cloudbaseTripRepository";
+import { enqueuePendingCommand, listPendingCommands } from "../infrastructure/offlineQueue";
+import { clearOfflineData } from "../infrastructure/offlineStore";
 
 type Deferred<T> = {
   promise: Promise<T>;
@@ -214,6 +216,36 @@ test("starts a fresh loading session when tripId changes", async () => {
   await act(async () => repository.loads.get("trip-b")!.resolve(versionedTrip(0, "trip B")));
   expect(await screen.findByText("trip B")).toBeVisible();
   expect(screen.queryByText("stale trip")).not.toBeInTheDocument();
+});
+
+test("counts and replays a seeded queue once after an online load", async () => {
+  await clearOfflineData();
+  await enqueuePendingCommand({
+    tripId: seed.id,
+    expectedVersion: 0,
+    patch: { ...structuredClone(seed), title: "queued save", version: 1 },
+    createdAt: "2026-08-27T09:00:00.000Z",
+    idempotencyKey: "cmd-startup",
+  });
+  const repository = new ControlledTripRepository();
+  render(
+    <TripProvider repository={repository} tripId={seed.id}>
+      <ProviderProbe />
+    </TripProvider>,
+  );
+
+  await act(async () => repository.loadResult.resolve(versionedTrip(0, "loaded online")));
+  await waitFor(() => expect(repository.saveRequests).toHaveLength(1));
+  expect(repository.saveRequests[0]).toMatchObject({
+    expectedVersion: 0,
+    next: { title: "queued save", version: 1 },
+  });
+
+  window.dispatchEvent(new Event("online"));
+  await act(async () => repository.saveRequests[0]!.result.resolve(versionedTrip(1, "queued save")));
+  await waitFor(async () => expect(await listPendingCommands(seed.id)).toEqual([]));
+  expect(repository.saveRequests).toHaveLength(1);
+  await clearOfflineData();
 });
 
 test("clears a load error when a replacement repository starts loading", async () => {

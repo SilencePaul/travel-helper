@@ -44,22 +44,23 @@ export function TripProvider({
   const [syncState, setSyncState] = useState<TripSyncState>(isCloudbase ? "已同步" : "正在使用本地计划");
   const [pendingCommandCount, setPendingCommandCount] = useState(0);
   const [conflictPaused, setConflictPaused] = useState(false);
+  const [loadedSession, setLoadedSession] = useState<number>();
   const tripRef = useRef<Trip | undefined>(undefined);
   const sessionRef = useRef(0);
   const mutationQueueRef = useRef<Promise<unknown>>(Promise.resolve());
   const savingRef = useRef(false);
   const connectionRef = useRef<"synced" | "reconnecting">("synced");
   const invalidatedRef = useRef(false);
-  const replayingRef = useRef(false);
+  const replayingRef = useRef<{ session: number; promise: Promise<void> } | undefined>(undefined);
 
   const isOnline = () => typeof navigator === "undefined" || navigator.onLine;
 
-  const refreshPendingCount = useCallback(async () => {
+  const refreshPendingCount = useCallback(async (session?: number) => {
     try {
       const commands = await listPendingCommands(tripId);
-      setPendingCommandCount(commands.length);
+      if (session === undefined || session === sessionRef.current) setPendingCommandCount(commands.length);
     } catch {
-      setPendingCommandCount(0);
+      if (session === undefined || session === sessionRef.current) setPendingCommandCount(0);
     }
   }, [tripId]);
 
@@ -105,7 +106,8 @@ export function TripProvider({
     setLoadError(false);
     setAuthLost(false);
     setSyncState(isCloudbase ? "已同步" : "正在使用本地计划");
-    if (!isOnline()) void refreshPendingCount();
+    setLoadedSession(undefined);
+    if (!isOnline()) void refreshPendingCount(session);
     /* oxlint-enable react/set-state-in-effect */
     let active = true;
     let unsubscribe: (() => void) | undefined;
@@ -133,6 +135,7 @@ export function TripProvider({
       .then((loadedTrip) => {
         if (active) {
           applySnapshot(loadedTrip, session);
+          setLoadedSession(session);
           if (isCloudbase && !savingRef.current && connectionRef.current === "synced") setSyncState("已同步");
         }
       })
@@ -165,29 +168,44 @@ export function TripProvider({
     };
   }, [applySnapshot, invalidateSession, isCloudbase, refreshPendingCount, repository, tripId]);
 
-  const replayQueuedCommands = useCallback(async () => {
-    if (!isOnline() || replayingRef.current || invalidatedRef.current) return;
-    replayingRef.current = true;
-    try {
-      const result = await replayPendingCommands(async (command) => {
-        const next = command.patch as unknown as Trip;
-        const idempotentRepository = repository as TripRepository & {
-          saveWithIdempotency?: (trip: Trip, expectedVersion: number, idempotencyKey: string) => Promise<Trip>;
-        };
-        const saved = await (idempotentRepository.saveWithIdempotency
-          ? idempotentRepository.saveWithIdempotency(next, command.expectedVersion, command.idempotencyKey)
-          : repository.save(next, command.expectedVersion));
-        if (sessionRef.current > 0) applySnapshot(saved, sessionRef.current);
-        return saved;
-      }, tripId);
-      await refreshPendingCount();
-      setConflictPaused(result.status === "paused-conflict");
-      if (result.status === "paused-conflict") setSyncState("同步冲突，等待处理");
-      else if (result.status === "completed" && !savingRef.current) setSyncState(isCloudbase ? "已同步" : "正在使用本地计划");
-    } finally {
-      replayingRef.current = false;
-    }
+  const replayQueuedCommands = useCallback(() => {
+    const session = sessionRef.current;
+    if (!isOnline() || invalidatedRef.current || !tripRef.current) return Promise.resolve();
+    const existing = replayingRef.current;
+    if (existing?.session === session) return existing.promise;
+
+    const run = async () => {
+      try {
+        const result = await replayPendingCommands(async (command) => {
+          if (session !== sessionRef.current || invalidatedRef.current) throw new Error("STALE_SESSION");
+          const saved = "saveWithIdempotency" in repository && typeof repository.saveWithIdempotency === "function"
+            ? await repository.saveWithIdempotency(command.patch, command.expectedVersion, command.idempotencyKey)
+            : await repository.save(command.patch, command.expectedVersion);
+          if (session === sessionRef.current && !invalidatedRef.current) applySnapshot(saved, session);
+          return saved;
+        }, tripId);
+        if (session !== sessionRef.current || invalidatedRef.current) return;
+        await refreshPendingCount(session);
+        if (session !== sessionRef.current || invalidatedRef.current) return;
+        setConflictPaused(result.status === "paused-conflict");
+        if (result.status === "paused-conflict") setSyncState("同步冲突，等待处理");
+        else if (result.status === "completed" && !savingRef.current) setSyncState(isCloudbase ? "已同步" : "正在使用本地计划");
+      } catch {
+        if (session === sessionRef.current && !invalidatedRef.current) await refreshPendingCount(session);
+      }
+    };
+    const promise = run();
+    replayingRef.current = { session, promise };
+    void promise.finally(() => {
+      if (replayingRef.current?.promise === promise) replayingRef.current = undefined;
+    });
+    return promise;
   }, [applySnapshot, isCloudbase, refreshPendingCount, repository, tripId]);
+
+  useEffect(() => {
+    if (loadedSession !== sessionRef.current || !tripRef.current || !isOnline()) return;
+    void replayQueuedCommands();
+  }, [loadedSession, replayQueuedCommands]);
 
   useEffect(() => {
     const handleOnline = () => { void replayQueuedCommands(); };
@@ -221,7 +239,7 @@ export function TripProvider({
             idempotencyKey: newIdempotencyKey(),
           });
           applySnapshot(optimistic, requestedSession);
-          await refreshPendingCount();
+          await refreshPendingCount(requestedSession);
           setConflictPaused(false);
           savingRef.current = false;
           setSyncState("离线");

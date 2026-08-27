@@ -1,16 +1,31 @@
-import {
-  openOfflineDatabase,
-} from "./offlineStore";
+import { z } from "zod";
+import { TripSchema } from "@travel/contracts";
+import { openOfflineDatabase } from "./offlineStore";
 
-export type OfflinePatch = Record<string, unknown>;
+/**
+ * Offline saves deliberately contain the complete trip. A partial patch cannot
+ * be replayed through TripRepository.save without knowing which server state
+ * it was based on.
+ */
+export const PendingSaveSchema = z.object({
+  tripId: z.string().min(1),
+  expectedVersion: z.number().int().nonnegative(),
+  patch: TripSchema,
+  createdAt: z.string().datetime({ offset: true }),
+  idempotencyKey: z.string().min(1),
+}).strict().superRefine((save, context) => {
+  if (save.tripId !== save.patch.id) {
+    context.addIssue({
+      code: "custom",
+      message: "Offline save trip ID must match the trip payload",
+      path: ["tripId"],
+    });
+  }
+});
 
-export type PendingCommand = {
-  tripId: string;
-  expectedVersion: number;
-  patch: OfflinePatch;
-  createdAt: string;
-  idempotencyKey: string;
-};
+export type PendingSave = z.infer<typeof PendingSaveSchema>;
+export type PendingCommand = PendingSave;
+export type PendingCommandSender = (command: PendingCommand) => Promise<unknown>;
 
 export type ReplayResult = {
   status: "completed" | "paused-conflict" | "failed";
@@ -18,8 +33,6 @@ export type ReplayResult = {
   pending: number;
   error?: unknown;
 };
-
-export type PendingCommandSender = (command: PendingCommand) => Promise<unknown>;
 
 const secretFieldPattern = /(token|ticket|secret|credential|password|authorization|oauth|privatekey|apikey|accesskey|mapkey|qweather|feishu|cloudbase)/i;
 
@@ -29,41 +42,31 @@ function containsSecretField(value: unknown): boolean {
   return Object.entries(value).some(([key, child]) => secretFieldPattern.test(key) || containsSecretField(child));
 }
 
-function validateCommand(value: PendingCommand): PendingCommand {
-  if (!value || typeof value.tripId !== "string" || value.tripId.length === 0) {
-    throw new TypeError("Offline command requires a trip ID");
-  }
-  if (!Number.isInteger(value.expectedVersion) || value.expectedVersion < 0) {
-    throw new TypeError("Offline command requires a non-negative expected version");
-  }
-  if (!value.patch || typeof value.patch !== "object" || Array.isArray(value.patch)) {
-    throw new TypeError("Offline command requires an object patch");
-  }
-  if (containsSecretField(value.patch)) {
+function validateCommand(value: unknown): PendingCommand {
+  if (containsSecretField(value)) {
     throw new TypeError("Offline command contains a secret-like field");
   }
-  if (!value.idempotencyKey || typeof value.idempotencyKey !== "string") {
-    throw new TypeError("Offline command requires an idempotency key");
+  const result = PendingSaveSchema.safeParse(value);
+  if (!result.success) {
+    throw new TypeError("Offline command does not contain a valid full trip save");
   }
-  if (!value.createdAt || Number.isNaN(Date.parse(value.createdAt))) {
-    throw new TypeError("Offline command requires an ISO timestamp");
-  }
+  return structuredClone(result.data);
+}
 
-  return structuredClone({
-    tripId: value.tripId,
-    expectedVersion: value.expectedVersion,
-    patch: value.patch,
-    createdAt: value.createdAt,
-    idempotencyKey: value.idempotencyKey,
-  });
+function readProperty(value: unknown, property: string): unknown {
+  if (!value || typeof value !== "object") return undefined;
+  try {
+    return Reflect.get(value, property);
+  } catch {
+    return undefined;
+  }
 }
 
 function readErrorCode(value: unknown): string | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  const record = value as { code?: unknown; error?: unknown };
-  if (typeof record.code === "string") return record.code;
-  if (typeof record.error === "string") return record.error;
-  return undefined;
+  const code = readProperty(value, "code");
+  if (typeof code === "string") return code;
+  const error = readProperty(value, "error");
+  return typeof error === "string" ? error : undefined;
 }
 
 function isVersionConflict(value: unknown): boolean {
@@ -74,33 +77,40 @@ function isVersionConflict(value: unknown): boolean {
 function isAcknowledged(value: unknown): boolean {
   if (value === false || value === undefined || value === null) return false;
   if (!value || typeof value !== "object") return true;
-  const record = value as { ok?: unknown; code?: unknown; error?: unknown };
-  return record.ok !== false && record.code === undefined && record.error === undefined;
+  return readProperty(value, "ok") !== false
+    && readProperty(value, "code") === undefined
+    && readProperty(value, "error") === undefined;
 }
 
-export async function enqueuePendingCommand(input: PendingCommand): Promise<PendingCommand> {
+export async function enqueuePendingCommand(input: unknown): Promise<PendingCommand> {
   const command = validateCommand(input);
   const database = await openOfflineDatabase();
   const existing = await database.get("pendingCommands", command.idempotencyKey);
-  if (existing !== undefined) return validateCommand(existing as PendingCommand);
+  if (existing !== undefined) {
+    try {
+      return validateCommand(existing);
+    } catch {
+      await database.delete("pendingCommands", command.idempotencyKey);
+    }
+  }
   await database.put("pendingCommands", command, command.idempotencyKey);
   return structuredClone(command);
 }
 
 export async function listPendingCommands(tripId?: string): Promise<PendingCommand[]> {
   const database = await openOfflineDatabase();
-  const values = await database.getAll("pendingCommands");
-  const commands = values
-    .map((value) => {
-      try {
-        return validateCommand(value as PendingCommand);
-      } catch {
-        return undefined;
-      }
-    })
-    .filter((command): command is PendingCommand => command !== undefined)
-    .filter((command) => tripId === undefined || command.tripId === tripId)
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.idempotencyKey.localeCompare(right.idempotencyKey));
+  const keys = await database.getAllKeys("pendingCommands");
+  const commands: PendingCommand[] = [];
+  for (const key of keys) {
+    const value = await database.get("pendingCommands", key);
+    try {
+      const command = validateCommand(value);
+      if (tripId === undefined || command.tripId === tripId) commands.push(command);
+    } catch {
+      await database.delete("pendingCommands", key);
+    }
+  }
+  commands.sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.idempotencyKey.localeCompare(right.idempotencyKey));
   return commands.map((command) => structuredClone(command));
 }
 
@@ -132,7 +142,7 @@ export async function replayPendingCommands(sender: PendingCommandSender, tripId
   return { status: "completed", replayed, pending: 0 };
 }
 
-export function isOfflineCommandSafe(value: PendingCommand): boolean {
+export function isOfflineCommandSafe(value: unknown): value is PendingCommand {
   try {
     validateCommand(value);
     return true;
