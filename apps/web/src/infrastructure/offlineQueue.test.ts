@@ -38,7 +38,7 @@ describe("offline snapshot and command storage", () => {
     await enqueuePendingCommand(command);
     await enqueuePendingCommand({ ...command, patch: { ...structuredClone(seed), title: "重复提交", version: 1 } });
 
-    await expect(listPendingCommands(seed.id)).resolves.toEqual([{ ...command, patch: { ...command.patch, orders: [] } }]);
+    await expect(listPendingCommands(seed.id)).resolves.toEqual([command]);
   });
 
   it("rejects secret-bearing command payloads", async () => {
@@ -123,7 +123,7 @@ describe("offline command replay", () => {
     const send = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce({ ok: true });
 
     await expect(replayPendingCommands(send)).resolves.toMatchObject({ status: "failed", replayed: 0 });
-    await expect(listPendingCommands(seed.id)).resolves.toEqual([{ ...command, patch: { ...command.patch, orders: [] } }]);
+    await expect(listPendingCommands(seed.id)).resolves.toEqual([command]);
     await expect(replayPendingCommands(send)).resolves.toMatchObject({ status: "completed", replayed: 1 });
     await expect(listPendingCommands(seed.id)).resolves.toEqual([]);
   });

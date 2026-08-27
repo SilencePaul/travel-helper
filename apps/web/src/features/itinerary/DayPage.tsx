@@ -8,6 +8,7 @@ import type { MapInteractionAdapter, RouteFailure, RouteService } from "../map/t
 import { getPlace, getPlaceDetail, getPlaces, getRouteModes } from "./itineraryData";
 import { Timeline } from "./Timeline";
 import { PlaceDrawer } from "../places/PlaceDrawer";
+import { WeatherSummary } from "../weather/WeatherSummary";
 
 type DayPageProps = {
   trip: Trip;
@@ -42,6 +43,7 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, r
   const drawerRainAlternative = drawerPlace?.type === "attraction"
     ? getPlaceDetail(drawerPlace.rainAlternativeId)
     : undefined;
+  const weatherDays = useMemo(() => day ? [day] : [], [day]);
   const selectPlace = useCallback((placeId: string, trigger?: HTMLButtonElement) => {
     setSelectedPlaceId(placeId);
     if (trigger && getPlaceDetail(placeId)) {
@@ -91,7 +93,7 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, r
       <header>
         <p className="eyebrow">D{dayIndex + 1} · {day.date}</p>
         <h1>{day.city || "待安排"}</h1>
-        <p className="weather-state">待预报</p>
+        <WeatherSummary days={weatherDays} compact />
       </header>
       <AmapRouteMap
         places={places}

@@ -5,6 +5,7 @@ import { DayStrip } from "./DayStrip";
 import { getDayPanelId, getDayTabId } from "./dayTabIds";
 import { BudgetPanel } from "../budget/BudgetPanel";
 import { OrdersPanel } from "../budget/OrdersPanel";
+import { WeatherSummary } from "../weather/WeatherSummary";
 
 type AffectedOrder = { id: string; name: string; category: BudgetCategory; dayId: string };
 
@@ -285,6 +286,8 @@ export function OverviewPage({
           <p className="empty-state">请先新增一天</p>
         )}
       </section>
+
+      <WeatherSummary days={trip.days} />
 
       {onChangeDateRange ? <section className="date-range" aria-labelledby="date-range-heading">
         <div><p className="eyebrow">日期</p><h2 id="date-range-heading">调整旅行日期</h2></div>

@@ -133,6 +133,11 @@ h2 { margin: 0; font-size: 24px; }
 .date-warning > div:last-child { display: flex; gap: 8px; }
 .selected-day h3 { margin: 0; font-size: 22px; }
 .selected-day > p:last-child { margin-bottom: 0; color: #697169; }
+.weather-summary { display: grid; grid-template-columns: minmax(180px, .75fr) 1fr; gap: 16px 28px; margin-top: 24px; padding: 22px; border: 1px solid #d9dbd5; border-radius: 20px; background: #faf9f5; }
+.weather-summary > p { margin: 0; color: #536057; line-height: 1.55; }
+.weather-summary ul { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 0; padding: 0; list-style: none; }
+.weather-summary li { display: grid; gap: 5px; padding: 12px; border: 1px solid #e1e3dd; border-radius: 12px; }
+.weather-summary li span { color: #936f31; font-size: 13px; }
 .delete-confirmation {
   position: fixed;
   z-index: 10;
@@ -267,6 +272,8 @@ h2 { margin: 0; font-size: 24px; }
   .place-drawer-content { padding: 14px 20px calc(28px + env(safe-area-inset-bottom)); }
   .hotel-map, .hotel-grid { grid-template-columns: 1fr; }
   .budget-panel, .orders-panel, .budget-breakdown { grid-template-columns: 1fr; }
+  .weather-summary { grid-template-columns: 1fr; }
+  .weather-summary ul { grid-template-columns: 1fr 1fr; }
   .order-list li { align-items: start; flex-direction: column; }
   .hotel-commute dl { grid-template-columns: 1fr; }
 }

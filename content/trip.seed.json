@@ -16,5 +16,12 @@
     { "id": "day-2026-10-08", "date": "2026-10-08", "city": "珠海 / 北京", "itemIds": [] }
   ],
   "unscheduledItemIds": [],
+  "orders": [
+    { "id": "flight-roundtrip", "name": "北京 → 深圳、珠海 → 北京机票（两人）", "category": "flight", "estimated": 290000, "paid": 0, "currency": "CNY", "status": "unpaid" },
+    { "id": "hotel-stays", "name": "深圳、香港、澳门住宿（5 晚 / 两人）", "category": "hotel", "estimated": 475000, "paid": 0, "currency": "CNY", "status": "unpaid" },
+    { "id": "cross-city-transport", "name": "跨城与市内交通（两人）", "category": "transport", "estimated": 90000, "paid": 0, "currency": "CNY", "status": "unpaid" },
+    { "id": "food-budget", "name": "餐饮预算（两人）", "category": "food", "estimated": 210000, "paid": 0, "currency": "CNY", "status": "unpaid" },
+    { "id": "tickets-and-misc", "name": "门票与杂项（两人）", "category": "ticket", "estimated": 50000, "paid": 0, "currency": "CNY", "status": "unpaid" }
+  ],
   "version": 0
 }
