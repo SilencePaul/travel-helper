@@ -14,7 +14,7 @@ describe("MemberRoleSchema", () => {
 describe("MemberSchema", () => {
   const valid = {
     uid: "user-1234",
-    name: "美垚",
+    displayName: "美垚",
     avatarUrl: "https://example.com/avatar.png",
     role: "member",
     version: 0,
@@ -33,8 +33,8 @@ describe("MemberSchema", () => {
   it.each([
     [{ ...valid, uid: "abc" }],
     [{ ...valid, uid: "a".repeat(33) }],
-    [{ ...valid, name: "" }],
-    [{ ...valid, name: "a".repeat(101) }],
+    [{ ...valid, displayName: "" }],
+    [{ ...valid, displayName: "a".repeat(101) }],
     [{ ...valid, avatarUrl: "not-a-url" }],
     [{ ...valid, version: -1 }],
     [{ ...valid, version: 1.5 }],

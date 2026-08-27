@@ -4,7 +4,7 @@ export const MemberRoleSchema = z.enum(["admin", "member", "pending", "removed"]
 
 export const MemberSchema = z.object({
   uid: z.string().min(4).max(32),
-  name: z.string().trim().min(1).max(100),
+  displayName: z.string().trim().min(1).max(100),
   avatarUrl: z.url().optional(),
   role: MemberRoleSchema,
   version: z.number().int().nonnegative(),
