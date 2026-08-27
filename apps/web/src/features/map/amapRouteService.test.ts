@@ -284,6 +284,32 @@ describe("createAmapRouteService", () => {
       .resolves.toEqual(expect.objectContaining({ segments: [expect.objectContaining({ distanceMeters: 0, durationMinutes: 0 })], failures: [] }));
   });
 
+  it.each(["timeout", "provider rejection", "synchronous throw"] as const)("releases the shared provider queue after a first task %s", async (failure) => {
+    if (failure === "timeout") vi.useFakeTimers();
+    let calls = 0;
+    const search = vi.fn((_origin, _destination, callback) => {
+      calls += 1;
+      if (calls === 1) {
+        if (failure === "timeout") return;
+        if (failure === "provider rejection") return callback("error", {});
+        throw new Error("provider constructor search failure");
+      }
+      callback("complete", { routes: [{ distance: 716, time: 600, steps: [{ path: [[centralPier.lng, centralPier.lat], [peak.lng, peak.lat]] }] }] });
+    });
+    class Walking { constructor(_options?: unknown) {} search = search; }
+    const resolve = (id: string) => id === peak.id ? peak : centralPier;
+    const firstService = createAmapRouteService(async () => ({ Walking }), resolve, { timeoutMs: 10 });
+    const secondService = createAmapRouteService(async () => ({ Walking }), resolve);
+
+    const first = firstService.getSegments({ dayId: "failed-first", city: "香港", placeIds: [peak.id, centralPier.id], modeByLeg: ["walking"] });
+    const second = secondService.getSegments({ dayId: "queued-second", city: "香港", placeIds: [centralPier.id, peak.id], modeByLeg: ["walking"] });
+    if (failure === "timeout") await vi.advanceTimersByTimeAsync(10);
+
+    await expect(first).resolves.toEqual(expect.objectContaining({ segments: [], failures: [expect.anything()] }));
+    await expect(second).resolves.toEqual(expect.objectContaining({ segments: [expect.objectContaining({ fromPlaceId: centralPier.id, toPlaceId: peak.id })], failures: [] }));
+    expect(search).toHaveBeenCalledTimes(2);
+  });
+
   it.each([
     ["empty plan", {}],
     ["non-numeric distance", { distance: "not-a-number", time: 600, steps: [{ path: [[peak.lng, peak.lat], [centralPier.lng, centralPier.lat]] }] }],
