@@ -38,17 +38,31 @@ function createBrowserTestRouteService(): RouteService | undefined {
       }
       const fixtures = [
         {
-          id: "test-peak-central",
+          id: "test-peak-arabica",
           fromPlaceId: "peak",
-          toPlaceId: "central-pier",
+          toPlaceId: "arabica-peak",
           mode: "transit",
           distanceMeters: 1800,
           durationMinutes: 15,
           summary: "测试提供方公共交通路线",
           path: [
             { lng: 114.1454, lat: 22.2757, coordinateSystem: "GCJ02" },
-            { lng: 114.149, lat: 22.279, coordinateSystem: "GCJ02" },
-            { lng: 114.1596, lat: 22.2864, coordinateSystem: "GCJ02" },
+            { lng: 114.148, lat: 22.273, coordinateSystem: "GCJ02" },
+            { lng: 114.150192, lat: 22.270851, coordinateSystem: "GCJ02" },
+          ],
+        },
+        {
+          id: "test-arabica-central",
+          fromPlaceId: "arabica-peak",
+          toPlaceId: "central-pier",
+          mode: "transit",
+          distanceMeters: 1800,
+          durationMinutes: 15,
+          summary: "测试提供方公共交通路线",
+          path: [
+            { lng: 114.150192, lat: 22.270851, coordinateSystem: "GCJ02" },
+            { lng: 114.154678, lat: 22.268561, coordinateSystem: "GCJ02" },
+            { lng: 114.166177, lat: 22.284364, coordinateSystem: "GCJ02" },
           ],
         },
         {
@@ -63,6 +77,21 @@ function createBrowserTestRouteService(): RouteService | undefined {
             { lng: 114.1596, lat: 22.2864, coordinateSystem: "GCJ02" },
             { lng: 114.1637, lat: 22.2901, coordinateSystem: "GCJ02" },
             { lng: 114.1691, lat: 22.2947, coordinateSystem: "GCJ02" },
+          ],
+        },
+        {
+          id: "test-peak-ferry",
+          fromPlaceId: "peak",
+          toPlaceId: "star-ferry",
+          mode: "transit",
+          distanceMeters: 4100,
+          durationMinutes: 32,
+          summary: "测试提供方公共交通路线",
+          path: [
+            { lng: 114.1454, lat: 22.2757, coordinateSystem: "GCJ02" },
+            { lng: 114.154678, lat: 22.268561, coordinateSystem: "GCJ02" },
+            { lng: 114.166177, lat: 22.284364, coordinateSystem: "GCJ02" },
+            { lng: 114.173827, lat: 22.29081, coordinateSystem: "GCJ02" },
           ],
         },
       ] satisfies RouteSegment[];
