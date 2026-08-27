@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { Member } from "@travel/contracts";
 import { useNavigate } from "react-router-dom";
 import { recoverAuthenticatedMember } from "../../infrastructure/authSession";
+import { AuthShell } from "./AuthShell";
 
 export function PendingApprovalPage({ onAuthenticated }: { onAuthenticated?: (member: Member) => void } = {}) {
   const navigate = useNavigate();
@@ -29,10 +30,9 @@ export function PendingApprovalPage({ onAuthenticated }: { onAuthenticated?: (me
     };
   }, [refresh]);
   return (
-    <main aria-labelledby="pending-title">
-      <h1 id="pending-title">等待批准</h1>
-      <p role="status">{message}</p>
-      <button type="button" onClick={() => void refresh()}>手动刷新</button>
-    </main>
+    <AuthShell step="等待同行确认" title="通行证正在盖章" description="管理员批准后，这一页会自动进入共享行程。">
+      <p className="auth-status" role="status">{message}</p>
+      <button className="auth-secondary" type="button" onClick={() => void refresh()}>重新检查状态</button>
+    </AuthShell>
   );
 }

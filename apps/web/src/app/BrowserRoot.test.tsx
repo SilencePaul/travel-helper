@@ -33,7 +33,7 @@ describe("ProductionAuthGate", () => {
 
   it("does not mount trip content or a local repository before CloudBase auth", async () => {
     render(<ProductionAuthGate />);
-    expect(await screen.findByRole("button", { name: "使用飞书登录" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "使用飞书继续" })).toBeInTheDocument();
     expect(screen.queryByText("正在加载旅行计划")).not.toBeInTheDocument();
   });
 
@@ -43,7 +43,7 @@ describe("ProductionAuthGate", () => {
     render(<ProductionAuthGate />);
 
     expect(await screen.findByText("正在加载旅行计划")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "使用飞书登录" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "使用飞书继续" })).not.toBeInTheDocument();
   });
 
   it("handles an OAuth callback marker from the hosting root", async () => {
@@ -51,7 +51,7 @@ describe("ProductionAuthGate", () => {
 
     render(<ProductionAuthGate />);
 
-    expect(await screen.findByRole("heading", { name: "初始化管理员" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "完成管理员初始化" })).toBeInTheDocument();
   });
 
   it("does not mount the member-management route for an authenticated non-admin", async () => {

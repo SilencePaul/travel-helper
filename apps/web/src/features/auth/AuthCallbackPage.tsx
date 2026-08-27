@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Member } from "@travel/contracts";
 import { useLocation, useNavigate } from "react-router-dom";
 import { recoverAuthenticatedMember } from "../../infrastructure/authSession";
+import { AuthShell } from "./AuthShell";
 
 export function AuthCallbackPage({ onAuthenticated }: { onAuthenticated?: (member: Member) => void } = {}) {
   const navigate = useNavigate();
@@ -30,5 +31,9 @@ export function AuthCallbackPage({ onAuthenticated }: { onAuthenticated?: (membe
         else setMessage("登录未完成，请返回后重试。");
       });
   }, [location.search, navigate, onAuthenticated]);
-  return <main role="status"><p>{message}</p></main>;
+  return (
+    <AuthShell step="02 · 身份确认" title="正在核对旅行通行证" description="飞书授权已经完成，我们正在同步这趟旅行的成员身份。">
+      <div className="auth-progress" role="status"><span aria-hidden="true" /><span aria-hidden="true" /><span aria-hidden="true" /><b>{message}</b></div>
+    </AuthShell>
+  );
 }

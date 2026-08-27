@@ -9,6 +9,7 @@ import { LoginPage } from "../features/auth/LoginPage";
 import { AuthCallbackPage } from "../features/auth/AuthCallbackPage";
 import { BootstrapPage } from "../features/auth/BootstrapPage";
 import { PendingApprovalPage } from "../features/auth/PendingApprovalPage";
+import { AuthShell } from "../features/auth/AuthShell";
 import { logout, recoverAuthenticatedMember } from "../infrastructure/authSession";
 
 type ProductionAuthState =
@@ -162,7 +163,7 @@ function ProductionRoutes({ authState, setAuthState, acceptMember }: { authState
     navigate(code === "PENDING_APPROVAL" ? "/auth/pending" : "/", { replace: true });
   }, [navigate, setAuthState]);
   const home = authState.status === "checking"
-    ? <p role="status">正在验证登录状态</p>
+    ? <AuthShell step="身份检查" title="正在寻找你的旅行通行证" description="如果已经登录，我们会直接带你回到行程。"><div className="auth-progress" role="status"><span aria-hidden="true" /><span aria-hidden="true" /><span aria-hidden="true" /><b>正在恢复登录状态…</b></div></AuthShell>
     : authState.status === "pending"
       ? <PendingApprovalPage onAuthenticated={acceptMember} />
       : authState.status === "authenticated"

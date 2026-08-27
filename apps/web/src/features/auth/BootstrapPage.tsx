@@ -3,6 +3,7 @@ import type { FormEvent } from "react";
 import type { Member } from "@travel/contracts";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { authServiceUrl, bootstrapWithCode, recoverAuthenticatedMember } from "../../infrastructure/authSession";
+import { AuthShell } from "./AuthShell";
 
 export function BootstrapPage({ onAuthenticated }: { onAuthenticated?: (member: Member) => void } = {}) {
   const navigate = useNavigate();
@@ -29,15 +30,13 @@ export function BootstrapPage({ onAuthenticated }: { onAuthenticated?: (member: 
     }
   }
   return (
-    <main aria-labelledby="bootstrap-title">
-      <h1 id="bootstrap-title">初始化管理员</h1>
-      <p>首次登录需要输入管理员初始化口令。</p>
-      <form onSubmit={submit}>
-        <label htmlFor="bootstrap-code">一次性口令</label>
-        <input id="bootstrap-code" type="password" autoComplete="off" value={code} onChange={(event) => setCode(event.target.value)} required disabled={isSubmitting} />
-        <button type="submit" disabled={isSubmitting}>{isSubmitting ? "正在确认身份…" : "完成初始化"}</button>
+    <AuthShell step="03 · 管理员" title="完成管理员初始化" description="这是首次设置。输入你保存在本地的一次性口令，之后不会再次询问。">
+      <form className="auth-form" onSubmit={submit}>
+        <label htmlFor="bootstrap-code">管理员口令</label>
+        <input className="auth-input" id="bootstrap-code" type="password" autoComplete="off" value={code} onChange={(event) => setCode(event.target.value)} required disabled={isSubmitting} />
+        <button className="auth-primary" type="submit" disabled={isSubmitting}>{isSubmitting ? "正在确认身份…" : "完成并进入行程"}</button>
       </form>
-      {message && <p role="alert">{message}</p>}
-    </main>
+      {message && <p className="auth-error" role="alert">{message}</p>}
+    </AuthShell>
   );
 }

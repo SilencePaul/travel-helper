@@ -60,8 +60,8 @@ describe("authentication screen flow", () => {
       </MemoryRouter>,
     );
 
-    await user.type(screen.getByLabelText(/口令/), "correct");
-    await user.click(screen.getByRole("button", { name: /完成初始化/ }));
+    await user.type(screen.getByLabelText("管理员口令"), "correct");
+    await user.click(screen.getByRole("button", { name: "完成并进入行程" }));
 
     expect(screen.queryByText("一鸣与美垚的旅行")).not.toBeInTheDocument();
     recovery.resolve(adminMember);
