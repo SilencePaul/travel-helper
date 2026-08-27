@@ -6,8 +6,10 @@ import { validateProductionConfig } from "./check-production-config.mjs";
 const scriptPath = fileURLToPath(new URL("./check-production-config.mjs", import.meta.url));
 const requiredNames = [
   "VITE_CLOUDBASE_ENV_ID",
+  "VITE_AUTH_SERVICE_URL",
   "FEISHU_APP_ID",
   "FEISHU_APP_SECRET",
+  "FEISHU_REDIRECT_URI",
   "ADMIN_BOOTSTRAP_CODE",
   "AUTH_SESSION_SECRET",
   "CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS",
@@ -34,8 +36,10 @@ function run(environment) {
 assert.deepEqual(
   validateProductionConfig({
     VITE_CLOUDBASE_ENV_ID: "env",
+    VITE_AUTH_SERVICE_URL: "https://auth.example.com",
     FEISHU_APP_ID: "cli",
     FEISHU_APP_SECRET: "secret",
+    FEISHU_REDIRECT_URI: "https://auth.example.com/callback",
     ADMIN_BOOTSTRAP_CODE: "code",
     AUTH_SESSION_SECRET: "session",
     CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS: "{}",

@@ -5,12 +5,20 @@ const NonEmptyEnvironmentValueSchema = z.string().trim().min(1);
 export const ClientEnvironmentSchema = z.object({
   VITE_DATA_MODE: z.string().trim().pipe(z.enum(["local", "cloudbase"])),
   VITE_CLOUDBASE_ENV_ID: NonEmptyEnvironmentValueSchema.optional(),
+  VITE_AUTH_SERVICE_URL: NonEmptyEnvironmentValueSchema.optional(),
 }).superRefine((environment, context) => {
   if (environment.VITE_DATA_MODE === "cloudbase" && !environment.VITE_CLOUDBASE_ENV_ID) {
     context.addIssue({
       code: "custom",
       message: "CloudBase 模式需要 VITE_CLOUDBASE_ENV_ID",
       path: ["VITE_CLOUDBASE_ENV_ID"],
+    });
+  }
+  if (environment.VITE_DATA_MODE === "cloudbase" && !environment.VITE_AUTH_SERVICE_URL) {
+    context.addIssue({
+      code: "custom",
+      message: "CloudBase 模式需要 VITE_AUTH_SERVICE_URL",
+      path: ["VITE_AUTH_SERVICE_URL"],
     });
   }
 });

@@ -13,12 +13,18 @@ describe("ClientEnvironmentSchema", () => {
 
   it("requires a nonempty CloudBase environment ID in cloudbase mode", () => {
     expect(() => ClientEnvironmentSchema.parse({ VITE_DATA_MODE: "cloudbase" })).toThrow();
+    expect(() => ClientEnvironmentSchema.parse({
+      VITE_DATA_MODE: "cloudbase",
+      VITE_CLOUDBASE_ENV_ID: "travel-prod-123",
+    })).toThrow();
     expect(ClientEnvironmentSchema.parse({
       VITE_DATA_MODE: "cloudbase",
       VITE_CLOUDBASE_ENV_ID: "  travel-prod-123  ",
+      VITE_AUTH_SERVICE_URL: " https://auth.example.com ",
     })).toEqual({
       VITE_DATA_MODE: "cloudbase",
       VITE_CLOUDBASE_ENV_ID: "travel-prod-123",
+      VITE_AUTH_SERVICE_URL: "https://auth.example.com",
     });
   });
 });

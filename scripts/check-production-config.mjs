@@ -2,8 +2,10 @@ import { pathToFileURL } from "node:url";
 
 export const requiredNames = [
   "VITE_CLOUDBASE_ENV_ID",
+  "VITE_AUTH_SERVICE_URL",
   "FEISHU_APP_ID",
   "FEISHU_APP_SECRET",
+  "FEISHU_REDIRECT_URI",
   "ADMIN_BOOTSTRAP_CODE",
   "AUTH_SESSION_SECRET",
   "CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS",

@@ -10,8 +10,7 @@
       "handler": "index.main",
       "runtime": "Nodejs20.19",
       "installDependency": true,
-      "public": true,
-      "gatewayPath": "/api/auth/*"
+      "public": true
     },
     {
       "name": "trip-api",
