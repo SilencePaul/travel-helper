@@ -60,7 +60,12 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, r
       placeIds: places.map((place) => place.id),
       modeByLeg: getRouteModes(places.map((place) => place.id)),
     }).then((nextSegments) => {
-      if (active) setRouteResult({ key: routeKey, ...nextSegments });
+      if (active) {
+        const normalized = Array.isArray(nextSegments)
+          ? { segments: nextSegments, failures: [] }
+          : nextSegments;
+        setRouteResult({ key: routeKey, ...normalized });
+      }
     }).catch(() => {
       if (active) {
         setRouteResult({ key: routeKey, segments: [], failures: [] });

@@ -112,6 +112,17 @@ async function getProviderSegment(AMap: AmapRouteApi, from: TimelinePlace, to: T
   } satisfies RouteSegment;
 }
 
+async function getTransitSegmentWithRetry(AMap: AmapRouteApi, from: TimelinePlace, to: TimelinePlace, city: string, legIndex: number, timeoutMs: number) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try { return await getProviderSegment(AMap, from, to, "transit", city, legIndex, timeoutMs); }
+    catch (error) {
+      if (!(error instanceof Error) || error.message !== "AMAP_ROUTE_PROVIDER_UNAVAILABLE" || attempt === 1) throw error;
+      await new Promise((resolve) => window.setTimeout(resolve, 200));
+    }
+  }
+  throw new Error("AMAP_ROUTE_PROVIDER_UNAVAILABLE");
+}
+
 export function createAmapRouteService(loadAmap: AmapLoader, resolvePlace: PlaceResolver, { timeoutMs = 10_000 }: { timeoutMs?: number } = {}): RouteService {
   return {
     async getSegments({ city, placeIds, modeByLeg }) {
@@ -119,15 +130,21 @@ export function createAmapRouteService(loadAmap: AmapLoader, resolvePlace: Place
       if (places.some((place) => !place)) throw new Error("AMAP_PLACE_UNAVAILABLE");
       const AMap = await loadAmap();
       const resolvedPlaces = places as TimelinePlace[];
-      const requests = await Promise.allSettled(resolvedPlaces.slice(0, -1).map(async (from, index) => {
+      const requests: PromiseSettledResult<RouteSegment>[] = [];
+      for (const [index, from] of resolvedPlaces.slice(0, -1).entries()) {
         const mode = modeByLeg[index] ?? "walking";
         try {
-          return await getProviderSegment(AMap, from, resolvedPlaces[index + 1]!, mode, city, index, timeoutMs);
+          const segment = mode === "transit"
+            ? await getTransitSegmentWithRetry(AMap, from, resolvedPlaces[index + 1]!, city, index, timeoutMs)
+            : await getProviderSegment(AMap, from, resolvedPlaces[index + 1]!, mode, city, index, timeoutMs);
+          requests.push({ status: "fulfilled", value: segment });
         } catch (error) {
-          if (mode !== "transit" || !(error instanceof Error) || error.message !== "AMAP_ROUTE_NO_TRANSIT_PLAN") throw error;
-          return getProviderSegment(AMap, from, resolvedPlaces[index + 1]!, "walking", city, index, timeoutMs);
+          if (mode === "transit" && error instanceof Error && error.message === "AMAP_ROUTE_NO_TRANSIT_PLAN") {
+            try { requests.push({ status: "fulfilled", value: await getProviderSegment(AMap, from, resolvedPlaces[index + 1]!, "walking", city, index, timeoutMs) }); }
+            catch (walkingError) { requests.push({ status: "rejected", reason: walkingError }); }
+          } else requests.push({ status: "rejected", reason: error });
         }
-      }));
+      }
       const segments: RouteSegment[] = [];
       const failures: RouteFailure[] = [];
       requests.forEach((request, index) => {
