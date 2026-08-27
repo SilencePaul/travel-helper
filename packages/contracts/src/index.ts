@@ -5,3 +5,5 @@ export * from "./hotelScore";
 export * from "./place";
 export * from "./repository";
 export * from "./trip";
+export * from "./environment";
+export * from "./membership";
