@@ -10,7 +10,17 @@ function setCookie(name, value, secure, maxAge = SESSION_TTL_MS / 1000) {
   return name + "=" + encodeURIComponent(value) + "; Path=/; HttpOnly; SameSite=" + (secure ? "None; Secure" : "Lax") + "; Max-Age=" + Math.floor(maxAge);
 }
 function json(statusCode, body, headers = {}) { return { statusCode, headers: { "content-type": "application/json; charset=utf-8", ...headers }, body: JSON.stringify(body) }; }
-function pathOf(event) { return new URL(event.path || event.requestContext?.http?.path || event.requestContext?.path || "/", "http://auth.local"); }
+function pathOf(event) {
+  const url = new URL(event.path || event.requestContext?.http?.path || event.requestContext?.path || "/", "http://auth.local");
+  if (url.search) return url;
+  const query = event.queryString || event.queryStringParameters;
+  if (typeof query === "string") url.search = query;
+  else if (query && typeof query === "object") for (const [key, value] of Object.entries(query)) {
+    if (Array.isArray(value)) for (const item of value) url.searchParams.append(key, item);
+    else if (value != null) url.searchParams.set(key, value);
+  }
+  return url;
+}
 function bodyOf(event) { if (!event.body) return {}; try { return typeof event.body === "string" ? JSON.parse(event.body) : event.body; } catch { return undefined; } }
 function errorCode(error) { return error && typeof error.code === "string" ? error.code : "AUTH_REQUEST_FAILED"; }
 function unavailableError() { const error = new Error("AUTH_SERVICE_UNAVAILABLE"); error.code = "AUTH_SERVICE_UNAVAILABLE"; return error; }

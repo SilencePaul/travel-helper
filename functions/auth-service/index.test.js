@@ -73,6 +73,27 @@ test("accepts paths after the CloudBase gateway strips its route prefix", async 
   assert.equal((await makeRequest(handler, "GET", "/start")).statusCode, 302);
 });
 
+test("reads OAuth callback parameters from the CloudBase gateway query object", async () => {
+  const handler = createAuthHandler({
+    env: { FEISHU_APP_ID: "cli", FEISHU_APP_SECRET: "secret", FEISHU_REDIRECT_URI: "https://auth/callback", PUBLIC_APP_URL: "https://trip", ADMIN_BOOTSTRAP_CODE: "code", AUTH_SESSION_SECRET: "secret", VITE_CLOUDBASE_ENV_ID: "env" },
+    fetchImpl: async (url) => String(url).includes("tenant_access_token")
+      ? new Response(JSON.stringify({ code: 0, tenant_access_token: "tenant" }))
+      : String(url).includes("access_token")
+        ? new Response(JSON.stringify({ code: 0, data: { access_token: "user-token" } }))
+        : new Response(JSON.stringify({ code: 0, data: { open_id: "ou-cloudbase", name: "cloudbase" } })),
+  });
+  const start = await makeRequest(handler, "GET", "/start");
+  const state = new URL(start.headers.location).searchParams.get("state");
+  const callback = await handler({
+    httpMethod: "GET",
+    path: "/callback",
+    queryString: { code: "feishu-code", state },
+    headers: { cookie: start.headers["set-cookie"].split(";")[0] },
+  });
+
+  assert.equal(callback.statusCode, 302);
+});
+
 test("bootstrap code is consumed once and creates exactly one administrator", async () => {
   const issuedTickets = [];
   const handler = createAuthHandler({
