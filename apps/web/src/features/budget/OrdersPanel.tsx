@@ -38,7 +38,7 @@ export function OrdersPanel({ orders, onStatusChange, onPaidChange, disabled = f
           <label>{order.name}状态<select aria-label={`${order.name}状态`} aria-describedby={order.status !== "partial" ? `${order.id}-partial-help` : undefined} value={order.status} disabled={disabled || dirtyIds.has(order.id) || savingId === order.id} onChange={(event) => void onStatusChange(order.id, event.target.value as OrderStatus)}>
             {(Object.keys(labels) as OrderStatus[]).map((status) => <option key={status} value={status} disabled={status === "partial" && order.status !== "partial"}>{labels[status]}</option>)}
           </select></label>
-          {order.status !== "partial" ? <span id={`${order.id}-partial-help`} className="order-status-help">请先录入介于 0 与预计金额之间的已付金额，才能标记为部分支付。</span> : null}
+          {order.status !== "partial" ? <span id={`${order.id}-partial-help`} className="order-status-help">请先录入实际已付金额，才能标记为部分支付。</span> : null}
         </li>)}
       </ul>}
       {error ? <p role="alert">{error}</p> : null}

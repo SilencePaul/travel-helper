@@ -37,8 +37,8 @@ export function transitionOrderStatus(order: BudgetItem, status: OrderStatus): B
     if (order.paid <= 0) throw new Error("请先录入实际已付金额，再标记为已支付");
     return { ...order, status };
   }
-  if (order.paid <= 0 || order.paid >= order.estimated) {
-    throw new Error("部分支付请先录入介于 0 与预计金额之间的已付金额");
+  if (order.paid <= 0) {
+    throw new Error("部分支付请先录入实际已付金额");
   }
   return { ...order, status };
 }

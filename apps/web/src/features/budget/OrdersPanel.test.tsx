@@ -18,7 +18,7 @@ test("does not offer an invalid partial transition without a paid amount", () =>
   render(<OrdersPanel orders={orders} onStatusChange={() => undefined} />);
   const select = screen.getByLabelText("山顶缆车状态");
   expect(screen.getByRole("option", { name: "部分支付" })).toBeDisabled();
-  expect(select).toHaveAccessibleDescription("请先录入介于 0 与预计金额之间的已付金额，才能标记为部分支付。");
+  expect(select).toHaveAccessibleDescription("请先录入实际已付金额，才能标记为部分支付。");
 });
 
 test("retains a paid-amount draft and reports an inline error when persistence rejects", async () => {
