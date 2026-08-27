@@ -12,7 +12,8 @@ const requiredNames = [
   "FEISHU_REDIRECT_URI",
   "ADMIN_BOOTSTRAP_CODE",
   "AUTH_SESSION_SECRET",
-  "CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64",
+  "TENCENTCLOUD_SECRET_ID",
+  "TENCENTCLOUD_SECRET_KEY",
   "PUBLIC_APP_URL",
 ];
 
@@ -42,7 +43,8 @@ assert.deepEqual(
     FEISHU_REDIRECT_URI: "https://auth.example.com/callback",
     ADMIN_BOOTSTRAP_CODE: "code",
     AUTH_SESSION_SECRET: "session",
-    CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64: "e30=",
+    TENCENTCLOUD_SECRET_ID: "secret-id",
+    TENCENTCLOUD_SECRET_KEY: "secret-key",
     PUBLIC_APP_URL: "https://trip.example",
   }),
   { ok: true, missing: [] },

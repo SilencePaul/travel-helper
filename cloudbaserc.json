@@ -6,11 +6,10 @@
   "functions": [
     {
       "name": "auth-service",
-      "type": "HTTP",
+      "type": "Event",
       "handler": "index.main",
       "runtime": "Nodejs20.19",
       "installDependency": true,
-      "public": true,
       "envVariables": {
         "VITE_CLOUDBASE_ENV_ID": "{{env.VITE_CLOUDBASE_ENV_ID}}",
         "FEISHU_APP_ID": "{{env.FEISHU_APP_ID}}",
@@ -18,7 +17,8 @@
         "FEISHU_REDIRECT_URI": "{{env.FEISHU_REDIRECT_URI}}",
         "ADMIN_BOOTSTRAP_CODE": "{{env.ADMIN_BOOTSTRAP_CODE}}",
         "AUTH_SESSION_SECRET": "{{env.AUTH_SESSION_SECRET}}",
-        "CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64": "{{env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64}}",
+        "TENCENTCLOUD_SECRET_ID": "{{env.TENCENTCLOUD_SECRET_ID}}",
+        "TENCENTCLOUD_SECRET_KEY": "{{env.TENCENTCLOUD_SECRET_KEY}}",
         "PUBLIC_APP_URL": "{{env.PUBLIC_APP_URL}}"
       }
     },
@@ -30,7 +30,8 @@
       "installDependency": true,
       "envVariables": {
         "VITE_CLOUDBASE_ENV_ID": "{{env.VITE_CLOUDBASE_ENV_ID}}",
-        "CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64": "{{env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64}}"
+        "TENCENTCLOUD_SECRET_ID": "{{env.TENCENTCLOUD_SECRET_ID}}",
+        "TENCENTCLOUD_SECRET_KEY": "{{env.TENCENTCLOUD_SECRET_KEY}}"
       }
     }
   ]

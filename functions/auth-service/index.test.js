@@ -161,7 +161,7 @@ test("CloudBase mode fails closed when CloudBase initialization is unavailable",
     env: {
       VITE_DATA_MODE: "cloudbase",
       VITE_CLOUDBASE_ENV_ID: "travel-prod",
-      CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64: "not-base64",
+      TENCENTCLOUD_SECRET_ID: "secret-id",
       FEISHU_APP_ID: "cli",
       FEISHU_APP_SECRET: "secret",
       FEISHU_REDIRECT_URI: "https://auth/callback",
