@@ -273,6 +273,44 @@ describe("createAmapRouteService", () => {
     expect(highestConcurrency).toBe(1);
   });
 
+  it("shares one in-flight provider request across services for the same route query", async () => {
+    const callbacks: Array<(status: string, result: unknown) => void> = [];
+    const search = vi.fn((_origin, _destination, callback) => callbacks.push(callback));
+    class Walking { constructor(_options?: unknown) {} search = search; }
+    const resolve = (id: string) => id === peak.id ? peak : centralPier;
+    const firstService = createAmapRouteService(async () => ({ Walking }), resolve);
+    const secondService = createAmapRouteService(async () => ({ Walking }), resolve);
+    const input = { dayId: "same-route", city: "香港", placeIds: [peak.id, centralPier.id], modeByLeg: ["walking" as const] };
+
+    const first = firstService.getSegments(input);
+    const second = secondService.getSegments(input);
+    await Promise.resolve();
+    const response = { routes: [{ distance: 716, time: 600, steps: [{ path: [[peak.lng, peak.lat], [centralPier.lng, centralPier.lat]] }] }] };
+    callbacks[0]!("complete", response);
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    callbacks[1]?.("complete", response);
+
+    await expect(first).resolves.toEqual(expect.objectContaining({ segments: [expect.objectContaining({ distanceMeters: 716 })], failures: [] }));
+    await expect(second).resolves.toEqual(expect.objectContaining({ segments: [expect.objectContaining({ distanceMeters: 716 })], failures: [] }));
+    expect(first).toBe(second);
+    expect(search).toHaveBeenCalledOnce();
+  });
+
+  it("clears a failed in-flight route query so the same request can retry", async () => {
+    let calls = 0;
+    const search = vi.fn((_origin, _destination, callback) => {
+      calls += 1;
+      callback(calls === 1 ? "error" : "complete", calls === 1 ? {} : { routes: [{ distance: 716, time: 600, steps: [{ path: [[peak.lng, peak.lat], [centralPier.lng, centralPier.lat]] }] }] });
+    });
+    class Walking { constructor(_options?: unknown) {} search = search; }
+    const service = createAmapRouteService(async () => ({ Walking }), (id) => id === peak.id ? peak : centralPier);
+    const input = { dayId: "retry-route", city: "香港", placeIds: [peak.id, centralPier.id], modeByLeg: ["walking" as const] };
+
+    await expect(service.getSegments(input)).resolves.toEqual(expect.objectContaining({ segments: [], failures: [expect.anything()] }));
+    await expect(service.getSegments(input)).resolves.toEqual(expect.objectContaining({ segments: [expect.objectContaining({ distanceMeters: 716 })], failures: [] }));
+    expect(search).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps a provider-confirmed same-origin route with zero metrics when it has valid geometry", async () => {
     const search = vi.fn((_origin, _destination, callback) => callback("complete", {
       routes: [{ distance: 0, time: 0, steps: [{ path: [[peak.lng, peak.lat], [peak.lng + 0.00001, peak.lat + 0.00001]] }] }],
@@ -310,11 +348,31 @@ describe("createAmapRouteService", () => {
     expect(search).toHaveBeenCalledTimes(2);
   });
 
+  it("runs a queued second factory after the first factory loader rejects", async () => {
+    const search = vi.fn((_origin, _destination, callback) => callback("complete", {
+      routes: [{ distance: 716, time: 600, steps: [{ path: [[centralPier.lng, centralPier.lat], [peak.lng, peak.lat]] }] }],
+    }));
+    class Walking { constructor(_options?: unknown) {} search = search; }
+    const resolve = (id: string) => id === peak.id ? peak : centralPier;
+    const failingService = createAmapRouteService(async () => { throw new Error("AMAP_LOADER_REJECTED"); }, resolve);
+    const queuedService = createAmapRouteService(async () => ({ Walking }), resolve);
+
+    const failed = failingService.getSegments({ dayId: "loader-failure", city: "香港", placeIds: [peak.id, centralPier.id], modeByLeg: ["walking"] });
+    const queued = queuedService.getSegments({ dayId: "after-loader-failure", city: "香港", placeIds: [centralPier.id, peak.id], modeByLeg: ["walking"] });
+
+    await expect(failed).rejects.toThrow("AMAP_LOADER_REJECTED");
+    await expect(queued).resolves.toEqual(expect.objectContaining({ segments: [expect.objectContaining({ fromPlaceId: centralPier.id, toPlaceId: peak.id })], failures: [] }));
+    expect(search).toHaveBeenCalledOnce();
+  });
+
   it.each([
     ["empty plan", {}],
     ["non-numeric distance", { distance: "not-a-number", time: 600, steps: [{ path: [[peak.lng, peak.lat], [centralPier.lng, centralPier.lat]] }] }],
+    ["negative distance", { distance: -1, time: 600, steps: [{ path: [[peak.lng, peak.lat], [centralPier.lng, centralPier.lat]] }] }],
+    ["negative duration", { distance: 716, time: -1, steps: [{ path: [[peak.lng, peak.lat], [centralPier.lng, centralPier.lat]] }] }],
     ["empty route path", { distance: 716, time: 600, steps: [] }],
     ["non-finite path coordinate", { distance: 716, time: 600, steps: [{ path: [[peak.lng, peak.lat], [Number.NaN, centralPier.lat]] }] }],
+    ["out-of-range path coordinate", { distance: 716, time: 600, steps: [{ path: [[peak.lng, peak.lat], [181, centralPier.lat]] }] }],
   ])("reports a malformed route response for %s", async (_label, route) => {
     const search = vi.fn((_origin, _destination, callback) => callback("complete", { routes: [route] }));
     class Walking { constructor(_options?: unknown) {} search = search; }

@@ -1,4 +1,4 @@
-import type { Coordinate, RouteFailure, RouteSegment, RouteService, TimelinePlace, TravelMode } from "./types";
+import type { Coordinate, RouteFailure, RouteQueryResult, RouteSegment, RouteService, TimelinePlace, TravelMode } from "./types";
 
 type AmapSearchService = { search: (origin: [number, number], destination: [number, number], callback: (status: string, result: unknown) => void) => void };
 type AmapSearchConstructor = new (options?: { city: string }) => AmapSearchService;
@@ -9,6 +9,7 @@ type RecordValue = Record<string, unknown>;
 
 let providerRunning = false;
 const providerTasks: Array<() => void> = [];
+const inFlightQueries = new Map<string, Promise<RouteQueryResult>>();
 
 function runNextProviderTask() {
   if (providerRunning) return;
@@ -50,9 +51,9 @@ function record(value: unknown): RecordValue | undefined {
 }
 
 function coordinate(value: unknown): Coordinate | undefined {
-  if (Array.isArray(value) && Number.isFinite(value[0]) && Number.isFinite(value[1])) return { lng: value[0] as number, lat: value[1] as number, coordinateSystem: "GCJ02" };
+  if (Array.isArray(value) && Number.isFinite(value[0]) && Number.isFinite(value[1]) && Math.abs(value[0] as number) <= 180 && Math.abs(value[1] as number) <= 90) return { lng: value[0] as number, lat: value[1] as number, coordinateSystem: "GCJ02" };
   const point = record(value);
-  return point && Number.isFinite(point.lng) && Number.isFinite(point.lat) ? { lng: point.lng as number, lat: point.lat as number, coordinateSystem: "GCJ02" } : undefined;
+  return point && Number.isFinite(point.lng) && Number.isFinite(point.lat) && Math.abs(point.lng as number) <= 180 && Math.abs(point.lat as number) <= 90 ? { lng: point.lng as number, lat: point.lat as number, coordinateSystem: "GCJ02" } : undefined;
 }
 
 function numeric(value: unknown) {
@@ -111,7 +112,7 @@ function firstRoute(result: unknown, mode: TravelMode) {
   const distanceMeters = numeric(first.distance);
   const durationSeconds = numeric(first.time ?? first.duration);
   const path = mode === "transit" ? transitPlanPath(first) : routeStepsPath(first);
-  if (distanceMeters === undefined || durationSeconds === undefined || path.length < 2) return undefined;
+  if (distanceMeters === undefined || durationSeconds === undefined || distanceMeters < 0 || durationSeconds < 0 || path.length < 2) return undefined;
   return {
     distanceMeters,
     durationMinutes: Math.ceil(durationSeconds / 60),
@@ -169,7 +170,10 @@ async function getTransitSegmentWithRetry(AMap: AmapRouteApi, from: TimelinePlac
 export function createAmapRouteService(loadAmap: AmapLoader, resolvePlace: PlaceResolver, { timeoutMs = 10_000 }: { timeoutMs?: number } = {}): RouteService {
   return {
     getSegments({ city, placeIds, modeByLeg }) {
-      return enqueueProviderWork(async () => {
+      const queryKey = JSON.stringify([city, placeIds, modeByLeg]);
+      const existing = inFlightQueries.get(queryKey);
+      if (existing) return existing;
+      const scheduled = enqueueProviderWork(async () => {
       const places = placeIds.map(resolvePlace);
       if (places.some((place) => !place)) throw new Error("AMAP_PLACE_UNAVAILABLE");
       const AMap = await loadAmap();
@@ -201,6 +205,18 @@ export function createAmapRouteService(loadAmap: AmapLoader, resolvePlace: Place
       });
         return { segments, failures };
       });
+      const inFlight = scheduled.then(
+        (result) => {
+          if (inFlightQueries.get(queryKey) === inFlight) inFlightQueries.delete(queryKey);
+          return result;
+        },
+        (error) => {
+          if (inFlightQueries.get(queryKey) === inFlight) inFlightQueries.delete(queryKey);
+          throw error;
+        },
+      );
+      inFlightQueries.set(queryKey, inFlight);
+      return inFlight;
     },
   };
 }
