@@ -17,12 +17,12 @@ export async function deriveHotelCommutes(trip: Trip, hotel: Hotel, routeService
     const hotelPlace: TimelinePlace = { id: hotel.id, name: hotel.name, amapPoiId: hotel.amapPoiId, ...hotel.coordinate };
     try {
       const [outbound, inbound] = await Promise.all([
-        routeService.getSegments({ dayId: `${day.id}:hotel-out`, placeIds: [hotelPlace.id, first.id], modeByLeg: ["transit"] }),
-        routeService.getSegments({ dayId: `${day.id}:hotel-back`, placeIds: [last.id, hotelPlace.id], modeByLeg: ["transit"] }),
+        routeService.getSegments({ dayId: `${day.id}:hotel-out`, city: day.city, placeIds: [hotelPlace.id, first.id], modeByLeg: ["transit"] }),
+        routeService.getSegments({ dayId: `${day.id}:hotel-back`, city: day.city, placeIds: [last.id, hotelPlace.id], modeByLeg: ["transit"] }),
       ]);
       const [outboundWalk, inboundWalk] = await Promise.allSettled([
-        routeService.getSegments({ dayId: `${day.id}:hotel-out-walk`, placeIds: [hotelPlace.id, first.id], modeByLeg: ["walking"] }),
-        routeService.getSegments({ dayId: `${day.id}:hotel-back-walk`, placeIds: [last.id, hotelPlace.id], modeByLeg: ["walking"] }),
+        routeService.getSegments({ dayId: `${day.id}:hotel-out-walk`, city: day.city, placeIds: [hotelPlace.id, first.id], modeByLeg: ["walking"] }),
+        routeService.getSegments({ dayId: `${day.id}:hotel-back-walk`, city: day.city, placeIds: [last.id, hotelPlace.id], modeByLeg: ["walking"] }),
       ]);
       if (!outbound[0] || !inbound[0] || !Number.isFinite(outbound[0].durationMinutes) || !Number.isFinite(inbound[0].durationMinutes) || !Number.isFinite(outbound[0].distanceMeters) || !Number.isFinite(inbound[0].distanceMeters) || outbound[0].durationMinutes <= 0 || inbound[0].durationMinutes <= 0 || outbound[0].distanceMeters <= 0 || inbound[0].distanceMeters <= 0) return pending();
       const walkingSegments = [outboundWalk, inboundWalk].map((result) => result.status === "fulfilled" ? result.value[0] : undefined);

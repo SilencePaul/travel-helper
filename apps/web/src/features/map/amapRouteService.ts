@@ -1,7 +1,8 @@
 import type { Coordinate, RouteSegment, RouteService, TimelinePlace, TravelMode } from "./types";
 
 type AmapSearchService = { search: (origin: [number, number], destination: [number, number], callback: (status: string, result: unknown) => void) => void };
-type AmapRouteApi = { Walking?: new () => AmapSearchService; Transfer?: new () => AmapSearchService; Driving?: new () => AmapSearchService };
+type AmapSearchConstructor = new (options?: { city: string }) => AmapSearchService;
+type AmapRouteApi = { Walking?: AmapSearchConstructor; Transfer?: AmapSearchConstructor; Driving?: AmapSearchConstructor };
 type AmapLoader = () => Promise<AmapRouteApi>;
 type PlaceResolver = (placeId: string) => TimelinePlace | undefined;
 type RecordValue = Record<string, unknown>;
@@ -16,7 +17,14 @@ function coordinate(value: unknown): Coordinate | undefined {
   return typeof point?.lng === "number" && typeof point.lat === "number" ? { lng: point.lng, lat: point.lat, coordinateSystem: "GCJ02" } : undefined;
 }
 
+function numeric(value: unknown) {
+  return typeof value === "number" ? value : typeof value === "string" ? Number(value) : 0;
+}
+
 function coordinates(path: unknown) {
+  if (typeof path === "string") {
+    return path.split(";").map((point) => coordinate(point.split(",").map(Number))).filter((point): point is Coordinate => Boolean(point));
+  }
   return Array.isArray(path) ? path.map(coordinate).filter((point): point is Coordinate => Boolean(point)) : [];
 }
 
@@ -37,28 +45,46 @@ function routeStepsPath(route: RecordValue) {
 function transitPlanPath(plan: RecordValue) {
   if (Array.isArray(plan.path)) return coordinates(plan.path);
   const segments = Array.isArray(plan.segments) ? plan.segments : [];
-  return concatenate(segments.map((segment) => record(record(segment)?.transit)?.path));
+  return concatenate(segments.flatMap((segment) => {
+    const value = record(segment);
+    const walking = record(value?.walking);
+    const transit = record(value?.transit);
+    const bus = record(value?.bus);
+    const railway = record(value?.railway);
+    const taxi = record(value?.taxi);
+    return [
+      walking?.path,
+      ...(Array.isArray(walking?.steps) ? walking.steps.map((step) => record(step)?.path ?? record(step)?.polyline) : []),
+      transit?.path,
+      ...(Array.isArray(bus?.buslines) ? bus.buslines.map((line) => record(line)?.path ?? record(line)?.polyline) : []),
+      railway?.path,
+      taxi?.path,
+    ];
+  }));
 }
 
 function firstRoute(result: unknown, mode: TravelMode) {
   const response = record(result);
-  const candidates = mode === "transit" ? response?.plans : response?.routes;
+  const transitRoute = record(response?.route);
+  const candidates = mode === "transit" ? response?.plans ?? transitRoute?.transits : response?.routes;
   const first = Array.isArray(candidates) ? record(candidates[0]) : undefined;
   if (!first) return undefined;
   return {
-    distanceMeters: typeof first.distance === "number" ? first.distance : 0,
-    durationMinutes: Math.ceil((typeof first.time === "number" ? first.time : 0) / 60),
+    distanceMeters: numeric(first.distance),
+    durationMinutes: Math.ceil(numeric(first.time ?? first.duration) / 60),
     path: mode === "transit" ? transitPlanPath(first) : routeStepsPath(first),
   };
 }
 
-function createSearchService(AMap: AmapRouteApi, mode: TravelMode) {
+function createSearchService(AMap: AmapRouteApi, mode: TravelMode, city: string) {
   const Constructor = mode === "walking" ? AMap.Walking : mode === "transit" ? AMap.Transfer : AMap.Driving;
   if (!Constructor) throw new Error(`AMAP_${mode.toUpperCase()}_PLUGIN_UNAVAILABLE`);
-  return new Constructor();
+  if (mode !== "transit") return new Constructor();
+  if (!city.trim()) throw new Error("AMAP_TRANSIT_CITY_REQUIRED");
+  return new Constructor({ city });
 }
 
-async function getProviderSegment(AMap: AmapRouteApi, from: TimelinePlace, to: TimelinePlace, mode: TravelMode, legIndex: number, timeoutMs: number) {
+async function getProviderSegment(AMap: AmapRouteApi, from: TimelinePlace, to: TimelinePlace, mode: TravelMode, city: string, legIndex: number, timeoutMs: number) {
   const result = await new Promise<unknown>((resolve, reject) => {
     let settled = false;
     const settle = (action: () => void) => {
@@ -68,7 +94,7 @@ async function getProviderSegment(AMap: AmapRouteApi, from: TimelinePlace, to: T
       action();
     };
     const timeout = window.setTimeout(() => settle(() => reject(new Error("AMAP_ROUTE_TIMEOUT"))), timeoutMs);
-    createSearchService(AMap, mode).search([from.lng, from.lat], [to.lng, to.lat], (status, response) => {
+    createSearchService(AMap, mode, city).search([from.lng, from.lat], [to.lng, to.lat], (status, response) => {
       settle(() => status === "complete" ? resolve(response) : reject(new Error("AMAP_ROUTE_UNAVAILABLE")));
     });
   });
@@ -88,12 +114,20 @@ async function getProviderSegment(AMap: AmapRouteApi, from: TimelinePlace, to: T
 
 export function createAmapRouteService(loadAmap: AmapLoader, resolvePlace: PlaceResolver, { timeoutMs = 10_000 }: { timeoutMs?: number } = {}): RouteService {
   return {
-    async getSegments({ placeIds, modeByLeg }) {
+    async getSegments({ city, placeIds, modeByLeg }) {
       const places = placeIds.map(resolvePlace);
       if (places.some((place) => !place)) throw new Error("AMAP_PLACE_UNAVAILABLE");
       const AMap = await loadAmap();
       const resolvedPlaces = places as TimelinePlace[];
-      return Promise.all(resolvedPlaces.slice(0, -1).map((from, index) => getProviderSegment(AMap, from, resolvedPlaces[index + 1]!, modeByLeg[index] ?? "walking", index, timeoutMs)));
+      return Promise.all(resolvedPlaces.slice(0, -1).map(async (from, index) => {
+        const mode = modeByLeg[index] ?? "walking";
+        try {
+          return await getProviderSegment(AMap, from, resolvedPlaces[index + 1]!, mode, city, index, timeoutMs);
+        } catch (error) {
+          if (mode !== "transit" || !(error instanceof Error) || error.message !== "AMAP_ROUTE_UNAVAILABLE") throw error;
+          return getProviderSegment(AMap, from, resolvedPlaces[index + 1]!, "walking", city, index, timeoutMs);
+        }
+      }));
     },
   };
 }

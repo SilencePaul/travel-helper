@@ -31,7 +31,9 @@ describe("createAmapRouteService", () => {
         path: [[114.1454, 22.2757], [114.149, 22.279], [114.1596, 22.2864]],
       }],
     }));
+    const transferOptions: unknown[] = [];
     class Transfer {
+      constructor(options: unknown) { transferOptions.push(options); }
       search = search;
     }
     const load = vi.fn(async () => ({ Transfer }));
@@ -39,10 +41,12 @@ describe("createAmapRouteService", () => {
 
     const [segment] = await service.getSegments({
       dayId: "hong-kong-day",
+      city: "香港",
       placeIds: [peak.id, centralPier.id],
       modeByLeg: ["transit"],
     });
 
+    expect(transferOptions).toEqual([{ city: "香港" }]);
     expect(search).toHaveBeenCalledWith([114.1454, 22.2757], [114.1596, 22.2864], expect.any(Function));
     expect(segment).toMatchObject({ mode: "transit", distanceMeters: 1800, durationMinutes: 15 });
     expect(segment?.path).toEqual([
@@ -69,6 +73,7 @@ describe("createAmapRouteService", () => {
 
     const [segment] = await service.getSegments({
       dayId: "hong-kong-day",
+      city: "香港",
       placeIds: [peak.id, centralPier.id],
       modeByLeg: ["walking"],
     });
@@ -80,6 +85,55 @@ describe("createAmapRouteService", () => {
     ]);
   });
 
+  it("parses the raw transit response returned by the AMap route provider", async () => {
+    const search = vi.fn((_origin, _destination, callback) => callback("complete", {
+      route: {
+        transits: [{
+          distance: "1800",
+          duration: "900",
+          segments: [{
+            walking: {
+              steps: [{ polyline: "114.1454,22.2757;114.149,22.279;114.1596,22.2864" }],
+            },
+          }],
+        }],
+      },
+    }));
+    class Transfer { constructor(_options?: unknown) {} search = search; }
+    const service = createAmapRouteService(async () => ({ Transfer }), (id) => id === peak.id ? peak : centralPier);
+
+    const [segment] = await service.getSegments({
+      dayId: "hong-kong-day",
+      city: "香港",
+      placeIds: [peak.id, centralPier.id],
+      modeByLeg: ["transit"],
+    });
+
+    expect(segment).toMatchObject({ mode: "transit", distanceMeters: 1800, durationMinutes: 15 });
+    expect(segment?.path).toHaveLength(3);
+  });
+
+  it("uses a provider walking route when a same-city transit search has no plan", async () => {
+    const transitSearch = vi.fn((_origin, _destination, callback) => callback("complete", { route: { transits: [] } }));
+    const walkingSearch = vi.fn((_origin, _destination, callback) => callback("complete", {
+      routes: [{ distance: 716, time: 600, steps: [{ path: [[114.1454, 22.2757], [114.1596, 22.2864]] }] }],
+    }));
+    class Transfer { constructor(_options?: unknown) {} search = transitSearch; }
+    class Walking { constructor(_options?: unknown) {} search = walkingSearch; }
+    const service = createAmapRouteService(async () => ({ Transfer, Walking }), (id) => id === peak.id ? peak : centralPier);
+
+    const [segment] = await service.getSegments({
+      dayId: "hong-kong-day",
+      city: "香港",
+      placeIds: [peak.id, centralPier.id],
+      modeByLeg: ["transit"],
+    });
+
+    expect(transitSearch).toHaveBeenCalledOnce();
+    expect(walkingSearch).toHaveBeenCalledOnce();
+    expect(segment).toMatchObject({ mode: "walking", summary: "高德步行路线", distanceMeters: 716 });
+  });
+
   it("times out a route request and ignores a late plugin callback", async () => {
     vi.useFakeTimers();
     let callback: ((status: string, result: unknown) => void) | undefined;
@@ -89,7 +143,7 @@ describe("createAmapRouteService", () => {
       }
     }
     const service = createAmapRouteService(async () => ({ Walking }), (id) => id === peak.id ? peak : centralPier, { timeoutMs: 10 });
-    const pending = service.getSegments({ dayId: "hong-kong-day", placeIds: [peak.id, centralPier.id], modeByLeg: ["walking"] });
+    const pending = service.getSegments({ dayId: "hong-kong-day", city: "香港", placeIds: [peak.id, centralPier.id], modeByLeg: ["walking"] });
     const rejection = expect(pending).rejects.toThrow("AMAP_ROUTE_TIMEOUT");
 
     await vi.advanceTimersByTimeAsync(10);

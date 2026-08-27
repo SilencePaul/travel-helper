@@ -20,6 +20,7 @@ export type RouteSegment = {
 export interface RouteService {
   getSegments(input: {
     dayId: string;
+    city: string;
     placeIds: string[];
     modeByLeg: TravelMode[];
   }): Promise<RouteSegment[]>;

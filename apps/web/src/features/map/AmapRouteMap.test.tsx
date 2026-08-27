@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import type { Trip } from "@travel/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DayPage } from "../itinerary/DayPage";
+import { missingAmapBrowserCredentials } from "./amapLoader";
 import { AmapRouteMap } from "./AmapRouteMap";
 import type { MapInteractionAdapter } from "./types";
 
@@ -54,6 +55,7 @@ describe("AmapRouteMap", () => {
           path: [],
         }]}
         onSelectPlace={() => undefined}
+        mapLoader={() => Promise.reject(new Error(missingAmapBrowserCredentials))}
       />,
     );
 
@@ -69,6 +71,19 @@ describe("AmapRouteMap", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("有未识别地点，无法串联道路路线：not-a-known-poi");
     expect(routeService.getSegments).not.toHaveBeenCalled();
+  });
+
+  it("passes the current day city to the route provider", async () => {
+    const routeService = { getSegments: vi.fn(async () => []) };
+
+    render(<DayPage trip={trip} dayId="hong-kong-day" onBack={() => undefined} routeService={routeService} />);
+
+    await waitFor(() => expect(routeService.getSegments).toHaveBeenCalledWith(expect.objectContaining({
+      dayId: "hong-kong-day",
+      city: "香港",
+      placeIds: ["peak", "central-pier"],
+      modeByLeg: ["transit"],
+    })));
   });
 
   it("clears a resolved route when the same known endpoints gain an unresolved item", async () => {

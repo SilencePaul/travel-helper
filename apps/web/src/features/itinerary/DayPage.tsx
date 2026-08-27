@@ -56,6 +56,7 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, r
     let active = true;
     void activeRouteService.getSegments({
       dayId: day.id,
+      city: day.city,
       placeIds: places.map((place) => place.id),
       modeByLeg: getRouteModes(places.map((place) => place.id)),
     }).then((nextSegments) => {
