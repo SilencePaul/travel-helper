@@ -70,16 +70,36 @@ function canonicalTripRequest(trip) {
   if (!parsed.success) throw codedError("IDEMPOTENCY_KEY_REUSED");
   return canonical(requestTrip(parsed.data));
 }
+function associationIds(value, code = "MEMBERSHIP_ASSOCIATIONS_UNAVAILABLE") {
+  if (!Array.isArray(value)) throw codedError(code);
+  if (value.some((id) => typeof id !== "string" || !id || value.indexOf(id) !== value.lastIndexOf(id))) throw codedError(code);
+  return [...value];
+}
+function optionalAssociationIds(value) {
+  return value === undefined ? [] : associationIds(value);
+}
+function readRecord(result) {
+  return one(result);
+}
 function createCloudBaseSessionRevoker() {
   return {
-    async revokeSessionsForUid(transaction, uid, revokedAt) {
+    async prepareSessionsForUid(transaction, uid, sessionIds, revokedAt) {
       const sessions = transaction.collection("auth_sessions");
-      const result = await sessions.where({ uid }).get();
-      for (const session of result.data || []) {
-        const sessionId = session?._id || session?.id;
-        if (!sessionId) throw codedError("SESSION_REVOKE_FAILED");
-        await sessions.doc(sessionId).set({ ...session, revoked: true, revokedAt, expiresAt: Date.parse(revokedAt) });
+      const updates = [];
+      for (const sessionId of sessionIds) {
+        const session = readRecord(await sessions.doc(sessionId).get());
+        if (!session || session.uid !== uid) throw codedError("SESSION_REVOKE_FAILED");
+        updates.push({ id: sessionId, value: { ...session, revoked: true, revokedAt, expiresAt: Date.parse(revokedAt) } });
       }
+      return updates;
+    },
+    async revokeSessionsForUid(transaction, uid, revokedAt, sessionIds) {
+      const ids = sessionIds === undefined
+        ? associationIds(readRecord(await transaction.collection("members").doc(uid).get())?.sessionIds)
+        : associationIds(sessionIds);
+      const updates = await this.prepareSessionsForUid(transaction, uid, ids, revokedAt);
+      const sessions = transaction.collection("auth_sessions");
+      for (const update of updates) await sessions.doc(update.id).set(update.value);
     },
   };
 }
@@ -113,26 +133,40 @@ function createTripCommands({ db, now = () => new Date(), sessionRevoker = creat
       if (input.action === "approveMember" && target.role !== "pending") throw codedError("INVALID_MEMBER_STATE");
       if (input.action === "rejectMember" && target.role !== "pending") throw codedError("INVALID_MEMBER_STATE");
       if (input.action === "removeMember" && !["admin", "member"].includes(target.role)) throw codedError("INVALID_MEMBER_STATE");
+      const tripIds = input.action === "removeMember" ? associationIds(target.tripIds) : optionalAssociationIds(target.tripIds);
+      const sessionIds = input.action === "removeMember" ? associationIds(target.sessionIds) : optionalAssociationIds(target.sessionIds);
+      let nextAdminIndex;
       if (input.action === "removeMember" && target.role === "admin") {
-        const admins = await members.where({ role: "admin" }).get();
-        if ((admins.data || []).length <= 1) throw codedError("LAST_ADMIN");
+        const adminIndex = readRecord(await transaction.collection("membership_index").doc("admins").get());
+        const adminIds = adminIndex?.adminUids || adminIndex?.uids;
+        if (!Array.isArray(adminIds) || adminIds.some((uid) => typeof uid !== "string") || new Set(adminIds).size !== adminIds.length) throw codedError("MEMBERSHIP_INDEX_UNAVAILABLE");
+        if (!adminIds.includes(target.uid)) throw codedError("MEMBERSHIP_INDEX_UNAVAILABLE");
+        if (adminIds.length <= 1) throw codedError("LAST_ADMIN");
+        nextAdminIndex = { ...adminIndex, adminUids: adminIds.filter((uid) => uid !== target.uid) };
       }
       const timestamp = now().toISOString();
       const role = input.action === "approveMember" ? "member" : "removed";
-      const next = { ...target, role, version: (target.version || 0) + 1, ...(role === "member" ? { approvedAt: timestamp } : {}) };
-      await members.doc(target.uid).set(next);
+      const next = { ...target, role, tripIds, sessionIds, version: (target.version || 0) + 1, ...(role === "member" ? { approvedAt: timestamp } : {}) };
+      let tripUpdates = [];
       if (input.action === "removeMember") {
-        const tripsResult = await transaction.collection("trips").where({}).get();
-        for (const trip of tripsResult.data || []) {
-          if (!Array.isArray(trip.memberUids) || !trip.memberUids.includes(target.uid)) continue;
-          await transaction.collection("trips").doc(trip.id).set({
+        const trips = transaction.collection("trips");
+        for (const tripId of tripIds) {
+          const trip = readRecord(await trips.doc(tripId).get());
+          if (!trip || !Array.isArray(trip.memberUids) || !trip.memberUids.includes(target.uid)) throw codedError("MEMBERSHIP_ASSOCIATIONS_UNAVAILABLE");
+          tripUpdates.push({ id: tripId, value: {
             ...trip,
             memberUids: trip.memberUids.filter((uid) => uid !== target.uid),
             version: Number.isInteger(trip.version) ? trip.version + 1 : 1,
-          });
+          } });
         }
-        await sessionRevoker.revokeSessionsForUid(transaction, target.uid, timestamp);
+        if (typeof sessionRevoker.prepareSessionsForUid === "function") {
+          await sessionRevoker.prepareSessionsForUid(transaction, target.uid, sessionIds, timestamp);
+        }
       }
+      await members.doc(target.uid).set(next);
+      for (const update of tripUpdates) await transaction.collection("trips").doc(update.id).set(update.value);
+      if (input.action === "removeMember") await sessionRevoker.revokeSessionsForUid(transaction, target.uid, timestamp, sessionIds);
+      if (nextAdminIndex) await transaction.collection("membership_index").doc("admins").set(nextAdminIndex);
       await audit(transaction, actor, input.action, target.displayName, ["role", "version", ...(role === "member" ? ["approvedAt"] : []), ...(input.action === "removeMember" ? ["memberUids", "sessions"] : [])]);
       return { member: safeMember(next) };
     });
@@ -162,7 +196,16 @@ function createTripCommands({ db, now = () => new Date(), sessionRevoker = creat
       if (current.version !== input.expectedVersion) throw codedError("VERSION_CONFLICT", { currentVersion: current.version });
       const next = { ...parsed.data, memberUids: [...current.memberUids], version: current.version + 1 };
       if (next.version !== input.expectedVersion + 1) throw codedError("INVALID_TRIP");
+      const memberUpdates = [];
+      for (const uid of current.memberUids) {
+        const member = readRecord(await transaction.collection("members").doc(uid).get());
+        if (!member) throw codedError("MEMBER_NOT_FOUND");
+        const tripIds = optionalAssociationIds(member.tripIds);
+        if (!tripIds.includes(next.id)) tripIds.push(next.id);
+        memberUpdates.push({ uid, value: { ...member, tripIds } });
+      }
       await trips.doc(next.id).set(next);
+      for (const update of memberUpdates) await transaction.collection("members").doc(update.uid).set(update.value);
       await idempotency.doc(input.idempotencyKey).set({ actorUid, tripId: next.id, expectedVersion: input.expectedVersion, trip: next, createdAt: now().toISOString() });
       await audit(transaction, actor, "saveTrip", undefined, ["trip"]);
       return { trip: next };

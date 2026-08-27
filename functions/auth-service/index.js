@@ -35,7 +35,7 @@ function createAuthHandler({ env = process.env, fetchImpl, memberStore, cloudbas
   let sessions;
   try {
     store = memberStore || (effectiveCloudbase ? createCloudBaseMemberStore({ db: effectiveCloudbase.database(), bootstrapCode: env.ADMIN_BOOTSTRAP_CODE }) : createMemoryMemberStore({ bootstrapCode: env.ADMIN_BOOTSTRAP_CODE }));
-    sessions = authStore || (effectiveCloudbase ? createCloudBaseAuthStore({ db: effectiveCloudbase.database(), now, randomBytes }) : createMemoryAuthStore({ now, randomBytes }));
+    sessions = authStore || (effectiveCloudbase ? createCloudBaseAuthStore({ db: effectiveCloudbase.database(), now, randomBytes }) : createMemoryAuthStore({ now, randomBytes, memberStore: store }));
   } catch {
     if (cloudbaseMode && !explicitStores) throw unavailableError();
     throw unavailableError();

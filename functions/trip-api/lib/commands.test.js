@@ -4,7 +4,7 @@ const test = require("node:test");
 const { createTripCommands } = require("./commands.js");
 
 function member(uid, role, displayName = uid) {
-  return { uid, role, displayName, version: 0, createdAt: "2026-08-27T00:00:00.000Z" };
+  return { uid, role, displayName, version: 0, createdAt: "2026-08-27T00:00:00.000Z", tripIds: [], sessionIds: [] };
 }
 
 function trip(version = 0) {
@@ -20,10 +20,11 @@ function createDb({ members = [], trips = [trip()], authSessions = [] } = {}) {
     members: new Map(members.map((item) => [item.uid, structuredClone(item)])),
     trips: new Map(trips.map((item) => [item.id, structuredClone(item)])),
     auth_sessions: new Map(authSessions.map((item) => [item._id, structuredClone(item)])),
+    membership_index: new Map([["admins", { uids: members.filter((item) => item.role === "admin").map((item) => item.uid) }]]),
     audits: [],
     idempotency: new Map(),
   };
-  const collection = (name) => {
+  const collection = (name, allowQueries = true) => {
     const store = name === "trip_idempotency" ? data.idempotency : name === "trip_audits" ? undefined : data[name];
     return {
     doc(id) {
@@ -33,6 +34,7 @@ function createDb({ members = [], trips = [trip()], authSessions = [] } = {}) {
       };
     },
     where(query) {
+      if (!allowQueries) throw new Error("CloudBase transactions do not support where queries");
       return {
         async get() { return { data: [...(store?.values() || [])].filter((value) => Object.entries(query).every(([key, expected]) => value[key] === expected)).map((value) => structuredClone(value)) }; },
         limit() { return this; },
@@ -41,7 +43,7 @@ function createDb({ members = [], trips = [trip()], authSessions = [] } = {}) {
       async add(value) { data.audits.push(structuredClone(value)); },
     };
   };
-  return { data, collection, async runTransaction(callback) { return callback({ collection }); } };
+  return { data, collection, async runTransaction(callback) { return callback({ collection: (name) => collection(name, false) }); } };
 }
 
 test("only an administrator can approve a pending member", async () => {
@@ -190,6 +192,8 @@ test("removeMember revokes trip membership and sessions in the same transaction"
       { _id: "session-2", uid: "fs_other", oauthState: "state-2", expiresAt: 9999999999999, revoked: false },
     ],
   });
+  db.data.members.get("fs_member").tripIds = ["trip-2026-autumn", "other-trip"];
+  db.data.members.get("fs_member").sessionIds = ["session-1"];
   const commands = createTripCommands({ db, now: () => new Date("2026-08-27T12:00:00.000Z") });
 
   await commands.execute({ action: "removeMember", uid: "fs_member" }, "fs_admin");
@@ -199,6 +203,18 @@ test("removeMember revokes trip membership and sessions in the same transaction"
   assert.equal(db.data.auth_sessions.get("session-1").revoked, true);
   assert.equal(db.data.auth_sessions.get("session-1").expiresAt, Date.parse("2026-08-27T12:00:00.000Z"));
   assert.equal(db.data.auth_sessions.get("session-2").revoked, false);
+});
+
+test("removeMember fails closed when server-owned associations are missing", async () => {
+  const db = createDb({
+    members: [member("fs_admin", "admin"), { ...member("fs_member", "member"), tripIds: undefined }],
+    trips: [{ ...trip(), memberUids: ["fs_admin", "fs_member"] }],
+  });
+  const commands = createTripCommands({ db });
+
+  await assert.rejects(() => commands.execute({ action: "removeMember", uid: "fs_member" }, "fs_admin"), { code: "MEMBERSHIP_ASSOCIATIONS_UNAVAILABLE" });
+  assert.equal(db.data.members.get("fs_member").role, "member");
+  assert.deepEqual(db.data.trips.get("trip-2026-autumn").memberUids, ["fs_admin", "fs_member"]);
 });
 
 test("audit records include actor UID and safe changed fields only", async () => {

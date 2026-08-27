@@ -7,7 +7,7 @@ function randomId(randomBytes) {
   return randomBytes(32).toString("base64url");
 }
 
-function createMemoryAuthStore({ now = () => Date.now(), randomBytes = crypto.randomBytes } = {}) {
+function createMemoryAuthStore({ now = () => Date.now(), randomBytes = crypto.randomBytes, memberStore } = {}) {
   const states = new Map();
   const sessions = new Map();
   return {
@@ -26,6 +26,10 @@ function createMemoryAuthStore({ now = () => Date.now(), randomBytes = crypto.ra
     async createSession({ uid, oauthState }) {
       const id = randomId(randomBytes);
       sessions.set(id, { uid, oauthState, expiresAt: now() + SESSION_TTL_MS, revoked: false });
+      if (memberStore?.addSessionId && !(await memberStore.addSessionId(uid, id))) {
+        sessions.delete(id);
+        throw new Error("MEMBERSHIP_ASSOCIATIONS_UNAVAILABLE");
+      }
       return id;
     },
     async getSession(id) {
@@ -66,7 +70,17 @@ function createCloudBaseAuthStore({ db, now = () => Date.now(), randomBytes = cr
     },
     async createSession({ uid, oauthState }) {
       const id = randomId(randomBytes);
-      await sessions.doc(id).set({ _id: id, uid, oauthState, expiresAt: now() + SESSION_TTL_MS, revoked: false });
+      const session = { _id: id, uid, oauthState, expiresAt: now() + SESSION_TTL_MS, revoked: false };
+      await db.runTransaction(async (transaction) => {
+        const memberDoc = transaction.collection("members").doc(uid);
+        const result = await memberDoc.get();
+        const member = readDoc(result);
+        if (!member) throw new Error("MEMBERSHIP_ASSOCIATIONS_UNAVAILABLE");
+        const sessionIds = member.sessionIds === undefined ? [] : member.sessionIds;
+        if (!Array.isArray(sessionIds) || sessionIds.some((item) => typeof item !== "string")) throw new Error("MEMBERSHIP_ASSOCIATIONS_UNAVAILABLE");
+        await transaction.collection("auth_sessions").doc(id).set(session);
+        await memberDoc.set({ ...member, sessionIds: [...new Set([...sessionIds, id])] });
+      });
       return id;
     },
     async getSession(id) {
