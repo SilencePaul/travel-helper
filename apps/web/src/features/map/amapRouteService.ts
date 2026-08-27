@@ -10,6 +10,16 @@ type RecordValue = Record<string, unknown>;
 let providerRunning = false;
 const providerTasks: Array<() => void> = [];
 const inFlightQueries = new Map<string, Promise<RouteQueryResult>>();
+const loaderScopes = new WeakMap<AmapLoader, number>();
+let nextLoaderScope = 0;
+
+function loaderScope(loader: AmapLoader) {
+  const existing = loaderScopes.get(loader);
+  if (existing !== undefined) return existing;
+  nextLoaderScope += 1;
+  loaderScopes.set(loader, nextLoaderScope);
+  return nextLoaderScope;
+}
 
 function runNextProviderTask() {
   if (providerRunning) return;
@@ -61,18 +71,25 @@ function numeric(value: unknown) {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-function coordinates(path: unknown) {
+function coordinates(path: unknown): Coordinate[] | undefined {
   if (typeof path === "string") {
-    return path.split(";").map((point) => coordinate(point.split(",").map(Number))).filter((point): point is Coordinate => Boolean(point));
+    const parsed = path.split(";").map((point) => coordinate(point.split(",").map(Number)));
+    return parsed.every((point): point is Coordinate => Boolean(point)) ? parsed : undefined;
   }
-  return Array.isArray(path) ? path.map(coordinate).filter((point): point is Coordinate => Boolean(point)) : [];
+  if (!Array.isArray(path)) return [];
+  const parsed = path.map(coordinate);
+  return parsed.every((point): point is Coordinate => Boolean(point)) ? parsed : undefined;
 }
 
-function concatenate(paths: unknown[]) {
+function concatenate(paths: unknown[]): Coordinate[] | undefined {
   const result: Coordinate[] = [];
-  for (const path of paths) for (const point of coordinates(path)) {
+  for (const path of paths) {
+    const pathCoordinates = coordinates(path);
+    if (!pathCoordinates) return undefined;
+    for (const point of pathCoordinates) {
     const previous = result.at(-1);
     if (!previous || previous.lng !== point.lng || previous.lat !== point.lat) result.push(point);
+    }
   }
   return result;
 }
@@ -112,7 +129,7 @@ function firstRoute(result: unknown, mode: TravelMode) {
   const distanceMeters = numeric(first.distance);
   const durationSeconds = numeric(first.time ?? first.duration);
   const path = mode === "transit" ? transitPlanPath(first) : routeStepsPath(first);
-  if (distanceMeters === undefined || durationSeconds === undefined || distanceMeters < 0 || durationSeconds < 0 || path.length < 2) return undefined;
+  if (distanceMeters === undefined || durationSeconds === undefined || distanceMeters < 0 || durationSeconds < 0 || !path || path.length < 2) return undefined;
   return {
     distanceMeters,
     durationMinutes: Math.ceil(durationSeconds / 60),
@@ -170,14 +187,16 @@ async function getTransitSegmentWithRetry(AMap: AmapRouteApi, from: TimelinePlac
 export function createAmapRouteService(loadAmap: AmapLoader, resolvePlace: PlaceResolver, { timeoutMs = 10_000 }: { timeoutMs?: number } = {}): RouteService {
   return {
     getSegments({ city, placeIds, modeByLeg }) {
-      const queryKey = JSON.stringify([city, placeIds, modeByLeg]);
+      let places: Array<TimelinePlace | undefined>;
+      try { places = placeIds.map(resolvePlace); }
+      catch (error) { return Promise.reject(error); }
+      if (places.some((place) => !place)) return Promise.reject(new Error("AMAP_PLACE_UNAVAILABLE"));
+      const resolvedPlaces = places as TimelinePlace[];
+      const queryKey = JSON.stringify([loaderScope(loadAmap), timeoutMs, city, modeByLeg, resolvedPlaces.map(({ id, lng, lat }) => [id, lng, lat])]);
       const existing = inFlightQueries.get(queryKey);
       if (existing) return existing;
       const scheduled = enqueueProviderWork(async () => {
-      const places = placeIds.map(resolvePlace);
-      if (places.some((place) => !place)) throw new Error("AMAP_PLACE_UNAVAILABLE");
       const AMap = await loadAmap();
-      const resolvedPlaces = places as TimelinePlace[];
       const requests: PromiseSettledResult<RouteSegment>[] = [];
       for (const [index, from] of resolvedPlaces.slice(0, -1).entries()) {
         const mode = modeByLeg[index] ?? "walking";

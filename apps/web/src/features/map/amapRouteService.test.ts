@@ -278,8 +278,9 @@ describe("createAmapRouteService", () => {
     const search = vi.fn((_origin, _destination, callback) => callbacks.push(callback));
     class Walking { constructor(_options?: unknown) {} search = search; }
     const resolve = (id: string) => id === peak.id ? peak : centralPier;
-    const firstService = createAmapRouteService(async () => ({ Walking }), resolve);
-    const secondService = createAmapRouteService(async () => ({ Walking }), resolve);
+    const load = async () => ({ Walking });
+    const firstService = createAmapRouteService(load, resolve);
+    const secondService = createAmapRouteService(load, resolve);
     const input = { dayId: "same-route", city: "香港", placeIds: [peak.id, centralPier.id], modeByLeg: ["walking" as const] };
 
     const first = firstService.getSegments(input);
@@ -294,6 +295,50 @@ describe("createAmapRouteService", () => {
     await expect(second).resolves.toEqual(expect.objectContaining({ segments: [expect.objectContaining({ distanceMeters: 716 })], failures: [] }));
     expect(first).toBe(second);
     expect(search).toHaveBeenCalledOnce();
+  });
+
+  it("does not share an in-flight query across different AMap loader factories", async () => {
+    const firstCallbacks: Array<(status: string, result: unknown) => void> = [];
+    const firstSearch = vi.fn((_origin, _destination, callback) => firstCallbacks.push(callback));
+    const secondSearch = vi.fn((_origin, _destination, callback) => callback("complete", { routes: [{ distance: 712, time: 540, steps: [{ path: [[peak.lng, peak.lat], [centralPier.lng, centralPier.lat]] }] }] }));
+    class FirstWalking { constructor(_options?: unknown) {} search = firstSearch; }
+    class SecondWalking { constructor(_options?: unknown) {} search = secondSearch; }
+    const resolve = (id: string) => id === peak.id ? peak : centralPier;
+    const firstService = createAmapRouteService(async () => ({ Walking: FirstWalking }), resolve);
+    const secondService = createAmapRouteService(async () => ({ Walking: SecondWalking }), resolve);
+    const input = { dayId: "different-loaders", city: "香港", placeIds: [peak.id, centralPier.id], modeByLeg: ["walking" as const] };
+
+    const first = firstService.getSegments(input);
+    const second = secondService.getSegments(input);
+    await Promise.resolve();
+    firstCallbacks[0]!("complete", { routes: [{ distance: 716, time: 600, steps: [{ path: [[peak.lng, peak.lat], [centralPier.lng, centralPier.lat]] }] }] });
+
+    await expect(first).resolves.toEqual(expect.objectContaining({ segments: [expect.objectContaining({ distanceMeters: 716 })] }));
+    await expect(second).resolves.toEqual(expect.objectContaining({ segments: [expect.objectContaining({ distanceMeters: 712 })] }));
+    expect(firstSearch).toHaveBeenCalledOnce();
+    expect(secondSearch).toHaveBeenCalledOnce();
+  });
+
+  it("does not share an in-flight query across timeout configurations", async () => {
+    const callbacks: Array<(status: string, result: unknown) => void> = [];
+    const search = vi.fn((_origin, _destination, callback) => callbacks.push(callback));
+    class Walking { constructor(_options?: unknown) {} search = search; }
+    const load = async () => ({ Walking });
+    const resolve = (id: string) => id === peak.id ? peak : centralPier;
+    const fastService = createAmapRouteService(load, resolve, { timeoutMs: 10 });
+    const patientService = createAmapRouteService(load, resolve, { timeoutMs: 20 });
+    const input = { dayId: "different-timeouts", city: "香港", placeIds: [peak.id, centralPier.id], modeByLeg: ["walking" as const] };
+
+    const fast = fastService.getSegments(input);
+    const patient = patientService.getSegments(input);
+    await Promise.resolve();
+    callbacks[0]!("complete", { routes: [{ distance: 716, time: 600, steps: [{ path: [[peak.lng, peak.lat], [centralPier.lng, centralPier.lat]] }] }] });
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    callbacks[1]!("complete", { routes: [{ distance: 712, time: 540, steps: [{ path: [[peak.lng, peak.lat], [centralPier.lng, centralPier.lat]] }] }] });
+
+    await expect(fast).resolves.toEqual(expect.objectContaining({ segments: [expect.objectContaining({ distanceMeters: 716 })] }));
+    await expect(patient).resolves.toEqual(expect.objectContaining({ segments: [expect.objectContaining({ distanceMeters: 712 })] }));
+    expect(search).toHaveBeenCalledTimes(2);
   });
 
   it("clears a failed in-flight route query so the same request can retry", async () => {
@@ -373,6 +418,8 @@ describe("createAmapRouteService", () => {
     ["empty route path", { distance: 716, time: 600, steps: [] }],
     ["non-finite path coordinate", { distance: 716, time: 600, steps: [{ path: [[peak.lng, peak.lat], [Number.NaN, centralPier.lat]] }] }],
     ["out-of-range path coordinate", { distance: 716, time: 600, steps: [{ path: [[peak.lng, peak.lat], [181, centralPier.lat]] }] }],
+    ["invalid point within an array path", { distance: 716, time: 600, steps: [{ path: [[peak.lng, peak.lat], [181, centralPier.lat], [centralPier.lng, centralPier.lat]] }] }],
+    ["invalid point within a polyline path", { distance: 716, time: 600, steps: [{ path: `${peak.lng},${peak.lat};181,${centralPier.lat};${centralPier.lng},${centralPier.lat}` }] }],
   ])("reports a malformed route response for %s", async (_label, route) => {
     const search = vi.fn((_origin, _destination, callback) => callback("complete", { routes: [route] }));
     class Walking { constructor(_options?: unknown) {} search = search; }
