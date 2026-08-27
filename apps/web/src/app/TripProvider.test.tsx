@@ -5,6 +5,7 @@ import { expect, test, vi } from "vitest";
 import seed from "../../../../content/trip.seed.json";
 import { TripProvider } from "./TripProvider";
 import { useTrip, type TripContextValue } from "./tripContext";
+import { UnauthorizedError } from "../infrastructure/cloudbaseTripRepository";
 
 type Deferred<T> = {
   promise: Promise<T>;
@@ -282,4 +283,25 @@ test("clears a loaded trip when the repository reports authorization loss", asyn
 
   expect(screen.queryByText("private itinerary")).not.toBeInTheDocument();
   expect(onUnauthorized).toHaveBeenCalledWith(expect.objectContaining({ code: "UNAUTHORIZED" }));
+});
+
+test("clears the saving state when an in-flight save resolves after authorization loss", async () => {
+  const repository = new UnauthorizedTripRepository();
+  let context: TripContextValue | undefined;
+  render(
+    <TripProvider repository={repository} tripId={seed.id}>
+      <ProviderProbe onValue={(value) => { context = value; }} />
+    </TripProvider>,
+  );
+  await act(async () => repository.loadResult.resolve(versionedTrip(1, "private itinerary")));
+  await screen.findByText("private itinerary");
+
+  let save!: Promise<Trip | undefined>;
+  act(() => { save = context!.mutateTrip((trip) => ({ ...trip, title: "revoked save" })); });
+  await waitFor(() => expect(repository.saveRequests).toHaveLength(1));
+  act(() => repository.unauthorized?.(new UnauthorizedError()));
+  expect(screen.getByRole("alert")).toHaveTextContent("登录状态已失效");
+
+  await act(async () => repository.saveRequests[0]!.result.resolve(versionedTrip(2, "stale save")));
+  await expect(save).resolves.toBeUndefined();
 });

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Member } from "@travel/contracts";
 import { getCloudbaseClient } from "../../infrastructure/cloudbaseClient";
+import { ForbiddenError, isUnauthorizedError, UnauthorizedError } from "../../infrastructure/cloudbaseTripRepository";
 
 type MemberAction = "approveMember" | "rejectMember" | "removeMember";
 type Command = (input: { action: MemberAction | "listMembers"; uid?: string }) => Promise<{ member?: Member; members?: Member[] }>;
@@ -8,11 +9,16 @@ type Command = (input: { action: MemberAction | "listMembers"; uid?: string }) =
 async function cloudbaseCommand(input: { action: MemberAction | "listMembers"; uid?: string }) {
   const response = await getCloudbaseClient().callFunction({ name: "trip-api", data: input });
   const result = response.result as { error?: string; member?: Member; members?: Member[] } | undefined;
-  if (result?.error) throw new Error("COMMAND_FAILED");
+  if (result?.error) {
+    if (isUnauthorizedError(result)) {
+      throw result.error === "FORBIDDEN" ? new ForbiddenError() : new UnauthorizedError();
+    }
+    throw new Error("COMMAND_FAILED");
+  }
   return result ?? {};
 }
 
-export function MemberManagementPage({ command = cloudbaseCommand, initialMembers }: { command?: Command; initialMembers?: Member[] }) {
+export function MemberManagementPage({ command = cloudbaseCommand, initialMembers, onUnauthorized }: { command?: Command; initialMembers?: Member[]; onUnauthorized?: (error: unknown) => void }) {
   const [members, setMembers] = useState<Member[]>(initialMembers ?? []);
   const [busyUid, setBusyUid] = useState<string>();
   const [error, setError] = useState(false);
@@ -23,9 +29,17 @@ export function MemberManagementPage({ command = cloudbaseCommand, initialMember
     let active = true;
     void command({ action: "listMembers" })
       .then((result) => { if (active) setMembers(result.members ?? []); })
-      .catch(() => { if (active) setError(true); });
+      .catch((error) => {
+        if (!active) return;
+        if (isUnauthorizedError(error)) {
+          setMembers([]);
+          onUnauthorized?.(error);
+          return;
+        }
+        setError(true);
+      });
     return () => { active = false; };
-  }, [command, initialMembers]);
+  }, [command, initialMembers, onUnauthorized]);
 
   const act = useCallback(async (member: Member, action: MemberAction, button: HTMLButtonElement) => {
     setBusyUid(member.uid);
@@ -35,13 +49,18 @@ export function MemberManagementPage({ command = cloudbaseCommand, initialMember
       const result = await command({ action, uid: member.uid });
       if (result.member) setMembers((current) => current.map((item) => item.uid === member.uid ? result.member! : item));
       else setMembers((current) => current.filter((item) => item.uid !== member.uid));
-    } catch {
-      setError(true);
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        setMembers([]);
+        onUnauthorized?.(error);
+      } else {
+        setError(true);
+      }
     } finally {
       setBusyUid(undefined);
       queueMicrotask(() => focusAfterAction.current?.focus());
     }
-  }, [command]);
+  }, [command, onUnauthorized]);
 
   const pending = members.filter((member) => member.role === "pending");
   const active = members.filter((member) => member.role === "admin" || member.role === "member");

@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { MemberManagementPage } from "./MemberManagementPage";
+import { UnauthorizedError } from "../../infrastructure/cloudbaseTripRepository";
 
 describe("MemberManagementPage", () => {
   it("shows names and disables a member action while it is pending", async () => {
@@ -27,5 +28,20 @@ describe("MemberManagementPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "批准" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("操作失败，请稍后重试");
     expect(screen.queryByText("provider secret")).not.toBeInTheDocument();
+  });
+
+  it("clears stale members and delegates authorization loss to the shared session handler", async () => {
+    const unauthorized = new UnauthorizedError();
+    const command = vi.fn().mockRejectedValue(unauthorized);
+    const onUnauthorized = vi.fn();
+    render(<MemberManagementPage command={command} onUnauthorized={onUnauthorized} initialMembers={[
+      { uid: "revoked", displayName: "已被撤销", role: "member", version: 1, createdAt: "2026-08-27T00:00:00.000Z" },
+    ]} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "移除" }));
+
+    expect(onUnauthorized).toHaveBeenCalledWith(unauthorized);
+    expect(screen.queryByText("已被撤销")).not.toBeInTheDocument();
+    expect(screen.queryByText("操作失败，请稍后重试")).not.toBeInTheDocument();
   });
 });

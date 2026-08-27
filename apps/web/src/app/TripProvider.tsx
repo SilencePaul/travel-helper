@@ -53,9 +53,10 @@ export function TripProvider({
     setTrip(undefined);
     setLoadError(false);
     setAuthLost(true);
+    setSyncState(isCloudbase ? "已同步" : "正在使用本地计划");
     /* oxlint-enable react/set-state-in-effect */
     onUnauthorized?.(error);
-  }, [onUnauthorized]);
+  }, [isCloudbase, onUnauthorized]);
 
   const applySnapshot = useCallback((snapshot: Trip, session: number) => {
     if (session !== sessionRef.current) return false;
