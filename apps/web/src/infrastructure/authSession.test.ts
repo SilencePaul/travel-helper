@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { authServiceUrl, bootstrapWithCode, getCurrentProfile, requestCustomTicket } from "./authSession";
+import { authServiceUrl, bootstrapWithCode, getCurrentProfile, recoverAuthenticatedMember, requestCustomTicket } from "./authSession";
 
 describe("auth session", () => {
   it("requires the standalone auth service URL", () => {
@@ -31,5 +31,29 @@ describe("auth session", () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ member }), { status: 200 }));
     await expect(getCurrentProfile("https://auth.example", fetchMock)).resolves.toEqual(member);
     expect(fetchMock).toHaveBeenCalledWith("https://auth.example/api/auth/profile", expect.objectContaining({ method: "GET", credentials: "include" }));
+  });
+
+  it("recovers an approved server session when the CloudBase user is temporarily empty", async () => {
+    const member = { uid: "fs_admin", displayName: "一鸣", role: "admin", version: 1, createdAt: "2026-08-27T00:00:00.000Z" } as const;
+    const getProfile = vi.fn().mockResolvedValue(member);
+    const getCurrentUser = vi.fn().mockResolvedValue(null);
+    const signIn = vi.fn().mockResolvedValue(undefined);
+
+    await expect(recoverAuthenticatedMember({ getProfile, getCurrentUser, signIn })).resolves.toEqual(member);
+    expect(getProfile).toHaveBeenCalledTimes(1);
+    expect(signIn).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not request another ticket when the CloudBase user already exists", async () => {
+    const member = { uid: "fs_admin", displayName: "一鸣", role: "admin", version: 1, createdAt: "2026-08-27T00:00:00.000Z" } as const;
+    const signIn = vi.fn();
+
+    await recoverAuthenticatedMember({
+      getProfile: vi.fn().mockResolvedValue(member),
+      getCurrentUser: vi.fn().mockResolvedValue({ uid: member.uid }),
+      signIn,
+    });
+
+    expect(signIn).not.toHaveBeenCalled();
   });
 });

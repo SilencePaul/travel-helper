@@ -58,6 +58,22 @@ export async function signInWithCustomTicket(baseUrl = authServiceUrl()) {
   return getCloudbaseAuth().signInWithCustomTicket(() => requestCustomTicket(baseUrl));
 }
 
+type RecoveryDependencies = {
+  getProfile?: () => Promise<Member>;
+  getCurrentUser?: () => Promise<unknown>;
+  signIn?: () => Promise<unknown>;
+};
+
+export async function recoverAuthenticatedMember({
+  getProfile = () => getCurrentProfile(),
+  getCurrentUser = () => getCloudbaseAuth().getCurrentUser(),
+  signIn = () => signInWithCustomTicket(),
+}: RecoveryDependencies = {}) {
+  const member = await getProfile();
+  if ((member.role === "admin" || member.role === "member") && !(await getCurrentUser())) await signIn();
+  return member;
+}
+
 export async function logout(baseUrl = authServiceUrl(), fetchImpl: FetchLike = fetch) {
   await fetchImpl(authRoute(baseUrl, "/logout"), { method: "POST", credentials: "include" });
   await getCloudbaseAuth().signOut();
