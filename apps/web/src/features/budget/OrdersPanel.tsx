@@ -19,8 +19,9 @@ export function OrdersPanel({ orders, onStatusChange, onPaidChange, disabled = f
     /* oxlint-enable react/set-state-in-effect */
   }, [orders]);
   async function savePaid(order: BudgetItem) {
-    const value = Number(drafts[order.id] ?? (order.paid / 100).toFixed(2));
-    if (!Number.isFinite(value) || value < 0) { setError("请输入非负的已付金额"); return; }
+    const draft = drafts[order.id] ?? (order.paid / 100).toFixed(2);
+    if (!/^\d+(?:\.\d{1,2})?$/.test(draft)) { setError("请输入最多两位小数的非负已付金额"); return; }
+    const value = Number(draft);
     if (!onPaidChange || value === order.paid / 100) return;
     setSavingId(order.id); setError(undefined);
     try { await onPaidChange(order.id, Math.round(value * 100)); } catch { setError("保存付款金额失败，请重试"); } finally { setSavingId(undefined); }

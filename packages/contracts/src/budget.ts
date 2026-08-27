@@ -16,7 +16,7 @@ export const BudgetItemSchema = z.object({
   dayId: z.string().min(1).optional(),
 }).superRefine((item, context) => {
   if (item.status === "unpaid" && item.paid !== 0) context.addIssue({ code: "custom", message: "未支付订单的已支付金额必须为 0", path: ["paid"] });
-  if (item.status === "partial" && (item.paid <= 0 || item.paid >= item.estimated)) context.addIssue({ code: "custom", message: "部分支付的已支付金额必须大于 0 且小于预计金额", path: ["paid"] });
+  if (item.status === "partial" && item.paid <= 0) context.addIssue({ code: "custom", message: "部分支付订单必须录入实际已付金额", path: ["paid"] });
   if (item.status === "paid" && item.paid <= 0) context.addIssue({ code: "custom", message: "已支付订单必须录入实际已付金额", path: ["paid"] });
 });
 
@@ -45,7 +45,8 @@ export function transitionOrderStatus(order: BudgetItem, status: OrderStatus): B
 
 export function applyOrderPayment(order: BudgetItem, paid: number): BudgetItem {
   if (!Number.isInteger(paid) || paid < 0) throw new Error("已付金额必须为非负整数");
-  const status: OrderStatus = paid === 0 ? "unpaid" : paid < order.estimated ? "partial" : "paid";
+  // An estimate is not a bill: only an explicit status action marks an order paid.
+  const status: OrderStatus = paid === 0 ? "unpaid" : order.status === "paid" ? "paid" : "partial";
   return { ...order, paid, status };
 }
 
