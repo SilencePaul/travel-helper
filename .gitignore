@@ -12,5 +12,6 @@ playwright-report/
 **/test-results/
 **/playwright-report/
 dist/
+.tcb/
 !.env.example
 !apps/web/.env.example
