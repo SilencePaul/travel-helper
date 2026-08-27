@@ -9,7 +9,7 @@ const orders: BudgetItem[] = [{ id: "ticket", name: "山顶缆车", category: "t
 test("sends status changes to its repository-backed callback", async () => {
   const user = userEvent.setup();
   const onStatusChange = vi.fn();
-  render(<OrdersPanel orders={orders} onStatusChange={onStatusChange} />);
+  render(<OrdersPanel orders={[{ ...orders[0]!, paid: 8000, status: "partial" }]} onStatusChange={onStatusChange} />);
   await user.selectOptions(screen.getByLabelText("山顶缆车状态"), "paid");
   expect(onStatusChange).toHaveBeenCalledWith("ticket", "paid");
 });
@@ -27,7 +27,7 @@ test("retains a paid-amount draft and reports an inline error when persistence r
   const input = screen.getByLabelText("山顶缆车已付金额");
   await user.clear(input);
   await user.type(input, "80");
-  await user.click(screen.getByRole("button", { name: "保存金额" }));
+  await user.click(screen.getByRole("button", { name: "保存 山顶缆车 金额" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("保存付款金额失败");
   expect(input).toHaveValue(80);
 });
