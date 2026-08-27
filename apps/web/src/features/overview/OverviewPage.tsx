@@ -20,6 +20,7 @@ export type OverviewPageProps = {
   onOpenHotels?: () => void;
   onChangeDateRange?: (startDate: string, endDate: string, confirmed: boolean, reviewedOrderIds?: string[]) => Promise<{ affectedOrders: AffectedOrder[] }>;
   onOrderStatusChange?: (orderId: string, status: OrderStatus) => void | Promise<unknown>;
+  onOrderPaymentChange?: (orderId: string, paid: number) => void | Promise<unknown>;
 };
 
 export function OverviewPage({
@@ -34,6 +35,7 @@ export function OverviewPage({
   onOpenHotels = () => undefined,
   onChangeDateRange,
   onOrderStatusChange = () => undefined,
+  onOrderPaymentChange,
 }: OverviewPageProps) {
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; dayNumber: number }>();
   const [isDeleting, setIsDeleting] = useState(false);
@@ -49,6 +51,7 @@ export function OverviewPage({
   const deleteDialogRef = useRef<HTMLDialogElement>(null);
   const rangeDialogRef = useRef<HTMLDialogElement>(null);
   const dateTriggerRef = useRef<HTMLButtonElement>(null);
+  const rangeCancelRef = useRef<HTMLButtonElement>(null);
   const deleteTitleId = useId();
   const deleteDescriptionId = useId();
   const requestedIndex = trip.days.findIndex((day) => day.id === selectedDayId);
@@ -64,6 +67,7 @@ export function OverviewPage({
       if (typeof dialog.showModal === "function") dialog.showModal();
       else dialog.setAttribute("open", "");
     }
+    rangeCancelRef.current?.focus();
     cancelButtonRef.current?.focus();
   }, [dialogOpen]);
 
@@ -290,17 +294,17 @@ export function OverviewPage({
         {rangeError ? <p id="date-range-error" role="alert">{rangeError}</p> : null}
       </section> : null}
 
-      {rangeWarning ? <dialog ref={rangeDialogRef} className="date-warning" aria-modal="true" aria-labelledby="date-warning-title" aria-busy={rangeSaving} onCancel={(event) => { event.preventDefault(); if (!rangeSaving) setRangeWarning(undefined); }}>
+      {rangeWarning ? <dialog ref={rangeDialogRef} className="date-warning" aria-modal="true" aria-labelledby="date-warning-title" aria-busy={rangeSaving} onCancel={(event) => { event.preventDefault(); if (!rangeSaving) { setRangeWarning(undefined); dateTriggerRef.current?.focus(); } }}>
         <h2 id="date-warning-title">这些订单关联的旅行日将被移除</h2>
         <p>订单不会自动删除或改写。确认后只调整日期与行程日，请随后核对订单。</p>
         <ul>{rangeWarning.orders.map((order) => <li key={order.id}>{order.category === "hotel" ? "酒店" : "门票"} · {order.name}</li>)}</ul>
         {rangeError ? <p role="alert">{rangeError}</p> : null}
-        <div><button type="button" className="danger-button" onClick={() => void requestDateRange(true)} disabled={rangeSaving || isSaving}>{rangeSaving ? "正在调整" : "仍然调整日期"}</button><button type="button" onClick={() => { setRangeWarning(undefined); dateTriggerRef.current?.focus(); }} disabled={rangeSaving}>保留当前日期</button></div>
+        <div><button type="button" className="danger-button" onClick={() => void requestDateRange(true)} disabled={rangeSaving || isSaving}>{rangeSaving ? "正在调整" : "仍然调整日期"}</button><button ref={rangeCancelRef} type="button" onClick={() => { setRangeWarning(undefined); dateTriggerRef.current?.focus(); }} disabled={rangeSaving}>保留当前日期</button></div>
       </dialog> : null}
 
       <div className="overview-sidepanels">
         <BudgetPanel trip={trip} />
-        <OrdersPanel orders={trip.orders ?? []} onStatusChange={onOrderStatusChange} disabled={isSaving} />
+        <OrdersPanel orders={trip.orders ?? []} onStatusChange={onOrderStatusChange} onPaidChange={onOrderPaymentChange} disabled={isSaving} />
       </div>
 
       {trip.unscheduledItemIds.length > 0 ? (

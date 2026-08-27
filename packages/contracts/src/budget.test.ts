@@ -24,7 +24,7 @@ describe("budget contract", () => {
   it("requires monetary amounts, a category, and a persisted status", () => {
     expect(BudgetItemSchema.parse(trip.orders[0])).toMatchObject({ status: "partial", currency: "CNY" });
     expect(() => BudgetItemSchema.parse({ ...trip.orders[0], paid: -1 })).toThrow();
-    expect(() => BudgetItemSchema.parse({ ...trip.orders[0], status: "paid", paid: 1 })).toThrow("已支付金额");
+    expect(BudgetItemSchema.parse({ ...trip.orders[0], status: "paid", paid: 1 })).toMatchObject({ paid: 1, status: "paid" });
     expect(() => BudgetItemSchema.parse({ ...trip.orders[0], status: "partial", paid: 0 })).toThrow("部分支付");
   });
 

@@ -8,6 +8,7 @@ import {
   reconcileDays,
   getDateRangeOrderWarning,
   transitionOrderStatus,
+  applyOrderPayment,
   type OrderStatus,
   type TravelDay,
   type Trip,
@@ -120,12 +121,14 @@ function TripRoutes({ createDayId = () => "day-ui", routeService }: Pick<AppProp
   }
 
   function changeDateRange(startDate: string, endDate: string, confirmed: boolean, reviewedOrderIds?: string[]) {
-    const affectedOrders = getDateRangeOrderWarning(trip, startDate, endDate);
-    if (!confirmed && affectedOrders.length > 0) return Promise.resolve({ affectedOrders });
     let updatedWarning: ReturnType<typeof getDateRangeOrderWarning> | undefined;
     return mutateTrip((current) => {
       const currentWarning = getDateRangeOrderWarning(current, startDate, endDate);
-      if (confirmed && (!reviewedOrderIds || currentWarning.length !== reviewedOrderIds.length || currentWarning.some((order) => !reviewedOrderIds.includes(order.id)))) {
+      if (!confirmed && currentWarning.length > 0) {
+        updatedWarning = currentWarning;
+        return undefined;
+      }
+      if (confirmed && currentWarning.some((order) => !reviewedOrderIds?.includes(order.id))) {
         updatedWarning = currentWarning;
         return undefined;
       }
@@ -154,6 +157,14 @@ function TripRoutes({ createDayId = () => "day-ui", routeService }: Pick<AppProp
     });
   }
 
+  function changeOrderPayment(orderId: string, paid: number) {
+    return mutateTrip((current) => {
+      const target = (current.orders ?? []).find((order) => order.id === orderId);
+      if (!target) throw new Error("订单不存在，无法更新付款金额");
+      return { ...current, orders: current.orders.map((order) => order.id === orderId ? applyOrderPayment(order, paid) : order) };
+    });
+  }
+
   return (
     <div className="app-shell">
       <div className="sync-bar" role="status">{syncState}</div>
@@ -176,6 +187,7 @@ function TripRoutes({ createDayId = () => "day-ui", routeService }: Pick<AppProp
               onOpenHotels={() => navigate("/hotels")}
               onChangeDateRange={changeDateRange}
               onOrderStatusChange={changeOrderStatus}
+              onOrderPaymentChange={changeOrderPayment}
             />
           }
         />

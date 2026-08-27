@@ -17,7 +17,7 @@ export const BudgetItemSchema = z.object({
 }).superRefine((item, context) => {
   if (item.status === "unpaid" && item.paid !== 0) context.addIssue({ code: "custom", message: "未支付订单的已支付金额必须为 0", path: ["paid"] });
   if (item.status === "partial" && (item.paid <= 0 || item.paid >= item.estimated)) context.addIssue({ code: "custom", message: "部分支付的已支付金额必须大于 0 且小于预计金额", path: ["paid"] });
-  if (item.status === "paid" && item.paid !== item.estimated) context.addIssue({ code: "custom", message: "已支付订单的已支付金额必须等于预计金额", path: ["paid"] });
+  if (item.status === "paid" && item.paid <= 0) context.addIssue({ code: "custom", message: "已支付订单必须录入实际已付金额", path: ["paid"] });
 });
 
 export type BudgetCategory = z.infer<typeof BudgetCategorySchema>;
@@ -35,6 +35,12 @@ export function transitionOrderStatus(order: BudgetItem, status: OrderStatus): B
     throw new Error("部分支付请先录入介于 0 与预计金额之间的已付金额");
   }
   return { ...order, status };
+}
+
+export function applyOrderPayment(order: BudgetItem, paid: number): BudgetItem {
+  if (!Number.isInteger(paid) || paid < 0) throw new Error("已付金额必须为非负整数");
+  const status: OrderStatus = paid === 0 ? "unpaid" : paid < order.estimated ? "partial" : "paid";
+  return { ...order, paid, status };
 }
 
 function addToTotals(totals: CurrencyTotals, item: BudgetItem) {
