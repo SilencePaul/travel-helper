@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const { createAuthHandler } = require("./index.js");
+const { createMemoryAuthStore } = require("./lib/authStore.js");
 
 function responseBody(response) {
   return JSON.parse(response.body);
@@ -125,4 +126,32 @@ test("OAuth state is single-use and expires after ten minutes", async () => {
   now += 10 * 60 * 1000 + 1;
   const expired = await makeRequest(handler, "GET", `/api/auth/callback?code=x&state=${secondState}`, undefined, { cookie: secondStart.headers["set-cookie"].split(";")[0] });
   assert.equal(expired.statusCode, 400);
+});
+
+test("state and session records are shared across service instances and expire", async () => {
+  let now = 1_000;
+  const authStore = createMemoryAuthStore({ now: () => now, randomBytes: () => Buffer.alloc(32, 9) });
+  const memberStore = require("./lib/members").createMemoryMemberStore({ bootstrapCode: "code" });
+  const env = { FEISHU_APP_ID: "cli", FEISHU_APP_SECRET: "secret", FEISHU_REDIRECT_URI: "https://auth/callback", PUBLIC_APP_URL: "https://trip", ADMIN_BOOTSTRAP_CODE: "code", AUTH_SESSION_SECRET: "secret", VITE_CLOUDBASE_ENV_ID: "env" };
+  const fetchImpl = async (url) => String(url).includes("tenant_access_token")
+    ? new Response(JSON.stringify({ code: 0, tenant_access_token: "tenant" }))
+    : String(url).includes("access_token")
+      ? new Response(JSON.stringify({ code: 0, data: { access_token: "user-token" } }))
+      : new Response(JSON.stringify({ code: 0, data: { open_id: "ou-shared", name: "shared" } }));
+  const firstInstance = createAuthHandler({ env, fetchImpl, authStore, memberStore });
+  const secondInstance = createAuthHandler({ env, fetchImpl, authStore, memberStore });
+  const start = await makeRequest(firstInstance, "GET", "/api/auth/start");
+  const state = new URL(start.headers.location).searchParams.get("state");
+  const stateCookie = start.headers["set-cookie"].split(";")[0];
+  const callback = await makeRequest(secondInstance, "GET", "/api/auth/callback?code=x&state=" + state, undefined, { cookie: stateCookie });
+  assert.equal(callback.statusCode, 302);
+  const sessionCookie = callback.headers["set-cookie"].split(";")[0];
+  assert.match(sessionCookie, /^auth_session=[A-Za-z0-9_-]+$/);
+  const ticket = await makeRequest(firstInstance, "POST", "/api/auth/ticket", undefined, { cookie: sessionCookie });
+  assert.equal(ticket.statusCode, 403);
+  const replay = await makeRequest(firstInstance, "GET", "/api/auth/callback?code=x&state=" + state, undefined, { cookie: stateCookie });
+  assert.equal(replay.statusCode, 400);
+  now += 24 * 60 * 60 * 1000 + 1;
+  const expired = await makeRequest(secondInstance, "POST", "/api/auth/ticket", undefined, { cookie: sessionCookie });
+  assert.equal(expired.statusCode, 401);
 });
