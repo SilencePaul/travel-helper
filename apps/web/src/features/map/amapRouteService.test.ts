@@ -241,6 +241,49 @@ describe("createAmapRouteService", () => {
     await expect(second).resolves.toEqual(expect.objectContaining({ segments: [expect.objectContaining({ fromPlaceId: centralPier.id, toPlaceId: peak.id, distanceMeters: 712 })], failures: [] }));
   });
 
+  it("serializes provider calls across route service instances without mixing their results", async () => {
+    const callbacks: Array<(status: string, result: unknown) => void> = [];
+    let activeSearches = 0;
+    let highestConcurrency = 0;
+    const search = vi.fn((_origin, _destination, callback) => {
+      activeSearches += 1;
+      highestConcurrency = Math.max(highestConcurrency, activeSearches);
+      callbacks.push((status, response) => {
+        activeSearches -= 1;
+        callback(status, response);
+      });
+    });
+    class Walking { constructor(_options?: unknown) {} search = search; }
+    const resolve = (id: string) => id === peak.id ? peak : centralPier;
+    const firstService = createAmapRouteService(async () => ({ Walking }), resolve);
+    const secondService = createAmapRouteService(async () => ({ Walking }), resolve);
+
+    const first = firstService.getSegments({ dayId: "first", city: "香港", placeIds: [peak.id, centralPier.id], modeByLeg: ["walking"] });
+    const second = secondService.getSegments({ dayId: "second", city: "香港", placeIds: [centralPier.id, peak.id], modeByLeg: ["walking"] });
+    await Promise.resolve();
+    expect(search).toHaveBeenCalledTimes(1);
+    expect(highestConcurrency).toBe(1);
+    callbacks[0]!("complete", { routes: [{ distance: 716, time: 600, steps: [{ path: [[peak.lng, peak.lat], [centralPier.lng, centralPier.lat]] }] }] });
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(search).toHaveBeenCalledTimes(2);
+    callbacks[1]!("complete", { routes: [{ distance: 712, time: 540, steps: [{ path: [[centralPier.lng, centralPier.lat], [peak.lng, peak.lat]] }] }] });
+
+    await expect(first).resolves.toEqual(expect.objectContaining({ segments: [expect.objectContaining({ distanceMeters: 716 })] }));
+    await expect(second).resolves.toEqual(expect.objectContaining({ segments: [expect.objectContaining({ distanceMeters: 712 })] }));
+    expect(highestConcurrency).toBe(1);
+  });
+
+  it("keeps a provider-confirmed same-origin route with zero metrics when it has valid geometry", async () => {
+    const search = vi.fn((_origin, _destination, callback) => callback("complete", {
+      routes: [{ distance: 0, time: 0, steps: [{ path: [[peak.lng, peak.lat], [peak.lng + 0.00001, peak.lat + 0.00001]] }] }],
+    }));
+    class Walking { constructor(_options?: unknown) {} search = search; }
+    const service = createAmapRouteService(async () => ({ Walking }), (id) => id === peak.id ? peak : centralPier);
+
+    await expect(service.getSegments({ dayId: "same-origin", city: "香港", placeIds: [peak.id, peak.id], modeByLeg: ["walking"] }))
+      .resolves.toEqual(expect.objectContaining({ segments: [expect.objectContaining({ distanceMeters: 0, durationMinutes: 0 })], failures: [] }));
+  });
+
   it.each([
     ["empty plan", {}],
     ["non-numeric distance", { distance: "not-a-number", time: 600, steps: [{ path: [[peak.lng, peak.lat], [centralPier.lng, centralPier.lat]] }] }],

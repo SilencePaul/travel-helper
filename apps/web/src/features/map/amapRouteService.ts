@@ -7,6 +7,44 @@ type AmapLoader = () => Promise<AmapRouteApi>;
 type PlaceResolver = (placeId: string) => TimelinePlace | undefined;
 type RecordValue = Record<string, unknown>;
 
+let providerRunning = false;
+const providerTasks: Array<() => void> = [];
+
+function runNextProviderTask() {
+  if (providerRunning) return;
+  const task = providerTasks.shift();
+  if (!task) return;
+  providerRunning = true;
+  task();
+}
+
+function enqueueProviderWork<Result>(work: () => Promise<Result>) {
+  return new Promise<Result>((resolve, reject) => {
+    providerTasks.push(() => {
+      let pending: Promise<Result>;
+      try { pending = work(); } catch (error) {
+        providerRunning = false;
+        runNextProviderTask();
+        reject(error);
+        return;
+      }
+      void pending.then(
+        (result) => {
+          providerRunning = false;
+          runNextProviderTask();
+          resolve(result);
+        },
+        (error) => {
+          providerRunning = false;
+          runNextProviderTask();
+          reject(error);
+        },
+      );
+    });
+    runNextProviderTask();
+  });
+}
+
 function record(value: unknown): RecordValue | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as RecordValue : undefined;
 }
@@ -73,7 +111,7 @@ function firstRoute(result: unknown, mode: TravelMode) {
   const distanceMeters = numeric(first.distance);
   const durationSeconds = numeric(first.time ?? first.duration);
   const path = mode === "transit" ? transitPlanPath(first) : routeStepsPath(first);
-  if (!distanceMeters || !durationSeconds || path.length < 2) return undefined;
+  if (distanceMeters === undefined || durationSeconds === undefined || path.length < 2) return undefined;
   return {
     distanceMeters,
     durationMinutes: Math.ceil(durationSeconds / 60),
@@ -129,12 +167,6 @@ async function getTransitSegmentWithRetry(AMap: AmapRouteApi, from: TimelinePlac
 }
 
 export function createAmapRouteService(loadAmap: AmapLoader, resolvePlace: PlaceResolver, { timeoutMs = 10_000 }: { timeoutMs?: number } = {}): RouteService {
-  let providerQueue: Promise<void> | undefined;
-  const enqueueProviderWork = <Result>(work: () => Promise<Result>) => {
-    const next = providerQueue ? providerQueue.then(work, work) : work();
-    providerQueue = next.then(() => undefined, () => undefined);
-    return next;
-  };
   return {
     getSegments({ city, placeIds, modeByLeg }) {
       return enqueueProviderWork(async () => {
