@@ -28,4 +28,15 @@ const result = await validatePoiCatalog({ pois: [poi], key: undefined, print: (l
 assert.equal(result.exitCode, 1);
 assert.deepEqual(lines, ["poi | peak | FAIL | AMAP_WEB_SERVICE_KEY_MISSING"]);
 assert.doesNotMatch(lines.join("\n"), /test-only-key/i);
+
+let inFlight = 0;
+let maxInFlight = 0;
+await validatePoiCatalog({ pois: [poi, { ...poi, id: "peak-2" }], key: "test-only-key", print: () => undefined, fetchImpl: async () => {
+  inFlight += 1;
+  maxInFlight = Math.max(maxInFlight, inFlight);
+  await new Promise((resolve) => setTimeout(resolve, 1));
+  inFlight -= 1;
+  return { ok: true, json: async () => ({ status: "1", pois: [{ name: "太平山顶", location: "114.1,22.2" }] }) };
+} });
+assert.equal(maxInFlight, 1);
 console.log("amap poi validator: PASS");

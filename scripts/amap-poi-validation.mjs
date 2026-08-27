@@ -26,7 +26,11 @@ export async function validatePoi(poi, key, fetchImpl = fetch, attempts = 2) {
 }
 
 export async function validatePoiCatalog({ pois, key, fetchImpl = fetch, print = console.log }) {
-  const results = await Promise.all(pois.map((poi) => validatePoi(poi, key, fetchImpl)));
+  const results = [];
+  for (const poi of pois) {
+    if (results.length) await new Promise((resolve) => setTimeout(resolve, 250));
+    results.push(await validatePoi(poi, key, fetchImpl));
+  }
   for (const result of results) print(`poi | ${result.id} | ${result.ok ? "PASS" : "FAIL"} | ${safeReasons.has(result.reason) || result.reason === "verified" ? result.reason : "UNRESOLVED_POI"}`);
   return { exitCode: results.some((result) => !result.ok) ? 1 : 0 };
 }
