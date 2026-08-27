@@ -22,19 +22,26 @@ function memberForIdentity(identity, role = "pending", now = new Date()) {
 function membershipIndexUnavailable() {
   const error = new Error("MEMBERSHIP_INDEX_UNAVAILABLE"); error.code = error.message; return error;
 }
+function readRecord(result) { return Array.isArray(result?.data) ? result.data[0] : result?.data; }
 
-async function readAndValidateAdminIndex(transaction, transactionMembers) {
-  const indexResult = await transaction.collection("membership_index").doc("admins").get();
-  const index = indexResult?.data?.[0] || indexResult?.data;
-  if (!index || typeof index !== "object" || Array.isArray(index) || !Array.isArray(index.adminUids) || index.adminUids.some((item) => typeof item !== "string") || new Set(index.adminUids).size !== index.adminUids.length) {
+async function readAndValidateMembershipIndexes(transaction, transactionMembers) {
+  const indexCollection = transaction.collection("membership_index");
+  const adminResult = await indexCollection.doc("admins").get();
+  const memberResult = await indexCollection.doc("members").get();
+  const admins = readRecord(adminResult);
+  const members = readRecord(memberResult);
+  if (!admins || typeof admins !== "object" || Array.isArray(admins) || !Array.isArray(admins.adminUids) || admins.adminUids.some((item) => typeof item !== "string") || new Set(admins.adminUids).size !== admins.adminUids.length || !members || typeof members !== "object" || Array.isArray(members) || !Array.isArray(members.memberUids) || members.memberUids.some((item) => typeof item !== "string") || new Set(members.memberUids).size !== members.memberUids.length) {
     throw membershipIndexUnavailable();
   }
-  for (const adminUid of index.adminUids) {
-    const result = await transactionMembers.doc(adminUid).get();
+  const actualAdmins = [];
+  for (const memberUid of members.memberUids) {
+    const result = await transactionMembers.doc(memberUid).get();
     const member = result?.data?.[0] || result?.data;
-    if (!member || member.role !== "admin") throw membershipIndexUnavailable();
+    if (!member) throw membershipIndexUnavailable();
+    if (member.role === "admin") actualAdmins.push(memberUid);
   }
-  return index;
+  if (actualAdmins.length !== admins.adminUids.length || actualAdmins.some((uid) => !admins.adminUids.includes(uid))) throw membershipIndexUnavailable();
+  return { admins, members };
 }
 
 function createMemoryMemberStore({ now = () => new Date(), bootstrapCode } = {}) {
@@ -122,19 +129,26 @@ function createCloudBaseMemberStore({ db, now = () => new Date(), bootstrapCode 
     },
     async findByUid(uid) {
       const result = await members.doc(uid).get();
-      return result.data?.[0] || result.data || undefined;
+      return readRecord(result);
     },
     async findByOpenId(openId) { return this.findByUid(uidForOpenId(openId)); },
     async upsertPending(identity) {
       const existing = await this.findByOpenId(identity.openId);
       if (existing) {
         const next = { ...existing, tripIds: existing.tripIds === undefined ? [] : existing.tripIds, sessionIds: existing.sessionIds === undefined ? [] : existing.sessionIds };
-        if (next.tripIds === existing.tripIds && next.sessionIds === existing.sessionIds) return existing;
-        await members.doc(existing.uid).set(next);
+        if (next.tripIds !== existing.tripIds || next.sessionIds !== existing.sessionIds) await members.doc(existing.uid).set(next);
+        const indexResult = await membershipIndex.doc("members").get();
+        const index = readRecord(indexResult) || { memberUids: [] };
+        if (!Array.isArray(index.memberUids) || index.memberUids.some((item) => typeof item !== "string") || new Set(index.memberUids).size !== index.memberUids.length) throw membershipIndexUnavailable();
+        await membershipIndex.doc("members").set({ ...index, memberUids: [...new Set([...index.memberUids, existing.uid])] });
         return next;
       }
       const member = memberForIdentity(identity, "pending", now());
       await members.doc(member.uid).set(member);
+      const indexResult = await membershipIndex.doc("members").get();
+      const index = readRecord(indexResult) || { memberUids: [] };
+      if (!Array.isArray(index.memberUids) || index.memberUids.some((item) => typeof item !== "string") || new Set(index.memberUids).size !== index.memberUids.length) throw membershipIndexUnavailable();
+      await membershipIndex.doc("members").set({ ...index, memberUids: [...new Set([...index.memberUids, member.uid])] });
       return member;
     },
     async consumeBootstrap({ identity, uid, member, code }) {
@@ -161,14 +175,16 @@ function createCloudBaseMemberStore({ db, now = () => new Date(), bootstrapCode 
         if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
           const error = new Error("INVALID_BOOTSTRAP_CODE"); error.code = error.message; throw error;
         }
-        const adminIndex = await readAndValidateAdminIndex(transaction, transactionMembers);
+        const indexes = await readAndValidateMembershipIndexes(transaction, transactionMembers);
+        const adminIndex = indexes.admins;
         const adminUids = adminIndex.adminUids;
         if (record.consumed || adminUids.length > 0) {
           const error = new Error("BOOTSTRAP_ALREADY_CONSUMED"); error.code = error.message; throw error;
         }
         const targetUid = uid || uidForOpenId(identity.openId);
+        if (!indexes.members.memberUids.includes(targetUid)) throw membershipIndexUnavailable();
         const result = await transactionMembers.doc(targetUid).get();
-        const existing = result.data?.[0] || result.data || member || memberForIdentity(identity, "pending", now());
+        const existing = readRecord(result) || member || memberForIdentity(identity, "pending", now());
         if (existing.role === "admin") {
           const error = new Error("BOOTSTRAP_ALREADY_CONSUMED"); error.code = error.message; throw error;
         }
@@ -182,11 +198,13 @@ function createCloudBaseMemberStore({ db, now = () => new Date(), bootstrapCode 
     async setRole(uid, role) {
       return db.runTransaction(async (transaction) => {
         const transactionMembers = transaction.collection("members");
-        const index = await readAndValidateAdminIndex(transaction, transactionMembers);
+        const indexes = await readAndValidateMembershipIndexes(transaction, transactionMembers);
+        const index = indexes.admins;
         const currentResult = await transactionMembers.doc(uid).get();
-        const current = currentResult.data?.[0] || currentResult.data || undefined; if (!current) return undefined;
+        const current = readRecord(currentResult); if (!current) return undefined;
         const indexDoc = transaction.collection("membership_index").doc("admins");
         const adminUids = index.adminUids;
+        if (!indexes.members.memberUids.includes(uid)) throw membershipIndexUnavailable();
         if ((current.role === "admin") !== adminUids.includes(uid)) throw membershipIndexUnavailable();
         const nextAdminUids = role === "admin" ? [...new Set([...adminUids, uid])] : adminUids.filter((item) => item !== uid);
         const next = { ...current, role, tripIds: current.tripIds === undefined ? [] : current.tripIds, sessionIds: current.sessionIds === undefined ? [] : current.sessionIds, version: (current.version || 0) + 1, ...(role === "member" || role === "admin" ? { approvedAt: now().toISOString() } : {}) };
