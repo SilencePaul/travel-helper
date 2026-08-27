@@ -146,8 +146,7 @@ test("warns about removed hotel and ticket orders before a date reduction, then 
   render(<App repository={repository} tripId={tripWithOrders.id} />);
 
   await screen.findByRole("button", { name: "更新日期" });
-  await user.clear(screen.getByLabelText("结束日期"));
-  await user.type(screen.getByLabelText("结束日期"), "2026-10-04");
+  fireEvent.change(screen.getByLabelText("结束日期"), { target: { value: "2026-10-04" } });
   await user.click(screen.getByRole("button", { name: "更新日期" }));
 
   expect(await screen.findByRole("dialog", { name: "这些订单关联的旅行日将被移除" })).toBeVisible();

@@ -40,6 +40,11 @@ describe("budget contract", () => {
     expect(totals.byDay["__proto__"]?.["__proto__"]).toEqual({ estimated: 100, paid: 0 });
   });
 
+  it("never invents an estimated payment when changing a user-entered payment status", async () => {
+    const { transitionOrderStatus } = await import("./budget");
+    expect(transitionOrderStatus({ id: "actual", name: "实际付款", category: "hotel", estimated: 10000, paid: 8000, currency: "CNY", status: "partial" }, "paid")).toMatchObject({ status: "paid", paid: 8000 });
+  });
+
   it("derives trip, category, and day totals without mixing currencies", () => {
     expect(budgetTotals(trip)).toEqual({
       trip: {

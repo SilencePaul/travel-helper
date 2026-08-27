@@ -29,8 +29,14 @@ export type CurrencyTotals = Record<string, { estimated: number; paid: number }>
 function safeTotals(): CurrencyTotals { return Object.create(null) as CurrencyTotals; }
 
 export function transitionOrderStatus(order: BudgetItem, status: OrderStatus): BudgetItem {
-  if (status === "unpaid") return { ...order, status, paid: 0 };
-  if (status === "paid") return { ...order, status, paid: order.estimated };
+  if (status === "unpaid") {
+    if (order.paid !== 0) throw new Error("请先将已付金额改为 0，再标记为未支付");
+    return { ...order, status };
+  }
+  if (status === "paid") {
+    if (order.paid <= 0) throw new Error("请先录入实际已付金额，再标记为已支付");
+    return { ...order, status };
+  }
   if (order.paid <= 0 || order.paid >= order.estimated) {
     throw new Error("部分支付请先录入介于 0 与预计金额之间的已付金额");
   }
