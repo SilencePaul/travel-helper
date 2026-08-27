@@ -1,14 +1,20 @@
 import { useCallback, useEffect, useState } from "react";
+import type { Member } from "@travel/contracts";
 import { useNavigate } from "react-router-dom";
-import { authServiceUrl, signInWithCustomTicket } from "../../infrastructure/authSession";
+import { recoverAuthenticatedMember } from "../../infrastructure/authSession";
 
-export function PendingApprovalPage({ onAuthenticated }: { onAuthenticated?: () => void } = {}) {
+export function PendingApprovalPage({ onAuthenticated }: { onAuthenticated?: (member: Member) => void } = {}) {
   const navigate = useNavigate();
   const [message, setMessage] = useState("正在等待管理员批准…");
   const refresh = useCallback(async () => {
     try {
-      await signInWithCustomTicket(authServiceUrl());
-      onAuthenticated?.();
+      const member = await recoverAuthenticatedMember();
+      if (member.role === "pending") {
+        setMessage("尚未批准。你可以稍后手动刷新。");
+        return;
+      }
+      if (member.role !== "admin" && member.role !== "member") throw new Error("NOT_AUTHORIZED");
+      onAuthenticated?.(member);
       navigate("/", { replace: true });
     } catch {
       setMessage("尚未批准。你可以稍后手动刷新。");

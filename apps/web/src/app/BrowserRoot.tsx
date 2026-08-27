@@ -4,29 +4,18 @@ import { BrowserRouter, Route, Routes, useLocation, useNavigate } from "react-ro
 import seed from "../../../../content/trip.seed.json";
 import { TripApp } from "../App";
 import { LocalTripRepository } from "../infrastructure/localTripRepository";
-import { getCloudbaseAuth } from "../infrastructure/cloudbaseClient";
 import type { RouteSegment, RouteService } from "../features/map/types";
 import { LoginPage } from "../features/auth/LoginPage";
 import { AuthCallbackPage } from "../features/auth/AuthCallbackPage";
 import { BootstrapPage } from "../features/auth/BootstrapPage";
 import { PendingApprovalPage } from "../features/auth/PendingApprovalPage";
-import { getCurrentProfile, logout } from "../infrastructure/authSession";
+import { logout, recoverAuthenticatedMember } from "../infrastructure/authSession";
 
 type ProductionAuthState =
   | { status: "checking" }
   | { status: "login" }
   | { status: "pending" }
   | { status: "authenticated"; member: Member };
-
-function memberProfileFromUser(user: unknown): Member | undefined {
-  if (!user || typeof user !== "object") return undefined;
-  const value = user as { uid?: unknown; displayName?: unknown; role?: unknown; profile?: { role?: unknown }; customClaims?: { role?: unknown }; customUser?: { role?: unknown } };
-  const role = value.role ?? value.profile?.role ?? value.customClaims?.role ?? value.customUser?.role;
-  if (role !== "admin" && role !== "member" && role !== "pending" && role !== "removed") return undefined;
-  const uid = typeof value.uid === "string" && value.uid.length >= 4 ? value.uid : "authenticated-user";
-  const displayName = typeof value.displayName === "string" && value.displayName.trim() ? value.displayName : "已登录用户";
-  return { uid, displayName, role, version: 0, createdAt: new Date(0).toISOString() };
-}
 
 function createBrowserTestRepository(): TripRepository | undefined {
   if (!import.meta.env.DEV) return undefined;
@@ -139,19 +128,17 @@ function DevBrowserRoot() {
 
 export function ProductionAuthGate() {
   const [authState, setAuthState] = useState<ProductionAuthState>({ status: "checking" });
+  const acceptMember = useCallback((member: Member) => {
+    setAuthState(member.role === "pending" ? { status: "pending" } : member.role === "admin" || member.role === "member" ? { status: "authenticated", member } : { status: "login" });
+  }, []);
   const refreshAuth = useCallback(async () => {
     try {
-      const user = await getCloudbaseAuth().getCurrentUser();
-      if (!user) {
-        setAuthState({ status: "login" });
-        return;
-      }
-      const member = memberProfileFromUser(user) ?? await getCurrentProfile();
-      setAuthState(member.role === "pending" ? { status: "pending" } : member.role === "admin" || member.role === "member" ? { status: "authenticated", member } : { status: "login" });
+      const member = await recoverAuthenticatedMember();
+      acceptMember(member);
     } catch {
       setAuthState({ status: "login" });
     }
-  }, []);
+  }, [acceptMember]);
   /* oxlint-disable react/set-state-in-effect -- initial auth state synchronizes with the external auth session */
   useEffect(() => {
     void refreshAuth();
@@ -160,12 +147,12 @@ export function ProductionAuthGate() {
 
   return (
     <BrowserRouter>
-      <ProductionRoutes authState={authState} setAuthState={setAuthState} refreshAuth={refreshAuth} />
+      <ProductionRoutes authState={authState} setAuthState={setAuthState} acceptMember={acceptMember} />
     </BrowserRouter>
   );
 }
 
-function ProductionRoutes({ authState, setAuthState, refreshAuth }: { authState: ProductionAuthState; setAuthState: (state: ProductionAuthState) => void; refreshAuth: () => Promise<void> }) {
+function ProductionRoutes({ authState, setAuthState, acceptMember }: { authState: ProductionAuthState; setAuthState: (state: ProductionAuthState) => void; acceptMember: (member: Member) => void }) {
   const navigate = useNavigate();
   const location = useLocation();
   const handleUnauthorized = useCallback((error: unknown) => {
@@ -177,7 +164,7 @@ function ProductionRoutes({ authState, setAuthState, refreshAuth }: { authState:
   const home = authState.status === "checking"
     ? <p role="status">正在验证登录状态</p>
     : authState.status === "pending"
-      ? <PendingApprovalPage onAuthenticated={() => void refreshAuth()} />
+      ? <PendingApprovalPage onAuthenticated={acceptMember} />
       : authState.status === "authenticated"
         ? <TripApp member={authState.member} onUnauthorized={handleUnauthorized} />
         : <LoginPage />;
@@ -185,10 +172,10 @@ function ProductionRoutes({ authState, setAuthState, refreshAuth }: { authState:
 
   return (
     <Routes>
-      <Route path="/" element={isHostingCallback ? <AuthCallbackPage onAuthenticated={() => void refreshAuth()} /> : home} />
-      <Route path="/auth/callback" element={<AuthCallbackPage onAuthenticated={() => void refreshAuth()} />} />
-      <Route path="/auth/bootstrap" element={<BootstrapPage onAuthenticated={() => void refreshAuth()} />} />
-      <Route path="/auth/pending" element={<PendingApprovalPage onAuthenticated={() => void refreshAuth()} />} />
+      <Route path="/" element={isHostingCallback ? <AuthCallbackPage onAuthenticated={acceptMember} /> : home} />
+      <Route path="/auth/callback" element={<AuthCallbackPage onAuthenticated={acceptMember} />} />
+      <Route path="/auth/bootstrap" element={<BootstrapPage onAuthenticated={acceptMember} />} />
+      <Route path="/auth/pending" element={<PendingApprovalPage onAuthenticated={acceptMember} />} />
       <Route path="*" element={home} />
     </Routes>
   );
