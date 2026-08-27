@@ -172,3 +172,26 @@ test("CloudBase mode fails closed when CloudBase initialization is unavailable",
     fetchImpl: async () => new Response("{}"),
   }), (error) => error && error.code === "AUTH_SERVICE_UNAVAILABLE");
 });
+
+test("a callback without a code does not consume a valid OAuth state", async () => {
+  const handler = createAuthHandler({
+    env: { FEISHU_APP_ID: "cli", FEISHU_APP_SECRET: "secret", FEISHU_REDIRECT_URI: "https://auth/callback", PUBLIC_APP_URL: "https://trip", ADMIN_BOOTSTRAP_CODE: "code", AUTH_SESSION_SECRET: "secret", VITE_CLOUDBASE_ENV_ID: "env" },
+    fetchImpl: async (url) => String(url).includes("tenant_access_token")
+      ? new Response(JSON.stringify({ code: 0, tenant_access_token: "tenant" }))
+      : String(url).includes("access_token")
+        ? new Response(JSON.stringify({ code: 0, data: { access_token: "user-token" } }))
+        : new Response(JSON.stringify({ code: 0, data: { open_id: "ou-valid", name: "valid" } })),
+  });
+  const start = await makeRequest(handler, "GET", "/api/auth/start");
+  const state = new URL(start.headers.location).searchParams.get("state");
+  const cookie = start.headers["set-cookie"].split(";")[0];
+  const malformed = await makeRequest(handler, "GET", "/api/auth/callback?state=" + state, undefined, { cookie });
+  assert.equal(malformed.statusCode, 400);
+  const valid = await makeRequest(handler, "GET", "/api/auth/callback?code=valid&state=" + state, undefined, { cookie });
+  assert.equal(valid.statusCode, 302);
+});
+
+test("CloudBase member store refuses a database without transactions", () => {
+  const { createCloudBaseMemberStore } = require("./lib/members");
+  assert.throws(() => createCloudBaseMemberStore({ db: { collection: () => ({ doc: () => ({}) }) } }), (error) => error && error.code === "CLOUDBASE_TRANSACTION_UNAVAILABLE");
+});

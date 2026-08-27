@@ -69,12 +69,19 @@ function createMemoryMemberStore({ now = () => new Date(), bootstrapCode } = {})
 }
 
 function createCloudBaseMemberStore({ db, now = () => new Date(), bootstrapCode } = {}) {
-  if (!db) throw new Error("CLOUDBASE_DATABASE_UNAVAILABLE");
+  if (!db || typeof db.collection !== "function" || typeof db.runTransaction !== "function") {
+    const error = new Error("CLOUDBASE_TRANSACTION_UNAVAILABLE"); error.code = error.message; throw error;
+  }
   const members = db.collection("members");
-  const memory = createMemoryMemberStore({ now, bootstrapCode });
+  const bootstrap = db.collection("auth_bootstrap");
+  const memberDoc = members?.doc?.("__capability_check__");
+  const bootstrapDoc = bootstrap?.doc?.("__capability_check__");
+  const memberQuery = members?.where?.({ role: "admin" });
+  if (!members || typeof members.doc !== "function" || typeof members.where !== "function" || !memberQuery || typeof memberQuery.limit !== "function" || !memberDoc || typeof memberDoc.get !== "function" || typeof memberDoc.set !== "function" || !bootstrap || typeof bootstrap.doc !== "function" || !bootstrapDoc || typeof bootstrapDoc.get !== "function" || typeof bootstrapDoc.set !== "function") {
+    const error = new Error("CLOUDBASE_TRANSACTION_UNAVAILABLE"); error.code = error.message; throw error;
+  }
   return {
     async hasAdmin() {
-      if (typeof members.where !== "function") return false;
       const result = await members.where({ role: "admin" }).limit(1).get();
       return (result.data || []).length > 0;
     },
@@ -91,9 +98,19 @@ function createCloudBaseMemberStore({ db, now = () => new Date(), bootstrapCode 
       return member;
     },
     async consumeBootstrap({ identity, uid, member, code }) {
-      if (typeof db.runTransaction !== "function") return memory.consumeBootstrap({ identity, uid, member, code });
       return db.runTransaction(async (transaction) => {
-        const bootstrapResult = await transaction.collection("auth_bootstrap").doc("singleton").get();
+        if (!transaction || typeof transaction.collection !== "function") {
+          const error = new Error("CLOUDBASE_TRANSACTION_UNAVAILABLE"); error.code = error.message; throw error;
+        }
+        const transactionMembers = transaction.collection("members");
+        const transactionBootstrap = transaction.collection("auth_bootstrap");
+        const transactionMemberQuery = transactionMembers?.where?.({ role: "admin" });
+        const transactionMemberDoc = transactionMembers?.doc?.("__capability_check__");
+        const transactionBootstrapDoc = transactionBootstrap?.doc?.("__capability_check__");
+        if (!transactionMembers || typeof transactionMembers.doc !== "function" || typeof transactionMembers.where !== "function" || !transactionMemberQuery || typeof transactionMemberQuery.limit !== "function" || !transactionMemberDoc || typeof transactionMemberDoc.get !== "function" || typeof transactionMemberDoc.set !== "function" || !transactionBootstrap || typeof transactionBootstrap.doc !== "function" || !transactionBootstrapDoc || typeof transactionBootstrapDoc.get !== "function" || typeof transactionBootstrapDoc.set !== "function") {
+          const error = new Error("CLOUDBASE_TRANSACTION_UNAVAILABLE"); error.code = error.message; throw error;
+        }
+        const bootstrapResult = await transactionBootstrap.doc("singleton").get();
         const record = bootstrapResult.data?.[0] || bootstrapResult.data || { codeHash: sha256(bootstrapCode || ""), consumed: false };
         if (record.consumed) {
           const error = new Error("BOOTSTRAP_ALREADY_CONSUMED"); error.code = error.message; throw error;
@@ -104,17 +121,15 @@ function createCloudBaseMemberStore({ db, now = () => new Date(), bootstrapCode 
           const error = new Error("INVALID_BOOTSTRAP_CODE"); error.code = error.message; throw error;
         }
         const targetUid = uid || uidForOpenId(identity.openId);
-        if (typeof transaction.collection("members").where === "function") {
-          const admins = await transaction.collection("members").where({ role: "admin" }).limit(1).get();
-          if ((admins.data || []).length > 0) {
-            const error = new Error("BOOTSTRAP_ALREADY_CONSUMED"); error.code = error.message; throw error;
-          }
+        const admins = await transactionMembers.where({ role: "admin" }).limit(1).get();
+        if ((admins.data || []).length > 0) {
+          const error = new Error("BOOTSTRAP_ALREADY_CONSUMED"); error.code = error.message; throw error;
         }
-        const result = await transaction.collection("members").doc(targetUid).get();
+        const result = await transactionMembers.doc(targetUid).get();
         const existing = result.data?.[0] || result.data || member || memberForIdentity(identity, "pending", now());
         const admin = { ...existing, role: "admin", approvedAt: now().toISOString(), version: (existing.version || 0) + 1 };
-        await transaction.collection("members").doc(targetUid).set(admin);
-        await transaction.collection("auth_bootstrap").doc("singleton").set({ ...record, consumed: true, consumedAt: now().toISOString() });
+        await transactionMembers.doc(targetUid).set(admin);
+        await transactionBootstrap.doc("singleton").set({ ...record, consumed: true, consumedAt: now().toISOString() });
         return admin;
       });
     },
