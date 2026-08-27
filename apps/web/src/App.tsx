@@ -219,12 +219,18 @@ function DayRoute({ trip, onBack, routeService }: { trip: Trip; onBack: (dayId: 
   return <DayPage trip={trip} dayId={dayId} onBack={() => onBack(dayId)} routeService={routeService} />;
 }
 
-export default function App({ repository, createDayId, tripId, routeService }: AppProps) {
+export function TripApp({ repository, createDayId, tripId, routeService }: AppProps) {
   return (
     <TripProvider repository={repository} tripId={tripId}>
-      <BrowserRouter>
-        <TripRoutes createDayId={createDayId} routeService={routeService} />
-      </BrowserRouter>
+      <TripRoutes createDayId={createDayId} routeService={routeService} />
     </TripProvider>
+  );
+}
+
+export default function App(props: AppProps) {
+  return (
+    <BrowserRouter>
+      <TripApp {...props} />
+    </BrowserRouter>
   );
 }

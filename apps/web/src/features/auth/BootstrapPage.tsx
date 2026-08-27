@@ -1,9 +1,9 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { authServiceUrl, bootstrapWithCode } from "../../infrastructure/authSession";
+import { authServiceUrl, bootstrapWithCode, signInWithCustomTicket } from "../../infrastructure/authSession";
 
-export function BootstrapPage() {
+export function BootstrapPage({ onAuthenticated }: { onAuthenticated?: () => void } = {}) {
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const [code, setCode] = useState("");
@@ -14,6 +14,8 @@ export function BootstrapPage() {
     setCode("");
     try {
       await bootstrapWithCode(authServiceUrl(), submittedCode, params.get("state") || "");
+      await signInWithCustomTicket(authServiceUrl());
+      onAuthenticated?.();
       navigate("/", { replace: true });
     } catch {
       setMessage("初始化未完成，请确认口令或稍后重试。");

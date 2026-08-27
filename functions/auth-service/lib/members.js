@@ -27,6 +27,7 @@ function createMemoryMemberStore({ now = () => new Date(), bootstrapCode } = {})
     return result;
   };
   return {
+    async hasAdmin() { return Array.from(members.values()).some((item) => item.role === "admin"); },
     async findByUid(uid) { return members.get(uid); },
     async findByOpenId(openId) { return members.get(uidForOpenId(openId)); },
     async upsertPending(identity) {
@@ -72,6 +73,11 @@ function createCloudBaseMemberStore({ db, now = () => new Date(), bootstrapCode 
   const members = db.collection("members");
   const memory = createMemoryMemberStore({ now, bootstrapCode });
   return {
+    async hasAdmin() {
+      if (typeof members.where !== "function") return false;
+      const result = await members.where({ role: "admin" }).limit(1).get();
+      return (result.data || []).length > 0;
+    },
     async findByUid(uid) {
       const result = await members.doc(uid).get();
       return result.data?.[0] || result.data || undefined;

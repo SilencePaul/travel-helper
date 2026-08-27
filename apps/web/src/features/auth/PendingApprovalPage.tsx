@@ -2,21 +2,25 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { authServiceUrl, signInWithCustomTicket } from "../../infrastructure/authSession";
 
-export function PendingApprovalPage() {
+export function PendingApprovalPage({ onAuthenticated }: { onAuthenticated?: () => void } = {}) {
   const navigate = useNavigate();
   const [message, setMessage] = useState("正在等待管理员批准…");
   const refresh = useCallback(async () => {
     try {
       await signInWithCustomTicket(authServiceUrl());
+      onAuthenticated?.();
       navigate("/", { replace: true });
     } catch {
       setMessage("尚未批准。你可以稍后手动刷新。");
     }
-  }, [navigate]);
+  }, [navigate, onAuthenticated]);
   useEffect(() => {
-    void refresh();
+    const initial = window.setTimeout(() => { void refresh(); }, 0);
     const timer = window.setInterval(() => { void refresh(); }, 15_000);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(timer);
+    };
   }, [refresh]);
   return (
     <main aria-labelledby="pending-title">

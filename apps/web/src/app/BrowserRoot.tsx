@@ -1,9 +1,15 @@
 import type { TripRepository } from "@travel/contracts";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { BrowserRouter, Route, Routes } from "react-router-dom";
 import seed from "../../../../content/trip.seed.json";
-import App from "../App";
+import { TripApp } from "../App";
 import { LocalTripRepository } from "../infrastructure/localTripRepository";
+import { getCloudbaseAuth } from "../infrastructure/cloudbaseClient";
 import type { RouteSegment, RouteService } from "../features/map/types";
+import { LoginPage } from "../features/auth/LoginPage";
+import { AuthCallbackPage } from "../features/auth/AuthCallbackPage";
+import { BootstrapPage } from "../features/auth/BootstrapPage";
+import { PendingApprovalPage } from "../features/auth/PendingApprovalPage";
 
 function createBrowserTestRepository(): TripRepository | undefined {
   if (!import.meta.env.DEV) return undefined;
@@ -102,7 +108,42 @@ function createBrowserTestRouteService(): RouteService | undefined {
 }
 
 export function BrowserRoot() {
+  if (!import.meta.env.DEV || import.meta.env.VITE_DATA_MODE === "cloudbase") {
+    return <ProductionAuthGate />;
+  }
+  return <DevBrowserRoot />;
+}
+
+function DevBrowserRoot() {
   const [repository] = useState(createBrowserTestRepository);
   const [routeService] = useState(createBrowserTestRouteService);
-  return <App repository={repository} routeService={routeService} />;
+  return <TripApp repository={repository} routeService={routeService} />;
+}
+
+export function ProductionAuthGate() {
+  const [authenticated, setAuthenticated] = useState<boolean>();
+  useEffect(() => {
+    let active = true;
+    void getCloudbaseAuth().getCurrentUser()
+      .then((user) => { if (active) setAuthenticated(Boolean(user)); })
+      .catch(() => { if (active) setAuthenticated(false); });
+    return () => { active = false; };
+  }, []);
+
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/auth/callback" element={<AuthCallbackPage onAuthenticated={() => setAuthenticated(true)} />} />
+        <Route path="/auth/bootstrap" element={<BootstrapPage onAuthenticated={() => setAuthenticated(true)} />} />
+        <Route path="/auth/pending" element={<PendingApprovalPage onAuthenticated={() => setAuthenticated(true)} />} />
+        <Route path="*" element={
+          authenticated === undefined
+            ? <p role="status">正在验证登录状态</p>
+            : authenticated
+              ? <TripApp />
+              : <LoginPage />
+        } />
+      </Routes>
+    </BrowserRouter>
+  );
 }

@@ -27,6 +27,19 @@ describe("ClientEnvironmentSchema", () => {
       VITE_AUTH_SERVICE_URL: "https://auth.example.com",
     });
   });
+
+  it("requires HTTPS for a non-local auth service in CloudBase mode", () => {
+    expect(() => ClientEnvironmentSchema.parse({
+      VITE_DATA_MODE: "cloudbase",
+      VITE_CLOUDBASE_ENV_ID: "travel-prod-123",
+      VITE_AUTH_SERVICE_URL: "http://auth.example.com",
+    })).toThrow(/HTTPS/);
+    expect(ClientEnvironmentSchema.parse({
+      VITE_DATA_MODE: "cloudbase",
+      VITE_CLOUDBASE_ENV_ID: "travel-dev-123",
+      VITE_AUTH_SERVICE_URL: "http://localhost:9000",
+    }).VITE_AUTH_SERVICE_URL).toBe("http://localhost:9000");
+  });
 });
 
 describe("ServerEnvironmentSchema", () => {

@@ -16,7 +16,7 @@ function makeRequest(handler, method, path, body, headers = {}) {
   });
 }
 
-test("OAuth callback creates a pending member without issuing a custom ticket", async () => {
+test("OAuth callback redirects the browser to the app auth route without issuing a custom ticket", async () => {
   const requests = [];
   const handler = createAuthHandler({
     env: {
@@ -48,8 +48,13 @@ test("OAuth callback creates a pending member without issuing a custom ticket", 
     cookie: start.headers["set-cookie"].split(";")[0],
   });
 
-  assert.equal(callback.statusCode, 200);
-  assert.deepEqual(responseBody(callback), { status: "pending" });
+  assert.equal(callback.statusCode, 302);
+  const callbackUrl = new URL(callback.headers.location);
+  assert.equal(callbackUrl.origin, "https://trip.example");
+  assert.equal(callbackUrl.pathname, "/auth/callback");
+  assert.equal(callbackUrl.searchParams.get("status"), "bootstrap");
+  assert.equal(callbackUrl.searchParams.get("state"), state);
+  assert.equal(callback.headers["set-cookie"].startsWith("auth_session="), true);
   assert.equal(requests.length, 3);
   const ticket = await makeRequest(handler, "POST", "/api/auth/ticket", undefined, {
     cookie: callback.headers["set-cookie"].split(";")[0],
@@ -110,8 +115,8 @@ test("OAuth state is single-use and expires after ten minutes", async () => {
   const start = await makeRequest(handler, "GET", "/api/auth/start");
   const state = new URL(start.headers.location).searchParams.get("state");
   const cookie = start.headers["set-cookie"].split(";")[0];
-  const first = await makeRequest(handler, "GET", `/api/auth/callback?code=x&state=${state}`, undefined, { cookie });
-  assert.equal(first.statusCode, 200);
+  const first = await makeRequest(handler, "GET", "/api/auth/callback?code=x&state=" + state, undefined, { cookie });
+  assert.equal(first.statusCode, 302);
   const replay = await makeRequest(handler, "GET", `/api/auth/callback?code=x&state=${state}`, undefined, { cookie });
   assert.equal(replay.statusCode, 400);
 

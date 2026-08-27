@@ -21,6 +21,17 @@ export const ClientEnvironmentSchema = z.object({
       path: ["VITE_AUTH_SERVICE_URL"],
     });
   }
+  if (environment.VITE_DATA_MODE === "cloudbase" && environment.VITE_AUTH_SERVICE_URL) {
+    try {
+      const url = new URL(environment.VITE_AUTH_SERVICE_URL);
+      const localHttp = url.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+      if (url.protocol !== "https:" && !localHttp) {
+        context.addIssue({ code: "custom", message: "CloudBase auth-service 必须使用 HTTPS", path: ["VITE_AUTH_SERVICE_URL"] });
+      }
+    } catch {
+      context.addIssue({ code: "custom", message: "auth-service 地址无效", path: ["VITE_AUTH_SERVICE_URL"] });
+    }
+  }
 });
 
 export const ServerEnvironmentSchema = z.object({

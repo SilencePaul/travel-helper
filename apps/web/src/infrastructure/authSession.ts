@@ -8,7 +8,8 @@ export function authServiceUrl(environment: AuthEnvironment = import.meta.env as
   if (!value) throw new Error("缺少独立 auth-service 地址");
   let parsed: URL;
   try { parsed = new URL(value); } catch { throw new Error("auth-service 地址无效"); }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new Error("auth-service 地址无效");
+  const localHttp = parsed.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname);
+  if (parsed.protocol !== "https:" && !localHttp) throw new Error("auth-service 必须使用 HTTPS");
   return parsed.toString().replace(/\/$/, "");
 }
 

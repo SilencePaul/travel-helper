@@ -76,8 +76,13 @@ function createAuthHandler({ env = process.env, fetchImpl, memberStore, cloudbas
         const code = url.searchParams.get("code"); if (!code) return json(400, { error: "MISSING_OAUTH_CODE" }, headers);
         const identity = await feishu.resolveAuthorizationCode(code); const member = await store.upsertPending(identity);
         const session = sessions.issue({ uid: member.uid, oauthState: state });
-        const result = member.role === "pending" ? { status: "pending" } : { status: "approved", role: member.role };
-        return json(200, result, { ...headers, "set-cookie": setCookie("auth_session", session, secure) });
+        const status = member.role === "pending" ? ((await store.hasAdmin?.()) ? "pending" : "bootstrap") : "approved";
+        const appUrl = new URL(env.PUBLIC_APP_URL);
+        appUrl.pathname = "/auth/callback";
+        appUrl.search = "";
+        appUrl.searchParams.set("state", state);
+        appUrl.searchParams.set("status", status);
+        return { statusCode: 302, headers: { ...headers, location: appUrl.toString(), "set-cookie": setCookie("auth_session", session, secure) }, body: "" };
       }
       const sessionToken = cookies(event.headers).auth_session; const session = sessions.verify(sessionToken);
       if (url.pathname === "/api/auth/bootstrap" && method === "POST") {
