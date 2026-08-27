@@ -31,3 +31,14 @@ test("retains a paid-amount draft and reports an inline error when persistence r
   expect(await screen.findByRole("alert")).toHaveTextContent("保存付款金额失败");
   expect(input).toHaveValue(80);
 });
+
+test("does not save a paid-amount draft merely by blurring the field", async () => {
+  const user = userEvent.setup();
+  const onPaidChange = vi.fn();
+  render(<OrdersPanel orders={orders} onStatusChange={() => undefined} onPaidChange={onPaidChange} />);
+  const input = screen.getByLabelText("山顶缆车已付金额");
+  await user.clear(input);
+  await user.type(input, "80");
+  await user.tab();
+  expect(onPaidChange).not.toHaveBeenCalled();
+});
