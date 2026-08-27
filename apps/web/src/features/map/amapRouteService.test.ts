@@ -168,6 +168,21 @@ describe("createAmapRouteService", () => {
     expect(result.failures).toEqual([expect.objectContaining({ fromPlaceId: "central-pier", toPlaceId: "ferry", code: "AMAP_ROUTE_PROVIDER_UNAVAILABLE" })]);
   });
 
+  it("retries one transient provider error before reporting the transit segment", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const search = vi.fn((_origin, _destination, callback) => {
+      calls += 1;
+      callback(calls === 1 ? "error" : "complete", calls === 1 ? {} : { plans: [{ distance: 1800, time: 900, path: [[peak.lng, peak.lat], [centralPier.lng, centralPier.lat]] }] });
+    });
+    class Transfer { constructor(_options?: unknown) {} search = search; }
+    const service = createAmapRouteService(async () => ({ Transfer }), (id) => id === peak.id ? peak : centralPier);
+    const pending = service.getSegments({ dayId: "hong-kong-day", city: "香港", placeIds: [peak.id, centralPier.id], modeByLeg: ["transit"] });
+    await vi.advanceTimersByTimeAsync(200);
+    await expect(pending).resolves.toEqual(expect.objectContaining({ segments: [expect.objectContaining({ mode: "transit" })], failures: [] }));
+    expect(search).toHaveBeenCalledTimes(2);
+  });
+
   it("times out a route request and ignores a late plugin callback", async () => {
     vi.useFakeTimers();
     let callback: ((status: string, result: unknown) => void) | undefined;
