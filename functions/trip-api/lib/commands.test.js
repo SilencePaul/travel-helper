@@ -15,10 +15,11 @@ function trip(version = 0) {
   };
 }
 
-function createDb({ members = [], trips = [trip()] } = {}) {
+function createDb({ members = [], trips = [trip()], authSessions = [] } = {}) {
   const data = {
     members: new Map(members.map((item) => [item.uid, structuredClone(item)])),
     trips: new Map(trips.map((item) => [item.id, structuredClone(item)])),
+    auth_sessions: new Map(authSessions.map((item) => [item._id, structuredClone(item)])),
     audits: [],
     idempotency: new Map(),
   };
@@ -64,7 +65,7 @@ test("removing the final administrator is rejected", async () => {
 });
 
 test("saveTrip writes once per idempotency key and rejects stale versions", async () => {
-  const db = createDb({ members: [member("fs_admin", "admin", "一鸣")] });
+  const db = createDb({ members: [member("fs_admin", "admin", "一鸣")], trips: [{ ...trip(), memberUids: ["fs_admin"] }] });
   const commands = createTripCommands({ db, now: () => new Date("2026-08-27T12:00:00.000Z") });
   const event = { action: "saveTrip", trip: { ...trip(), title: "更新后的旅行" }, expectedVersion: 0, idempotencyKey: "save-001" };
 
@@ -90,6 +91,30 @@ test("saveTrip requires the actor to belong to the trip", async () => {
     { code: "FORBIDDEN" },
   );
   assert.equal(db.data.trips.get("trip-2026-autumn").title, "秋日旅行");
+});
+
+test("saveTrip rejects a stored trip without a server-owned membership list", async () => {
+  const db = createDb({ members: [member("fs_admin", "admin")] });
+  const commands = createTripCommands({ db });
+
+  await assert.rejects(
+    () => commands.execute({ action: "saveTrip", trip: trip(), expectedVersion: 0, idempotencyKey: "missing-members" }, "fs_admin"),
+    { code: "INVALID_TRIP" },
+  );
+  assert.equal(db.data.trips.get("trip-2026-autumn").version, 0);
+});
+
+test("saveTrip rejects malformed stored membership instead of claiming the trip", async () => {
+  const db = createDb({
+    members: [member("fs_admin", "admin")],
+    trips: [{ ...trip(), memberUids: ["x"] }],
+  });
+  const commands = createTripCommands({ db });
+
+  await assert.rejects(
+    () => commands.execute({ action: "saveTrip", trip: trip(), expectedVersion: 0, idempotencyKey: "malformed-members" }, "fs_admin"),
+    { code: "INVALID_TRIP" },
+  );
 });
 
 test("a member cannot alter the server-owned trip membership list", async () => {
@@ -127,7 +152,7 @@ test("saveTrip validates orders with the TripSchema contract", async () => {
 });
 
 test("idempotency keys are bound to the original expected version", async () => {
-  const db = createDb({ members: [member("fs_admin", "admin")] });
+  const db = createDb({ members: [member("fs_admin", "admin")], trips: [{ ...trip(), memberUids: ["fs_admin"] }] });
   const commands = createTripCommands({ db });
   const event = { action: "saveTrip", trip: trip(), expectedVersion: 0, idempotencyKey: "save-bound" };
 
@@ -136,6 +161,44 @@ test("idempotency keys are bound to the original expected version", async () => 
     () => commands.execute({ ...event, expectedVersion: 1 }, "fs_admin"),
     { code: "IDEMPOTENCY_KEY_REUSED" },
   );
+});
+
+test("idempotency replay treats omitted TripSchema defaults as the same request", async () => {
+  const db = createDb({ members: [member("fs_admin", "admin")], trips: [{ ...trip(), memberUids: ["fs_admin"] }] });
+  const commands = createTripCommands({ db });
+  db.data.idempotency.set("defaults-replay", {
+    actorUid: "fs_admin",
+    tripId: "trip-2026-autumn",
+    expectedVersion: 0,
+    trip: { ...trip(1), memberUids: ["fs_admin"], orders: undefined },
+    createdAt: "2026-08-27T12:00:00.000Z",
+  });
+  const event = { action: "saveTrip", trip: trip(), expectedVersion: 0, idempotencyKey: "defaults-replay" };
+
+  assert.deepEqual(await commands.execute(event, "fs_admin"), { trip: { ...trip(1), memberUids: ["fs_admin"], orders: undefined } });
+});
+
+test("removeMember revokes trip membership and sessions in the same transaction", async () => {
+  const db = createDb({
+    members: [member("fs_admin", "admin"), member("fs_member", "member")],
+    trips: [
+      { ...trip(), memberUids: ["fs_admin", "fs_member"] },
+      { ...trip(), id: "other-trip", memberUids: ["fs_member"] },
+    ],
+    authSessions: [
+      { _id: "session-1", uid: "fs_member", oauthState: "state-1", expiresAt: 9999999999999, revoked: false },
+      { _id: "session-2", uid: "fs_other", oauthState: "state-2", expiresAt: 9999999999999, revoked: false },
+    ],
+  });
+  const commands = createTripCommands({ db, now: () => new Date("2026-08-27T12:00:00.000Z") });
+
+  await commands.execute({ action: "removeMember", uid: "fs_member" }, "fs_admin");
+
+  assert.deepEqual(db.data.trips.get("trip-2026-autumn").memberUids, ["fs_admin"]);
+  assert.deepEqual(db.data.trips.get("other-trip").memberUids, []);
+  assert.equal(db.data.auth_sessions.get("session-1").revoked, true);
+  assert.equal(db.data.auth_sessions.get("session-1").expiresAt, Date.parse("2026-08-27T12:00:00.000Z"));
+  assert.equal(db.data.auth_sessions.get("session-2").revoked, false);
 });
 
 test("audit records include actor UID and safe changed fields only", async () => {

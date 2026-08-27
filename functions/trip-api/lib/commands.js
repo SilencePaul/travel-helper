@@ -49,6 +49,7 @@ const ActionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.enum(["approveMember", "rejectMember", "removeMember"]), uid: z.string().min(4).max(32) }),
   z.object({ action: z.literal("saveTrip"), tripId: z.string().min(1).optional(), trip: TripSchema, expectedVersion: z.number().int().nonnegative(), idempotencyKey: z.string().min(8).max(128) }),
 ]);
+const ServerMemberUidsSchema = z.array(z.string().min(4).max(64)).min(1);
 
 function codedError(code, details = {}) { const error = new Error(code); error.code = code; Object.assign(error, details); return error; }
 function one(result) {
@@ -64,13 +65,31 @@ function requestTrip(trip) {
   const { version, memberUids, ...withoutServerOwnedFields } = trip;
   return withoutServerOwnedFields;
 }
+function canonicalTripRequest(trip) {
+  const parsed = TripSchema.safeParse(trip);
+  if (!parsed.success) throw codedError("IDEMPOTENCY_KEY_REUSED");
+  return canonical(requestTrip(parsed.data));
+}
+function createCloudBaseSessionRevoker() {
+  return {
+    async revokeSessionsForUid(transaction, uid, revokedAt) {
+      const sessions = transaction.collection("auth_sessions");
+      const result = await sessions.where({ uid }).get();
+      for (const session of result.data || []) {
+        const sessionId = session?._id || session?.id;
+        if (!sessionId) throw codedError("SESSION_REVOKE_FAILED");
+        await sessions.doc(sessionId).set({ ...session, revoked: true, revokedAt, expiresAt: Date.parse(revokedAt) });
+      }
+    },
+  };
+}
 function safeMember(member) {
   if (!member) return undefined;
   const { uid, displayName, avatarUrl, role, version, createdAt, approvedAt } = member;
   return { uid, displayName, ...(avatarUrl ? { avatarUrl } : {}), role, version, createdAt, ...(approvedAt ? { approvedAt } : {}) };
 }
 
-function createTripCommands({ db, now = () => new Date() } = {}) {
+function createTripCommands({ db, now = () => new Date(), sessionRevoker = createCloudBaseSessionRevoker() } = {}) {
   if (!db || typeof db.runTransaction !== "function") throw codedError("CLOUDBASE_TRANSACTION_UNAVAILABLE");
 
   async function getActor(transaction, uid) {
@@ -102,7 +121,19 @@ function createTripCommands({ db, now = () => new Date() } = {}) {
       const role = input.action === "approveMember" ? "member" : "removed";
       const next = { ...target, role, version: (target.version || 0) + 1, ...(role === "member" ? { approvedAt: timestamp } : {}) };
       await members.doc(target.uid).set(next);
-      await audit(transaction, actor, input.action, target.displayName, ["role", "version", ...(role === "member" ? ["approvedAt"] : [])]);
+      if (input.action === "removeMember") {
+        const tripsResult = await transaction.collection("trips").where({}).get();
+        for (const trip of tripsResult.data || []) {
+          if (!Array.isArray(trip.memberUids) || !trip.memberUids.includes(target.uid)) continue;
+          await transaction.collection("trips").doc(trip.id).set({
+            ...trip,
+            memberUids: trip.memberUids.filter((uid) => uid !== target.uid),
+            version: Number.isInteger(trip.version) ? trip.version + 1 : 1,
+          });
+        }
+        await sessionRevoker.revokeSessionsForUid(transaction, target.uid, timestamp);
+      }
+      await audit(transaction, actor, input.action, target.displayName, ["role", "version", ...(role === "member" ? ["approvedAt"] : []), ...(input.action === "removeMember" ? ["memberUids", "sessions"] : [])]);
       return { member: safeMember(next) };
     });
   }
@@ -115,21 +146,21 @@ function createTripCommands({ db, now = () => new Date() } = {}) {
       if (!current) throw codedError("TRIP_NOT_FOUND");
       const tripId = input.tripId || input.trip.id;
       if (tripId !== input.trip.id) throw codedError("INVALID_TRIP");
-      if (Array.isArray(current.memberUids) && !current.memberUids.includes(actorUid)) throw codedError("FORBIDDEN");
+      if (!ServerMemberUidsSchema.safeParse(current.memberUids).success) throw codedError("INVALID_TRIP");
+      if (!current.memberUids.includes(actorUid)) throw codedError("FORBIDDEN");
+      const parsed = TripSchema.safeParse(input.trip);
+      if (!parsed.success) throw codedError("INVALID_TRIP");
       const idempotency = transaction.collection("trip_idempotency");
       const existing = one(await idempotency.doc(input.idempotencyKey).get());
       if (existing) {
         if (existing.actorUid !== actorUid || existing.tripId !== input.trip.id || !existing.trip || typeof existing.trip !== "object") throw codedError("IDEMPOTENCY_KEY_REUSED");
         const existingExpectedVersion = Number.isInteger(existing.expectedVersion) ? existing.expectedVersion : existing.trip?.version - 1;
         const priorRequest = existing.trip;
-        if (existingExpectedVersion !== input.expectedVersion || canonical(requestTrip(priorRequest)) !== canonical(requestTrip(input.trip))) throw codedError("IDEMPOTENCY_KEY_REUSED");
+        if (existingExpectedVersion !== input.expectedVersion || canonicalTripRequest(priorRequest) !== canonicalTripRequest(parsed.data)) throw codedError("IDEMPOTENCY_KEY_REUSED");
         return { trip: existing.trip };
       }
       if (current.version !== input.expectedVersion) throw codedError("VERSION_CONFLICT", { currentVersion: current.version });
-      const parsed = TripSchema.safeParse(input.trip);
-      if (!parsed.success) throw codedError("INVALID_TRIP");
-      const memberUids = Array.isArray(current.memberUids) ? [...current.memberUids] : [actorUid];
-      const next = { ...parsed.data, memberUids, version: current.version + 1 };
+      const next = { ...parsed.data, memberUids: [...current.memberUids], version: current.version + 1 };
       if (next.version !== input.expectedVersion + 1) throw codedError("INVALID_TRIP");
       await trips.doc(next.id).set(next);
       await idempotency.doc(input.idempotencyKey).set({ actorUid, tripId: next.id, expectedVersion: input.expectedVersion, trip: next, createdAt: now().toISOString() });
@@ -157,4 +188,4 @@ function createTripCommands({ db, now = () => new Date() } = {}) {
   };
 }
 
-module.exports = { createTripCommands, codedError, safeMember, TripSchema };
+module.exports = { createTripCommands, createCloudBaseSessionRevoker, codedError, safeMember, TripSchema };
