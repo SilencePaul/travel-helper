@@ -152,6 +152,16 @@ test("CloudBase session creation records the session ID on the member document",
   assert.equal(db.data.get("auth_sessions").get(sessionId).uid, uid);
 });
 
+test("CloudBase session creation does not write a member _id back to the database", async () => {
+  const uid = "fs_member";
+  const db = createDb({ members: { [uid]: { _id: uid, uid, role: "member", sessionIds: [], tripIds: [] } } });
+  const sessions = createCloudBaseAuthStore({ db, now: () => 1000, randomBytes: () => Buffer.alloc(32, 2) });
+
+  await sessions.createSession({ uid, oauthState: "state" });
+
+  assert.equal(Object.hasOwn(db.data.get("members").get(uid), "_id"), false);
+});
+
 test("CloudBase auth records never write the reserved _id field", async () => {
   const db = createDb();
   const sessions = createCloudBaseAuthStore({ db, now: () => 1000, randomBytes: () => Buffer.alloc(32, 7) });

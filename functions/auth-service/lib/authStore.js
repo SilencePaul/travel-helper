@@ -80,7 +80,7 @@ function createCloudBaseAuthStore({ db, now = () => Date.now(), randomBytes = cr
         const sessionIds = member.sessionIds === undefined ? [] : member.sessionIds;
         if (!Array.isArray(sessionIds) || sessionIds.some((item) => typeof item !== "string")) throw new Error("MEMBERSHIP_ASSOCIATIONS_UNAVAILABLE");
         await transaction.collection("auth_sessions").doc(id).set(session);
-        await memberDoc.set({ ...member, sessionIds: [...new Set([...sessionIds, id])] });
+        await memberDoc.set(writableRecord({ ...member, sessionIds: [...new Set([...sessionIds, id])] }));
       });
       return id;
     },
