@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@amap/amap-jsapi-loader": "^1.0.1",
+    "@cloudbase/js-sdk": "^3.8.2",
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
     "@travel/contracts": "workspace:*",

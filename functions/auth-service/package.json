@@ -1,0 +1,10 @@
+{
+  "name": "@travel/auth-service",
+  "private": true,
+  "version": "0.1.0",
+  "main": "index.js",
+  "dependencies": {
+    "@cloudbase/node-sdk": "^2.11.0",
+    "zod": "^4.4.3"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://static.cloudbase.net/cli/cloudbaserc.schema.json",
+  "version": "2.1",
+  "envId": "{{env.VITE_CLOUDBASE_ENV_ID}}",
+  "functionRoot": "./functions",
+  "functions": [
+    {
+      "name": "auth-service",
+      "type": "HTTP",
+      "handler": "index.main",
+      "runtime": "Nodejs20.19",
+      "installDependency": true,
+      "public": true,
+      "gatewayPath": "/api/auth/*"
+    },
+    {
+      "name": "trip-api",
+      "type": "Event",
+      "handler": "index.main",
+      "runtime": "Nodejs20.19",
+      "installDependency": true
+    }
+  ]
+}

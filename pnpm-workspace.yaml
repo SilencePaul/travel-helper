@@ -2,3 +2,5 @@ packages:
   - apps/*
   - packages/*
   - functions/*
+allowBuilds:
+  core-js-pure: set this to true or false
