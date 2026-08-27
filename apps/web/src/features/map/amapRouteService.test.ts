@@ -134,6 +134,25 @@ describe("createAmapRouteService", () => {
     expect(segment).toMatchObject({ mode: "walking", summary: "高德步行路线", distanceMeters: 716 });
   });
 
+  it("does not disguise a failed transit request as a walking route", async () => {
+    const transitSearch = vi.fn((_origin, _destination, callback) => callback("error", { info: "provider unavailable" }));
+    const walkingSearch = vi.fn((_origin, _destination, callback) => callback("complete", {
+      routes: [{ distance: 716, time: 600, steps: [{ path: [[114.1454, 22.2757], [114.1596, 22.2864]] }] }],
+    }));
+    class Transfer { constructor(_options?: unknown) {} search = transitSearch; }
+    class Walking { constructor(_options?: unknown) {} search = walkingSearch; }
+    const service = createAmapRouteService(async () => ({ Transfer, Walking }), (id) => id === peak.id ? peak : centralPier);
+
+    await expect(service.getSegments({
+      dayId: "hong-kong-day",
+      city: "香港",
+      placeIds: [peak.id, centralPier.id],
+      modeByLeg: ["transit"],
+    })).rejects.toThrow("AMAP_ROUTE_PROVIDER_UNAVAILABLE");
+
+    expect(walkingSearch).not.toHaveBeenCalled();
+  });
+
   it("times out a route request and ignores a late plugin callback", async () => {
     vi.useFakeTimers();
     let callback: ((status: string, result: unknown) => void) | undefined;

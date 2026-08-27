@@ -95,11 +95,11 @@ async function getProviderSegment(AMap: AmapRouteApi, from: TimelinePlace, to: T
     };
     const timeout = window.setTimeout(() => settle(() => reject(new Error("AMAP_ROUTE_TIMEOUT"))), timeoutMs);
     createSearchService(AMap, mode, city).search([from.lng, from.lat], [to.lng, to.lat], (status, response) => {
-      settle(() => status === "complete" ? resolve(response) : reject(new Error("AMAP_ROUTE_UNAVAILABLE")));
+      settle(() => status === "complete" ? resolve(response) : reject(new Error("AMAP_ROUTE_PROVIDER_UNAVAILABLE")));
     });
   });
   const route = firstRoute(result, mode);
-  if (!route) throw new Error("AMAP_ROUTE_UNAVAILABLE");
+  if (!route) throw new Error(mode === "transit" ? "AMAP_ROUTE_NO_TRANSIT_PLAN" : "AMAP_ROUTE_UNAVAILABLE");
   return {
     id: `${from.id}-${to.id}-${legIndex}`,
     fromPlaceId: from.id,
@@ -124,7 +124,7 @@ export function createAmapRouteService(loadAmap: AmapLoader, resolvePlace: Place
         try {
           return await getProviderSegment(AMap, from, resolvedPlaces[index + 1]!, mode, city, index, timeoutMs);
         } catch (error) {
-          if (mode !== "transit" || !(error instanceof Error) || error.message !== "AMAP_ROUTE_UNAVAILABLE") throw error;
+          if (mode !== "transit" || !(error instanceof Error) || error.message !== "AMAP_ROUTE_NO_TRANSIT_PLAN") throw error;
           return getProviderSegment(AMap, from, resolvedPlaces[index + 1]!, "walking", city, index, timeoutMs);
         }
       }));
