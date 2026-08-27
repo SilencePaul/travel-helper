@@ -194,6 +194,22 @@ describe("createAmapRouteService", () => {
     expect(search).toHaveBeenCalledTimes(2);
   });
 
+  it("starts the next day connector only after the previous provider callback settles", async () => {
+    const ferry = { ...centralPier, id: "ferry", lng: 114.17, lat: 22.29 };
+    const callbacks: Array<(status: string, result: unknown) => void> = [];
+    const search = vi.fn((_origin, _destination, callback) => callbacks.push(callback));
+    class Transfer { constructor(_options?: unknown) {} search = search; }
+    const service = createAmapRouteService(async () => ({ Transfer }), (id) => id === peak.id ? peak : id === centralPier.id ? centralPier : ferry);
+    const pending = service.getSegments({ dayId: "hong-kong-day", city: "香港", placeIds: [peak.id, centralPier.id, ferry.id], modeByLeg: ["transit", "transit"] });
+    await Promise.resolve();
+    expect(search).toHaveBeenCalledTimes(1);
+    callbacks[0]!("complete", { plans: [{ distance: 1800, time: 900, path: [[peak.lng, peak.lat], [centralPier.lng, centralPier.lat]] }] });
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(search).toHaveBeenCalledTimes(2);
+    callbacks[1]!("complete", { plans: [{ distance: 1300, time: 720, path: [[centralPier.lng, centralPier.lat], [ferry.lng, ferry.lat]] }] });
+    await expect(pending).resolves.toEqual(expect.objectContaining({ failures: [], segments: expect.any(Array) }));
+  });
+
   it("times out a route request and ignores a late plugin callback", async () => {
     vi.useFakeTimers();
     let callback: ((status: string, result: unknown) => void) | undefined;
