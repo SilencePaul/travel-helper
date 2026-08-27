@@ -154,6 +154,17 @@ describe("createAmapRouteService", () => {
     expect(walkingSearch).not.toHaveBeenCalled();
   });
 
+  it("does not turn a complete malformed transit response into walking", async () => {
+    const transitSearch = vi.fn((_origin, _destination, callback) => callback("complete", { route: { transits: [] } }));
+    const walkingSearch = vi.fn();
+    class Transfer { constructor(_options?: unknown) {} search = transitSearch; }
+    class Walking { constructor(_options?: unknown) {} search = walkingSearch; }
+    const service = createAmapRouteService(async () => ({ Transfer, Walking }), (id) => id === peak.id ? peak : centralPier);
+    const result = await service.getSegments({ dayId: "hong-kong-day", city: "香港", placeIds: [peak.id, centralPier.id], modeByLeg: ["transit"] });
+    expect(result.failures).toEqual([expect.objectContaining({ code: "AMAP_ROUTE_MALFORMED_RESPONSE" })]);
+    expect(walkingSearch).not.toHaveBeenCalled();
+  });
+
   it("preserves successful connectors when another connector fails", async () => {
     const ferry = { ...centralPier, id: "ferry", lng: 114.17, lat: 22.29 };
     const search = vi.fn((origin, _destination, callback) => callback(origin[0] === peak.lng ? "complete" : "error", origin[0] === peak.lng

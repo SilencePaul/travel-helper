@@ -21,7 +21,7 @@ export type RouteFailure = {
   fromPlaceId: string;
   toPlaceId: string;
   mode: TravelMode;
-  code: "AMAP_ROUTE_PROVIDER_UNAVAILABLE" | "AMAP_ROUTE_TIMEOUT" | "AMAP_ROUTE_UNAVAILABLE" | "AMAP_ROUTE_NO_TRANSIT_PLAN";
+  code: "AMAP_ROUTE_PROVIDER_UNAVAILABLE" | "AMAP_ROUTE_TIMEOUT" | "AMAP_ROUTE_UNAVAILABLE" | "AMAP_ROUTE_NO_TRANSIT_PLAN" | "AMAP_ROUTE_MALFORMED_RESPONSE";
 };
 
 export type RouteQueryResult = { segments: RouteSegment[]; failures: RouteFailure[] };
