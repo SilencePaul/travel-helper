@@ -1,0 +1,123 @@
+const assert = require("node:assert/strict");
+const test = require("node:test");
+
+const { createAuthHandler } = require("./index.js");
+
+function responseBody(response) {
+  return JSON.parse(response.body);
+}
+
+function makeRequest(handler, method, path, body, headers = {}) {
+  return handler({
+    httpMethod: method,
+    path,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
+test("OAuth callback creates a pending member without issuing a custom ticket", async () => {
+  const requests = [];
+  const handler = createAuthHandler({
+    env: {
+      FEISHU_APP_ID: "cli_test",
+      FEISHU_APP_SECRET: "secret",
+      FEISHU_REDIRECT_URI: "https://auth.example/callback",
+      PUBLIC_APP_URL: "https://trip.example",
+      ADMIN_BOOTSTRAP_CODE: "correct",
+      AUTH_SESSION_SECRET: "session-secret",
+      VITE_CLOUDBASE_ENV_ID: "env",
+    },
+    fetchImpl: async (url, options) => {
+      requests.push({ url, options });
+      if (String(url).includes("tenant_access_token")) {
+        return new Response(JSON.stringify({ code: 0, tenant_access_token: "tenant" }), { status: 200 });
+      }
+      if (String(url).includes("access_token")) {
+        return new Response(JSON.stringify({ code: 0, data: { access_token: "user-token" } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ code: 0, data: { open_id: "ou_pending", name: "美垚" } }), { status: 200 });
+    },
+  });
+
+  const start = await makeRequest(handler, "GET", "/api/auth/start");
+  assert.equal(start.statusCode, 302);
+  const startUrl = new URL(start.headers.location);
+  const state = startUrl.searchParams.get("state");
+  const callback = await makeRequest(handler, "GET", `/api/auth/callback?code=feishu-code&state=${state}`, undefined, {
+    cookie: start.headers["set-cookie"].split(";")[0],
+  });
+
+  assert.equal(callback.statusCode, 200);
+  assert.deepEqual(responseBody(callback), { status: "pending" });
+  assert.equal(requests.length, 3);
+  const ticket = await makeRequest(handler, "POST", "/api/auth/ticket", undefined, {
+    cookie: callback.headers["set-cookie"].split(";")[0],
+  });
+  assert.equal(ticket.statusCode, 403);
+  assert.deepEqual(responseBody(ticket), { error: "PENDING_APPROVAL" });
+});
+
+test("bootstrap code is consumed once and creates exactly one administrator", async () => {
+  const issuedTickets = [];
+  const handler = createAuthHandler({
+    env: {
+      FEISHU_APP_ID: "cli_test",
+      FEISHU_APP_SECRET: "secret",
+      FEISHU_REDIRECT_URI: "https://auth.example/callback",
+      PUBLIC_APP_URL: "https://trip.example",
+      ADMIN_BOOTSTRAP_CODE: "correct",
+      AUTH_SESSION_SECRET: "session-secret",
+      VITE_CLOUDBASE_ENV_ID: "env",
+    },
+    fetchImpl: async (url) => {
+      if (String(url).includes("tenant_access_token")) return new Response(JSON.stringify({ code: 0, tenant_access_token: "tenant" }));
+      if (String(url).includes("access_token")) return new Response(JSON.stringify({ code: 0, data: { access_token: "user-token" } }));
+      return new Response(JSON.stringify({ code: 0, data: { open_id: "ou_admin", name: "一鸣" } }));
+    },
+    createTicket: (uid) => { issuedTickets.push(uid); return "custom-ticket"; },
+  });
+
+  const start = await makeRequest(handler, "GET", "/api/auth/start");
+  const state = new URL(start.headers.location).searchParams.get("state");
+  const stateCookie = start.headers["set-cookie"].split(";")[0];
+  const callback = await makeRequest(handler, "GET", `/api/auth/callback?code=code&state=${state}`, undefined, { cookie: stateCookie });
+  const authCookie = callback.headers["set-cookie"].split(";")[0];
+
+  const first = await makeRequest(handler, "POST", "/api/auth/bootstrap", { code: "correct", oauthState: state }, { cookie: authCookie });
+  assert.equal(first.statusCode, 200);
+  assert.equal(responseBody(first).role, "admin");
+  const ticket = await makeRequest(handler, "POST", "/api/auth/ticket", undefined, { cookie: authCookie });
+  assert.equal(ticket.statusCode, 200);
+  assert.deepEqual(responseBody(ticket), { ticket: "custom-ticket" });
+  assert.equal(issuedTickets.length, 1);
+  const second = await makeRequest(handler, "POST", "/api/auth/bootstrap", { code: "correct", oauthState: state }, { cookie: authCookie });
+  assert.equal(second.statusCode, 409);
+});
+
+test("OAuth state is single-use and expires after ten minutes", async () => {
+  let now = 1_000;
+  const handler = createAuthHandler({
+    now: () => now,
+    randomBytes: () => Buffer.alloc(32, 7),
+    env: { FEISHU_APP_ID: "cli", FEISHU_APP_SECRET: "secret", FEISHU_REDIRECT_URI: "https://auth/callback", PUBLIC_APP_URL: "https://trip", ADMIN_BOOTSTRAP_CODE: "code", AUTH_SESSION_SECRET: "secret", VITE_CLOUDBASE_ENV_ID: "env" },
+    fetchImpl: async (url) => String(url).includes("tenant_access_token")
+      ? new Response(JSON.stringify({ code: 0, tenant_access_token: "tenant" }))
+      : String(url).includes("access_token")
+        ? new Response(JSON.stringify({ code: 0, data: { access_token: "user-token" } }))
+        : new Response(JSON.stringify({ code: 0, data: { open_id: "ou", name: "user" } })),
+  });
+  const start = await makeRequest(handler, "GET", "/api/auth/start");
+  const state = new URL(start.headers.location).searchParams.get("state");
+  const cookie = start.headers["set-cookie"].split(";")[0];
+  const first = await makeRequest(handler, "GET", `/api/auth/callback?code=x&state=${state}`, undefined, { cookie });
+  assert.equal(first.statusCode, 200);
+  const replay = await makeRequest(handler, "GET", `/api/auth/callback?code=x&state=${state}`, undefined, { cookie });
+  assert.equal(replay.statusCode, 400);
+
+  const secondStart = await makeRequest(handler, "GET", "/api/auth/start");
+  const secondState = new URL(secondStart.headers.location).searchParams.get("state");
+  now += 10 * 60 * 1000 + 1;
+  const expired = await makeRequest(handler, "GET", `/api/auth/callback?code=x&state=${secondState}`, undefined, { cookie: secondStart.headers["set-cookie"].split(";")[0] });
+  assert.equal(expired.statusCode, 400);
+});
