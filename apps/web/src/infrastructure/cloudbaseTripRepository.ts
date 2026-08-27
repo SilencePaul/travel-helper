@@ -114,10 +114,14 @@ export class CloudBaseTripRepository implements TripRepository {
   }
 
   async save(next: Trip, expectedVersion: number): Promise<Trip> {
+    return this.saveWithIdempotency(next, expectedVersion, newIdempotencyKey());
+  }
+
+  async saveWithIdempotency(next: Trip, expectedVersion: number, idempotencyKey: string): Promise<Trip> {
     try {
       const response = await this.functions.callFunction({
         name: "trip-api",
-        data: { action: "saveTrip", tripId: next.id, trip: next, expectedVersion, idempotencyKey: newIdempotencyKey() },
+        data: { action: "saveTrip", tripId: next.id, trip: next, expectedVersion, idempotencyKey },
       });
       const result = response?.result;
       const code = serviceErrorCode(result);

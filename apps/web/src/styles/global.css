@@ -19,6 +19,13 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   font-size: 13px;
   text-align: right;
 }
+.offline-status {
+  width: min(1080px, 100%);
+  margin: -10px auto 16px;
+  color: #657166;
+  font-size: 12px;
+  text-align: right;
+}
 .overview, .narrow-page { width: min(1080px, 100%); margin: 0 auto; }
 .narrow-page { max-width: 760px; }
 .eyebrow { margin: 0 0 8px; color: #6d766f; font-size: 12px; letter-spacing: .12em; text-transform: uppercase; }

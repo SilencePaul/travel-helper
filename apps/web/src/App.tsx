@@ -23,6 +23,7 @@ import { OverviewPage } from "./features/overview/OverviewPage";
 import { HotelComparePage } from "./features/hotels/HotelComparePage";
 import "./styles/global.css";
 import { MemberManagementPage } from "./features/members/MemberManagementPage";
+import { OfflineStatus } from "./components/OfflineStatus";
 
 type AppProps = {
   repository?: TripRepository;
@@ -55,8 +56,8 @@ function withDayRange(trip: Trip, days: TravelDay[], unscheduledItemIds = trip.u
   };
 }
 
-function TripRoutes({ createDayId = () => "day-ui", routeService, member, onUnauthorized, enforceAdmin }: Pick<AppProps, "createDayId" | "routeService" | "member" | "onUnauthorized"> & { enforceAdmin: boolean }) {
-  const { trip, mutateTrip, syncState } = useTrip();
+function TripRoutes({ createDayId = () => "day-ui", routeService, member, onUnauthorized, enforceAdmin, showOfflineStatus }: Pick<AppProps, "createDayId" | "routeService" | "member" | "onUnauthorized"> & { enforceAdmin: boolean; showOfflineStatus: boolean }) {
+  const { trip, mutateTrip, syncState, pendingCommandCount, conflictPaused } = useTrip();
   const navigate = useNavigate();
   const [requestedDayId, setRequestedDayId] = useState<string>();
   const selectedDayId = trip.days.some((day) => day.id === requestedDayId)
@@ -175,6 +176,7 @@ function TripRoutes({ createDayId = () => "day-ui", routeService, member, onUnau
   return (
     <div className="app-shell">
       <div className="sync-bar" role="status">{syncState}</div>
+      {showOfflineStatus ? <OfflineStatus pendingCount={pendingCommandCount} conflictPaused={conflictPaused} /> : null}
       <Routes>
         <Route
           path="/"
@@ -228,7 +230,7 @@ export function TripApp({ repository, createDayId, tripId, routeService, member,
   const enforceAdmin = repository?.syncMode === "cloudbase" || !import.meta.env.DEV;
   return (
     <TripProvider repository={repository} tripId={tripId} onUnauthorized={onUnauthorized}>
-      <TripRoutes createDayId={createDayId} routeService={routeService} member={member} onUnauthorized={onUnauthorized} enforceAdmin={enforceAdmin} />
+      <TripRoutes createDayId={createDayId} routeService={routeService} member={member} onUnauthorized={onUnauthorized} enforceAdmin={enforceAdmin} showOfflineStatus={repository === undefined} />
     </TripProvider>
   );
 }

@@ -6,13 +6,17 @@ export type TripSyncState =
   | "已同步"
   | "正在保存"
   | "正在重连"
-  | "保存失败，请重试";
+  | "保存失败，请重试"
+  | "离线"
+  | "同步冲突，等待处理";
 
 export type TripContextValue = {
   trip: Trip;
   saveTrip: (next: Trip) => Promise<Trip>;
   mutateTrip: (mutation: TripMutation) => Promise<Trip | undefined>;
   syncState: TripSyncState;
+  pendingCommandCount: number;
+  conflictPaused: boolean;
 };
 
 export type TripMutation = (current: Trip) => Trip | undefined;

@@ -9,6 +9,8 @@ import type { Trip, TripRepository } from "@travel/contracts";
 import seed from "../../../../content/trip.seed.json";
 import { LocalTripRepository } from "../infrastructure/localTripRepository";
 import { CloudBaseTripRepository, isUnauthorizedError } from "../infrastructure/cloudbaseTripRepository";
+import { enqueuePendingCommand, listPendingCommands, replayPendingCommands } from "../infrastructure/offlineQueue";
+import { getTripSnapshot, saveTripSnapshot } from "../infrastructure/offlineStore";
 import {
   TripContext,
   type TripMutation,
@@ -21,6 +23,11 @@ type TripProviderProps = {
   tripId?: string;
   onUnauthorized?: (error: unknown) => void;
 };
+
+function newIdempotencyKey() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
+  return `offline-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
 
 export function TripProvider({
   children,
@@ -35,12 +42,26 @@ export function TripProvider({
   const [loadError, setLoadError] = useState(false);
   const [authLost, setAuthLost] = useState(false);
   const [syncState, setSyncState] = useState<TripSyncState>(isCloudbase ? "已同步" : "正在使用本地计划");
+  const [pendingCommandCount, setPendingCommandCount] = useState(0);
+  const [conflictPaused, setConflictPaused] = useState(false);
   const tripRef = useRef<Trip | undefined>(undefined);
   const sessionRef = useRef(0);
   const mutationQueueRef = useRef<Promise<unknown>>(Promise.resolve());
   const savingRef = useRef(false);
   const connectionRef = useRef<"synced" | "reconnecting">("synced");
   const invalidatedRef = useRef(false);
+  const replayingRef = useRef(false);
+
+  const isOnline = () => typeof navigator === "undefined" || navigator.onLine;
+
+  const refreshPendingCount = useCallback(async () => {
+    try {
+      const commands = await listPendingCommands(tripId);
+      setPendingCommandCount(commands.length);
+    } catch {
+      setPendingCommandCount(0);
+    }
+  }, [tripId]);
 
   const invalidateSession = useCallback((error: unknown) => {
     if (invalidatedRef.current) return;
@@ -54,6 +75,8 @@ export function TripProvider({
     setLoadError(false);
     setAuthLost(true);
     setSyncState(isCloudbase ? "已同步" : "正在使用本地计划");
+    setPendingCommandCount(0);
+    setConflictPaused(false);
     /* oxlint-enable react/set-state-in-effect */
     onUnauthorized?.(error);
   }, [isCloudbase, onUnauthorized]);
@@ -65,6 +88,7 @@ export function TripProvider({
     const next = structuredClone(snapshot);
     tripRef.current = next;
     setTrip(next);
+    void saveTripSnapshot(next).catch(() => undefined);
     return true;
   }, []);
 
@@ -81,6 +105,7 @@ export function TripProvider({
     setLoadError(false);
     setAuthLost(false);
     setSyncState(isCloudbase ? "已同步" : "正在使用本地计划");
+    if (!isOnline()) void refreshPendingCount();
     /* oxlint-enable react/set-state-in-effect */
     let active = true;
     let unsubscribe: (() => void) | undefined;
@@ -113,8 +138,23 @@ export function TripProvider({
       })
       .catch((error) => {
         if (active && session === sessionRef.current && !tripRef.current) {
-          if (isUnauthorizedError(error)) invalidateSession(error);
-          else setLoadError(true);
+          if (isUnauthorizedError(error)) {
+            invalidateSession(error);
+            return;
+          }
+          if (isOnline()) {
+            setLoadError(true);
+            return;
+          }
+          void getTripSnapshot(tripId).then((cachedTrip) => {
+            if (!active || session !== sessionRef.current) return;
+            if (cachedTrip) {
+              applySnapshot(cachedTrip, session);
+              setSyncState("离线");
+            } else {
+              setLoadError(true);
+            }
+          }).catch(() => setLoadError(true));
         }
       });
 
@@ -123,7 +163,37 @@ export function TripProvider({
       if (sessionRef.current === session) sessionRef.current += 1;
       unsubscribe?.();
     };
-  }, [applySnapshot, invalidateSession, isCloudbase, repository, tripId]);
+  }, [applySnapshot, invalidateSession, isCloudbase, refreshPendingCount, repository, tripId]);
+
+  const replayQueuedCommands = useCallback(async () => {
+    if (!isOnline() || replayingRef.current || invalidatedRef.current) return;
+    replayingRef.current = true;
+    try {
+      const result = await replayPendingCommands(async (command) => {
+        const next = command.patch as unknown as Trip;
+        const idempotentRepository = repository as TripRepository & {
+          saveWithIdempotency?: (trip: Trip, expectedVersion: number, idempotencyKey: string) => Promise<Trip>;
+        };
+        const saved = await (idempotentRepository.saveWithIdempotency
+          ? idempotentRepository.saveWithIdempotency(next, command.expectedVersion, command.idempotencyKey)
+          : repository.save(next, command.expectedVersion));
+        if (sessionRef.current > 0) applySnapshot(saved, sessionRef.current);
+        return saved;
+      }, tripId);
+      await refreshPendingCount();
+      setConflictPaused(result.status === "paused-conflict");
+      if (result.status === "paused-conflict") setSyncState("同步冲突，等待处理");
+      else if (result.status === "completed" && !savingRef.current) setSyncState(isCloudbase ? "已同步" : "正在使用本地计划");
+    } finally {
+      replayingRef.current = false;
+    }
+  }, [applySnapshot, isCloudbase, refreshPendingCount, repository, tripId]);
+
+  useEffect(() => {
+    const handleOnline = () => { void replayQueuedCommands(); };
+    window.addEventListener("online", handleOnline);
+    return () => window.removeEventListener("online", handleOnline);
+  }, [replayQueuedCommands]);
 
   const mutateTrip = useCallback((mutation: TripMutation) => {
     const requestedSession = sessionRef.current;
@@ -140,6 +210,22 @@ export function TripProvider({
           savingRef.current = false;
           setSyncState(isCloudbase ? "已同步" : "正在使用本地计划");
           return current;
+        }
+        if (!isOnline()) {
+          const optimistic = { ...next, version: current.version + 1 };
+          await enqueuePendingCommand({
+            tripId: optimistic.id,
+            expectedVersion: current.version,
+            patch: optimistic,
+            createdAt: new Date().toISOString(),
+            idempotencyKey: newIdempotencyKey(),
+          });
+          applySnapshot(optimistic, requestedSession);
+          await refreshPendingCount();
+          setConflictPaused(false);
+          savingRef.current = false;
+          setSyncState("离线");
+          return optimistic;
         }
         const saved = await repository.save(next, current.version);
         if (requestedSession !== sessionRef.current) return undefined;
@@ -162,7 +248,7 @@ export function TripProvider({
 
     mutationQueueRef.current = task.then(() => undefined, () => undefined);
     return task;
-  }, [applySnapshot, invalidateSession, isCloudbase, repository]);
+  }, [applySnapshot, invalidateSession, isCloudbase, refreshPendingCount, repository]);
 
   const saveTrip = useCallback(async (next: Trip) => {
     const saved = await mutateTrip(() => next);
@@ -183,7 +269,7 @@ export function TripProvider({
   }
 
   return (
-    <TripContext.Provider value={{ trip, saveTrip, mutateTrip, syncState }}>
+    <TripContext.Provider value={{ trip, saveTrip, mutateTrip, syncState, pendingCommandCount, conflictPaused }}>
       {children}
     </TripContext.Provider>
   );
