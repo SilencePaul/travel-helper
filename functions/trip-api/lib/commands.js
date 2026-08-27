@@ -1,10 +1,47 @@
 const { z } = require("zod");
 
+const BudgetItemSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  category: z.enum(["flight", "hotel", "transport", "ticket", "food"]),
+  estimated: z.number().int().nonnegative(),
+  paid: z.number().int().nonnegative(),
+  currency: z.string().min(1).max(8),
+  status: z.enum(["unpaid", "partial", "paid"]),
+  dayId: z.string().min(1).optional(),
+}).superRefine((item, context) => {
+  if (item.status === "unpaid" && item.paid !== 0) context.addIssue({ code: "custom", message: "未支付订单的已支付金额必须为 0", path: ["paid"] });
+  if (item.status === "partial" && item.paid <= 0) context.addIssue({ code: "custom", message: "部分支付订单必须录入实际已付金额", path: ["paid"] });
+  if (item.status === "paid" && item.paid <= 0) context.addIssue({ code: "custom", message: "已支付订单必须录入实际已付金额", path: ["paid"] });
+});
+
 const TripSchema = z.object({
-  id: z.string().min(1), title: z.string().min(1), startDate: z.string().date(), endDate: z.string().date(),
-  travelers: z.array(z.object({ id: z.string().min(1), name: z.string().min(1) })),
-  days: z.array(z.object({ id: z.string().min(1), date: z.string().date(), city: z.string(), itemIds: z.array(z.string()), hotelId: z.string().nullable().optional() })),
-  unscheduledItemIds: z.array(z.string()), orders: z.array(z.unknown()).default([]), memberUids: z.array(z.string().min(4).max(64)).optional(), version: z.number().int().nonnegative(),
+  id: z.string().min(1),
+  title: z.string().min(1),
+  startDate: z.string().date(),
+  endDate: z.string().date(),
+  travelers: z.array(z.object({ id: z.string(), name: z.string() })),
+  days: z.array(z.object({
+    id: z.string().min(1), date: z.string().date(), city: z.string(), itemIds: z.array(z.string()), hotelId: z.string().nullable().optional(),
+  })),
+  unscheduledItemIds: z.array(z.string()),
+  orders: z.array(BudgetItemSchema).default([]),
+  memberUids: z.array(z.string().min(4).max(64)).optional(),
+  version: z.number().int().nonnegative(),
+}).superRefine((trip, context) => {
+  if (trip.endDate < trip.startDate) context.addIssue({ code: "custom", message: "结束日期不能早于开始日期", path: ["endDate"] });
+
+  const dayIds = new Set();
+  trip.days.forEach((day, index) => {
+    if (dayIds.has(day.id)) context.addIssue({ code: "custom", message: "日期 ID 不能重复", path: ["days", index, "id"] });
+    dayIds.add(day.id);
+  });
+
+  const orderIds = new Set();
+  trip.orders.forEach((order, index) => {
+    if (orderIds.has(order.id)) context.addIssue({ code: "custom", message: "订单 ID 不能重复", path: ["orders", index, "id"] });
+    orderIds.add(order.id);
+  });
 });
 
 const ActionSchema = z.discriminatedUnion("action", [
@@ -22,6 +59,10 @@ function canonical(value) {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value && typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
   return JSON.stringify(value);
+}
+function requestTrip(trip) {
+  const { version, ...withoutServerVersion } = trip;
+  return withoutServerVersion;
 }
 function safeMember(member) {
   if (!member) return undefined;
@@ -78,9 +119,10 @@ function createTripCommands({ db, now = () => new Date() } = {}) {
       const idempotency = transaction.collection("trip_idempotency");
       const existing = one(await idempotency.doc(input.idempotencyKey).get());
       if (existing) {
-        if (existing.actorUid !== actorUid || existing.tripId !== input.trip.id) throw codedError("IDEMPOTENCY_KEY_REUSED");
-        const priorRequest = { ...existing.trip, version: input.trip.version };
-        if (canonical(priorRequest) !== canonical(input.trip)) throw codedError("IDEMPOTENCY_KEY_REUSED");
+        if (existing.actorUid !== actorUid || existing.tripId !== input.trip.id || !existing.trip || typeof existing.trip !== "object") throw codedError("IDEMPOTENCY_KEY_REUSED");
+        const existingExpectedVersion = Number.isInteger(existing.expectedVersion) ? existing.expectedVersion : existing.trip?.version - 1;
+        const priorRequest = existing.trip;
+        if (existingExpectedVersion !== input.expectedVersion || canonical(requestTrip(priorRequest)) !== canonical(requestTrip(input.trip))) throw codedError("IDEMPOTENCY_KEY_REUSED");
         return { trip: existing.trip };
       }
       if (current.version !== input.expectedVersion) throw codedError("VERSION_CONFLICT", { currentVersion: current.version });
@@ -114,4 +156,4 @@ function createTripCommands({ db, now = () => new Date() } = {}) {
   };
 }
 
-module.exports = { createTripCommands, codedError, safeMember };
+module.exports = { createTripCommands, codedError, safeMember, TripSchema };

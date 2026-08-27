@@ -92,6 +92,34 @@ test("saveTrip requires the actor to belong to the trip", async () => {
   assert.equal(db.data.trips.get("trip-2026-autumn").title, "秋日旅行");
 });
 
+test("saveTrip validates orders with the TripSchema contract", async () => {
+  const db = createDb({ members: [member("fs_admin", "admin")] });
+  const commands = createTripCommands({ db });
+
+  await assert.rejects(
+    () => commands.execute({
+      action: "saveTrip",
+      trip: { ...trip(), orders: [{ id: "flight-1", name: "机票" }] },
+      expectedVersion: 0,
+      idempotencyKey: "invalid-order",
+    }, "fs_admin"),
+    { code: "INVALID_REQUEST" },
+  );
+  assert.equal(db.data.trips.get("trip-2026-autumn").version, 0);
+});
+
+test("idempotency keys are bound to the original expected version", async () => {
+  const db = createDb({ members: [member("fs_admin", "admin")] });
+  const commands = createTripCommands({ db });
+  const event = { action: "saveTrip", trip: trip(), expectedVersion: 0, idempotencyKey: "save-bound" };
+
+  await commands.execute(event, "fs_admin");
+  await assert.rejects(
+    () => commands.execute({ ...event, expectedVersion: 1 }, "fs_admin"),
+    { code: "IDEMPOTENCY_KEY_REUSED" },
+  );
+});
+
 test("audit records include actor UID and safe changed fields only", async () => {
   const db = createDb({ members: [member("fs_admin", "admin", "一鸣"), member("fs_pending", "pending", "美垚")] });
   const commands = createTripCommands({ db, now: () => new Date("2026-08-27T12:00:00.000Z") });
