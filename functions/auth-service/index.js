@@ -14,6 +14,11 @@ function pathOf(event) { return new URL(event.path || event.requestContext?.http
 function bodyOf(event) { if (!event.body) return {}; try { return typeof event.body === "string" ? JSON.parse(event.body) : event.body; } catch { return undefined; } }
 function errorCode(error) { return error && typeof error.code === "string" ? error.code : "AUTH_REQUEST_FAILED"; }
 function unavailableError() { const error = new Error("AUTH_SERVICE_UNAVAILABLE"); error.code = "AUTH_SERVICE_UNAVAILABLE"; return error; }
+function safeMember(member) {
+  if (!member) return undefined;
+  const { uid, displayName, avatarUrl, role, version, createdAt, approvedAt } = member;
+  return { uid, displayName, ...(avatarUrl ? { avatarUrl } : {}), role, version, createdAt, ...(approvedAt ? { approvedAt } : {}) };
+}
 
 function createAuthHandler({ env = process.env, fetchImpl, memberStore, cloudbase, authStore, now = () => Date.now(), randomBytes, createTicket } = {}) {
   const cloudbaseMode = env.VITE_DATA_MODE === "cloudbase"
@@ -82,6 +87,12 @@ function createAuthHandler({ env = process.env, fetchImpl, memberStore, cloudbas
       if (url.pathname === "/api/auth/ticket" && method === "POST") {
         if (!session) return json(401, { error: "AUTH_REQUIRED" }, headers);
         try { return json(200, { ticket: await tickets.issueForUid(session.uid) }, headers); } catch (error) { const codeName = errorCode(error); return json(codeName === "PENDING_APPROVAL" ? 403 : 401, { error: codeName }, headers); }
+      }
+      if (url.pathname === "/api/auth/profile" && method === "GET") {
+        if (!session) return json(401, { error: "AUTH_REQUIRED" }, headers);
+        const member = await store.findByUid(session.uid);
+        if (!member) return json(401, { error: "NOT_AUTHORIZED" }, headers);
+        return json(200, { member: safeMember(member) }, headers);
       }
       if (url.pathname === "/api/auth/logout" && method === "POST") {
         await sessions.revokeSession(sessionToken);

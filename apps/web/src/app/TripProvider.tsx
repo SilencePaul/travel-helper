@@ -8,7 +8,7 @@ import {
 import type { Trip, TripRepository } from "@travel/contracts";
 import seed from "../../../../content/trip.seed.json";
 import { LocalTripRepository } from "../infrastructure/localTripRepository";
-import { CloudBaseTripRepository } from "../infrastructure/cloudbaseTripRepository";
+import { CloudBaseTripRepository, isUnauthorizedError } from "../infrastructure/cloudbaseTripRepository";
 import {
   TripContext,
   type TripMutation,
@@ -19,24 +19,43 @@ type TripProviderProps = {
   children: ReactNode;
   repository?: TripRepository;
   tripId?: string;
+  onUnauthorized?: (error: unknown) => void;
 };
 
 export function TripProvider({
   children,
   repository: injectedRepository,
   tripId = seed.id,
+  onUnauthorized,
 }: TripProviderProps) {
   const [defaultRepository] = useState<TripRepository>(() => injectedRepository ?? (import.meta.env.VITE_DATA_MODE === "cloudbase" ? new CloudBaseTripRepository() : new LocalTripRepository(seed)));
   const repository = injectedRepository ?? defaultRepository;
   const isCloudbase = repository.syncMode === "cloudbase";
   const [trip, setTrip] = useState<Trip>();
   const [loadError, setLoadError] = useState(false);
+  const [authLost, setAuthLost] = useState(false);
   const [syncState, setSyncState] = useState<TripSyncState>(isCloudbase ? "已同步" : "正在使用本地计划");
   const tripRef = useRef<Trip | undefined>(undefined);
   const sessionRef = useRef(0);
   const mutationQueueRef = useRef<Promise<unknown>>(Promise.resolve());
   const savingRef = useRef(false);
   const connectionRef = useRef<"synced" | "reconnecting">("synced");
+  const invalidatedRef = useRef(false);
+
+  const invalidateSession = useCallback((error: unknown) => {
+    if (invalidatedRef.current) return;
+    invalidatedRef.current = true;
+    sessionRef.current += 1;
+    tripRef.current = undefined;
+    mutationQueueRef.current = Promise.resolve();
+    savingRef.current = false;
+    /* oxlint-disable react/set-state-in-effect -- authorization loss invalidates the active data session */
+    setTrip(undefined);
+    setLoadError(false);
+    setAuthLost(true);
+    /* oxlint-enable react/set-state-in-effect */
+    onUnauthorized?.(error);
+  }, [onUnauthorized]);
 
   const applySnapshot = useCallback((snapshot: Trip, session: number) => {
     if (session !== sessionRef.current) return false;
@@ -51,6 +70,7 @@ export function TripProvider({
   useEffect(() => {
     const session = sessionRef.current + 1;
     sessionRef.current = session;
+    invalidatedRef.current = false;
     tripRef.current = undefined;
     mutationQueueRef.current = Promise.resolve();
     savingRef.current = false;
@@ -58,6 +78,7 @@ export function TripProvider({
     /* oxlint-disable react/set-state-in-effect -- a repository identity change starts a new async session */
     setTrip(undefined);
     setLoadError(false);
+    setAuthLost(false);
     setSyncState(isCloudbase ? "已同步" : "正在使用本地计划");
     /* oxlint-enable react/set-state-in-effect */
     let active = true;
@@ -73,9 +94,12 @@ export function TripProvider({
         connectionRef.current = state;
         if (state === "reconnecting") setSyncState("正在重连");
         else if (!savingRef.current) setSyncState("已同步");
+      }, (error) => {
+        if (active && isUnauthorizedError(error)) invalidateSession(error);
       });
-    } catch {
-      setLoadError(true);
+    } catch (error) {
+      if (active && isUnauthorizedError(error)) invalidateSession(error);
+      else if (active) setLoadError(true);
     }
 
     void repository
@@ -86,9 +110,10 @@ export function TripProvider({
           if (isCloudbase && !savingRef.current && connectionRef.current === "synced") setSyncState("已同步");
         }
       })
-      .catch(() => {
+      .catch((error) => {
         if (active && session === sessionRef.current && !tripRef.current) {
-          setLoadError(true);
+          if (isUnauthorizedError(error)) invalidateSession(error);
+          else setLoadError(true);
         }
       });
 
@@ -97,7 +122,7 @@ export function TripProvider({
       if (sessionRef.current === session) sessionRef.current += 1;
       unsubscribe?.();
     };
-  }, [applySnapshot, isCloudbase, repository, tripId]);
+  }, [applySnapshot, invalidateSession, isCloudbase, repository, tripId]);
 
   const mutateTrip = useCallback((mutation: TripMutation) => {
     const requestedSession = sessionRef.current;
@@ -121,8 +146,12 @@ export function TripProvider({
         savingRef.current = false;
         setSyncState(isCloudbase ? "已同步" : "正在使用本地计划");
         return saved;
-      } catch {
+      } catch (error) {
         savingRef.current = false;
+        if (isUnauthorizedError(error)) {
+          if (requestedSession === sessionRef.current) invalidateSession(error);
+          return undefined;
+        }
         if (requestedSession === sessionRef.current) {
           setSyncState("保存失败，请重试");
         }
@@ -132,7 +161,7 @@ export function TripProvider({
 
     mutationQueueRef.current = task.then(() => undefined, () => undefined);
     return task;
-  }, [applySnapshot, isCloudbase, repository]);
+  }, [applySnapshot, invalidateSession, isCloudbase, repository]);
 
   const saveTrip = useCallback(async (next: Trip) => {
     const saved = await mutateTrip(() => next);
@@ -142,6 +171,10 @@ export function TripProvider({
 
   if (loadError) {
     return <p role="alert">旅行计划加载失败，请刷新后重试。</p>;
+  }
+
+  if (authLost) {
+    return <p role="alert">登录状态已失效，请重新登录。</p>;
   }
 
   if (!trip) {

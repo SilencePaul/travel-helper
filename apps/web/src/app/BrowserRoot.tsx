@@ -1,6 +1,6 @@
-import type { TripRepository } from "@travel/contracts";
-import { useEffect, useState } from "react";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import type { Member, TripRepository } from "@travel/contracts";
+import { useCallback, useEffect, useState } from "react";
+import { BrowserRouter, Route, Routes, useNavigate } from "react-router-dom";
 import seed from "../../../../content/trip.seed.json";
 import { TripApp } from "../App";
 import { LocalTripRepository } from "../infrastructure/localTripRepository";
@@ -10,6 +10,23 @@ import { LoginPage } from "../features/auth/LoginPage";
 import { AuthCallbackPage } from "../features/auth/AuthCallbackPage";
 import { BootstrapPage } from "../features/auth/BootstrapPage";
 import { PendingApprovalPage } from "../features/auth/PendingApprovalPage";
+import { getCurrentProfile, logout } from "../infrastructure/authSession";
+
+type ProductionAuthState =
+  | { status: "checking" }
+  | { status: "login" }
+  | { status: "pending" }
+  | { status: "authenticated"; member: Member };
+
+function memberProfileFromUser(user: unknown): Member | undefined {
+  if (!user || typeof user !== "object") return undefined;
+  const value = user as { uid?: unknown; displayName?: unknown; role?: unknown; profile?: { role?: unknown }; customClaims?: { role?: unknown }; customUser?: { role?: unknown } };
+  const role = value.role ?? value.profile?.role ?? value.customClaims?.role ?? value.customUser?.role;
+  if (role !== "admin" && role !== "member" && role !== "pending" && role !== "removed") return undefined;
+  const uid = typeof value.uid === "string" && value.uid.length >= 4 ? value.uid : "authenticated-user";
+  const displayName = typeof value.displayName === "string" && value.displayName.trim() ? value.displayName : "已登录用户";
+  return { uid, displayName, role, version: 0, createdAt: new Date(0).toISOString() };
+}
 
 function createBrowserTestRepository(): TripRepository | undefined {
   if (!import.meta.env.DEV) return undefined;
@@ -121,29 +138,56 @@ function DevBrowserRoot() {
 }
 
 export function ProductionAuthGate() {
-  const [authenticated, setAuthenticated] = useState<boolean>();
-  useEffect(() => {
-    let active = true;
-    void getCloudbaseAuth().getCurrentUser()
-      .then((user) => { if (active) setAuthenticated(Boolean(user)); })
-      .catch(() => { if (active) setAuthenticated(false); });
-    return () => { active = false; };
+  const [authState, setAuthState] = useState<ProductionAuthState>({ status: "checking" });
+  const refreshAuth = useCallback(async () => {
+    try {
+      const user = await getCloudbaseAuth().getCurrentUser();
+      if (!user) {
+        setAuthState({ status: "login" });
+        return;
+      }
+      const member = memberProfileFromUser(user) ?? await getCurrentProfile();
+      setAuthState(member.role === "pending" ? { status: "pending" } : member.role === "admin" || member.role === "member" ? { status: "authenticated", member } : { status: "login" });
+    } catch {
+      setAuthState({ status: "login" });
+    }
   }, []);
+  /* oxlint-disable react/set-state-in-effect -- initial auth state synchronizes with the external auth session */
+  useEffect(() => {
+    void refreshAuth();
+  }, [refreshAuth]);
+  /* oxlint-enable react/set-state-in-effect */
 
   return (
     <BrowserRouter>
-      <Routes>
-        <Route path="/auth/callback" element={<AuthCallbackPage onAuthenticated={() => setAuthenticated(true)} />} />
-        <Route path="/auth/bootstrap" element={<BootstrapPage onAuthenticated={() => setAuthenticated(true)} />} />
-        <Route path="/auth/pending" element={<PendingApprovalPage onAuthenticated={() => setAuthenticated(true)} />} />
-        <Route path="*" element={
-          authenticated === undefined
-            ? <p role="status">正在验证登录状态</p>
-            : authenticated
-              ? <TripApp />
-              : <LoginPage />
-        } />
-      </Routes>
+      <ProductionRoutes authState={authState} setAuthState={setAuthState} refreshAuth={refreshAuth} />
     </BrowserRouter>
+  );
+}
+
+function ProductionRoutes({ authState, setAuthState, refreshAuth }: { authState: ProductionAuthState; setAuthState: (state: ProductionAuthState) => void; refreshAuth: () => Promise<void> }) {
+  const navigate = useNavigate();
+  const handleUnauthorized = useCallback((error: unknown) => {
+    const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
+    setAuthState({ status: code === "PENDING_APPROVAL" ? "pending" : "login" });
+    void logout().catch(() => undefined);
+    navigate(code === "PENDING_APPROVAL" ? "/auth/pending" : "/", { replace: true });
+  }, [navigate, setAuthState]);
+
+  return (
+    <Routes>
+      <Route path="/auth/callback" element={<AuthCallbackPage onAuthenticated={() => void refreshAuth()} />} />
+      <Route path="/auth/bootstrap" element={<BootstrapPage onAuthenticated={() => void refreshAuth()} />} />
+      <Route path="/auth/pending" element={<PendingApprovalPage onAuthenticated={() => void refreshAuth()} />} />
+      <Route path="*" element={
+        authState.status === "checking"
+          ? <p role="status">正在验证登录状态</p>
+          : authState.status === "pending"
+            ? <PendingApprovalPage onAuthenticated={() => void refreshAuth()} />
+            : authState.status === "authenticated"
+              ? <TripApp member={authState.member} onUnauthorized={handleUnauthorized} />
+              : <LoginPage />
+      } />
+    </Routes>
   );
 }

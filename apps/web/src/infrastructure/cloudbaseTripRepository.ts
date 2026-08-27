@@ -16,7 +16,12 @@ export class VersionConflictError extends Error {
   constructor() { super("旅行计划已被其他成员更新，请刷新后重试"); this.name = "VersionConflictError"; }
 }
 
-export class ForbiddenError extends Error {
+export class UnauthorizedError extends Error {
+  readonly code: string = "UNAUTHORIZED";
+  constructor(message = "登录已失效") { super(message); this.name = "UnauthorizedError"; }
+}
+
+export class ForbiddenError extends UnauthorizedError {
   readonly code = "FORBIDDEN";
   constructor() { super("无权执行此操作"); this.name = "ForbiddenError"; }
 }
@@ -45,6 +50,32 @@ function serviceErrorCode(value: unknown): string | undefined {
   if (!value || typeof value !== "object") return undefined;
   const code = (value as { error?: unknown; code?: unknown }).error ?? (value as { code?: unknown }).code;
   return typeof code === "string" ? code : undefined;
+}
+
+function isUnauthorizedCode(code: string | undefined) {
+  return code === "UNAUTHORIZED"
+    || code === "AUTH_REQUIRED"
+    || code === "MEMBERSHIP_REQUIRED"
+    || code === "FORBIDDEN"
+    || code === "ADMIN_REQUIRED"
+    || code === "NOT_AUTHORIZED"
+    || code === "PENDING_APPROVAL"
+    || code === "REMOVED"
+    || code === "PERMISSION_DENIED"
+    || code === "PERMISSION_DENIED:"
+    || code?.startsWith("PERMISSION_DENIED:") === true;
+}
+
+function unauthorizedError(code?: string) {
+  return code === "FORBIDDEN" || code === "MEMBERSHIP_REQUIRED" || code === "ADMIN_REQUIRED"
+    ? new ForbiddenError()
+    : new UnauthorizedError();
+}
+
+export function isUnauthorizedError(error: unknown): error is UnauthorizedError {
+  if (error instanceof UnauthorizedError) return true;
+  const code = serviceErrorCode(error);
+  return isUnauthorizedCode(code);
 }
 
 export type CloudBaseTripRepositoryOptions = {
@@ -76,6 +107,8 @@ export class CloudBaseTripRepository implements TripRepository {
       return parsed;
     } catch (error) {
       if (error instanceof RepositoryUnavailableError) throw error;
+      const code = serviceErrorCode(error);
+      if (isUnauthorizedCode(code)) throw unauthorizedError(code);
       throw new RepositoryUnavailableError();
     }
   }
@@ -89,7 +122,7 @@ export class CloudBaseTripRepository implements TripRepository {
       const result = response?.result;
       const code = serviceErrorCode(result);
       if (code === "VERSION_CONFLICT") throw new VersionConflictError();
-      if (code === "FORBIDDEN" || code === "MEMBERSHIP_REQUIRED" || code === "ADMIN_REQUIRED") throw new ForbiddenError();
+      if (isUnauthorizedCode(code)) throw unauthorizedError(code);
       if (!result || typeof result !== "object" || !("trip" in result)) throw new RepositoryUnavailableError();
       const saved = parsedTrip((result as { trip: unknown }).trip);
       this.versions.set(next.id, Math.max(this.versions.get(next.id) ?? -1, saved.version));
@@ -98,14 +131,14 @@ export class CloudBaseTripRepository implements TripRepository {
       if (error instanceof VersionConflictError || error instanceof ForbiddenError || error instanceof RepositoryUnavailableError) throw error;
       const code = serviceErrorCode(error);
       if (code === "VERSION_CONFLICT") throw new VersionConflictError();
-      if (code === "FORBIDDEN" || code === "MEMBERSHIP_REQUIRED" || code === "ADMIN_REQUIRED") throw new ForbiddenError();
+      if (isUnauthorizedCode(code)) throw unauthorizedError(code);
       throw new RepositoryUnavailableError();
     }
   }
 
-  subscribe(tripId: string, onChange: (change: TripChange) => void, onConnectionState?: (state: TripConnectionState) => void): () => void {
-    let currentVersion = this.versions.get(tripId) ?? -1;
+  subscribe(tripId: string, onChange: (change: TripChange) => void, onConnectionState?: (state: TripConnectionState) => void, onUnauthorized?: (error: unknown) => void): () => void {
     let listener: { close: () => void } | undefined;
+    let unauthorized = false;
     try {
       listener = this.database.collection("trips").doc(tripId).watch({
         onChange: (snapshot) => {
@@ -116,17 +149,29 @@ export class CloudBaseTripRepository implements TripRepository {
           if (!candidate || typeof candidate !== "object") return;
           let trip: Trip;
           try { trip = parsedTrip(candidate); } catch { onConnectionState?.("reconnecting"); return; }
+          const currentVersion = this.versions.get(tripId) ?? -1;
           if (trip.version <= currentVersion) return;
-          currentVersion = trip.version;
-          this.versions.set(tripId, currentVersion);
+          this.versions.set(tripId, trip.version);
           const record = candidate as { updatedByName?: unknown; actorName?: unknown; changedAt?: unknown; updatedAt?: unknown };
           onChange({ trip, actorName: typeof record.updatedByName === "string" ? record.updatedByName : typeof record.actorName === "string" ? record.actorName : "协作者", changedAt: typeof record.changedAt === "string" ? record.changedAt : typeof record.updatedAt === "string" ? record.updatedAt : new Date().toISOString() });
           onConnectionState?.("synced");
         },
-        onError: () => onConnectionState?.("reconnecting"),
+        onError: (error) => {
+          const code = serviceErrorCode(error);
+          if (isUnauthorizedCode(code)) {
+            if (!unauthorized) {
+              unauthorized = true;
+              onUnauthorized?.(unauthorizedError(code));
+            }
+            return;
+          }
+          onConnectionState?.("reconnecting");
+        },
       });
-    } catch {
-      onConnectionState?.("reconnecting");
+    } catch (error) {
+      const code = serviceErrorCode(error);
+      if (isUnauthorizedCode(code)) onUnauthorized?.(unauthorizedError(code));
+      else onConnectionState?.("reconnecting");
     }
     return () => { listener?.close(); };
   }

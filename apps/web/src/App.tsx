@@ -13,6 +13,7 @@ import {
   type TravelDay,
   type Trip,
   type TripRepository,
+  type Member,
 } from "@travel/contracts";
 import type { RouteService } from "./features/map/types";
 import { TripProvider } from "./app/TripProvider";
@@ -28,6 +29,8 @@ type AppProps = {
   createDayId?: () => string;
   tripId?: string;
   routeService?: RouteService;
+  member?: Member;
+  onUnauthorized?: (error: unknown) => void;
 };
 
 function uniqueDayId(days: TravelDay[], requestedId: string) {
@@ -52,7 +55,7 @@ function withDayRange(trip: Trip, days: TravelDay[], unscheduledItemIds = trip.u
   };
 }
 
-function TripRoutes({ createDayId = () => "day-ui", routeService }: Pick<AppProps, "createDayId" | "routeService">) {
+function TripRoutes({ createDayId = () => "day-ui", routeService, member, enforceAdmin }: Pick<AppProps, "createDayId" | "routeService" | "member"> & { enforceAdmin: boolean }) {
   const { trip, mutateTrip, syncState } = useTrip();
   const navigate = useNavigate();
   const [requestedDayId, setRequestedDayId] = useState<string>();
@@ -196,7 +199,7 @@ function TripRoutes({ createDayId = () => "day-ui", routeService }: Pick<AppProp
           }
         />
         <Route path="/hotels" element={<HotelComparePage trip={trip} routeService={routeService} onSelectHotel={selectHotel} onBack={() => navigate("/")} />} />
-        <Route path="/admin/members" element={<MemberManagementPage />} />
+        <Route path="/admin/members" element={enforceAdmin && member?.role !== "admin" ? <p role="alert">无权访问</p> : <MemberManagementPage />} />
         <Route
           path="/day/:dayId"
           element={
@@ -221,10 +224,11 @@ function DayRoute({ trip, onBack, routeService }: { trip: Trip; onBack: (dayId: 
   return <DayPage trip={trip} dayId={dayId} onBack={() => onBack(dayId)} routeService={routeService} />;
 }
 
-export function TripApp({ repository, createDayId, tripId, routeService }: AppProps) {
+export function TripApp({ repository, createDayId, tripId, routeService, member, onUnauthorized }: AppProps) {
+  const enforceAdmin = repository?.syncMode === "cloudbase" || !import.meta.env.DEV;
   return (
-    <TripProvider repository={repository} tripId={tripId}>
-      <TripRoutes createDayId={createDayId} routeService={routeService} />
+    <TripProvider repository={repository} tripId={tripId} onUnauthorized={onUnauthorized}>
+      <TripRoutes createDayId={createDayId} routeService={routeService} member={member} enforceAdmin={enforceAdmin} />
     </TripProvider>
   );
 }

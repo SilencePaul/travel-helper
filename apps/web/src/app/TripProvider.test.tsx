@@ -1,7 +1,7 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import type { Trip, TripChange, TripRepository } from "@travel/contracts";
 import { useEffect } from "react";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import seed from "../../../../content/trip.seed.json";
 import { TripProvider } from "./TripProvider";
 import { useTrip, type TripContextValue } from "./tripContext";
@@ -92,6 +92,15 @@ class MultiTripRepository implements TripRepository {
     for (const listener of this.listeners.get(tripId) ?? []) {
       listener({ trip, actorName: "test", changedAt: new Date().toISOString() });
     }
+  }
+}
+
+class UnauthorizedTripRepository extends ControlledTripRepository {
+  unauthorized?: (error: unknown) => void;
+
+  subscribe(_tripId: string, onChange: (change: TripChange) => void, _onConnectionState?: (state: "synced" | "reconnecting") => void, onUnauthorized?: (error: unknown) => void) {
+    this.unauthorized = onUnauthorized;
+    return super.subscribe(_tripId, onChange);
   }
 }
 
@@ -256,4 +265,21 @@ test("ignores a delayed save result from a replaced repository", async () => {
   await expect(oldMutation).resolves.toBeUndefined();
   expect(await screen.findByText("current repository")).toBeVisible();
   expect(screen.queryByText("stale save")).not.toBeInTheDocument();
+});
+
+test("clears a loaded trip when the repository reports authorization loss", async () => {
+  const repository = new UnauthorizedTripRepository();
+  const onUnauthorized = vi.fn();
+  render(
+    <TripProvider repository={repository} tripId={seed.id} onUnauthorized={onUnauthorized}>
+      <ProviderProbe />
+    </TripProvider>,
+  );
+  await act(async () => repository.loadResult.resolve(versionedTrip(1, "private itinerary")));
+  expect(await screen.findByText("private itinerary")).toBeVisible();
+
+  act(() => repository.unauthorized?.(Object.assign(new Error("provider detail"), { code: "UNAUTHORIZED" })));
+
+  expect(screen.queryByText("private itinerary")).not.toBeInTheDocument();
+  expect(onUnauthorized).toHaveBeenCalledWith(expect.objectContaining({ code: "UNAUTHORIZED" }));
 });

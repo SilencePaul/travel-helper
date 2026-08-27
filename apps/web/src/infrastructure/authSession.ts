@@ -1,4 +1,5 @@
 import { getCloudbaseAuth } from "./cloudbaseClient";
+import type { Member } from "@travel/contracts";
 
 type AuthEnvironment = { VITE_AUTH_SERVICE_URL?: string };
 type FetchLike = typeof fetch;
@@ -41,6 +42,11 @@ export async function bootstrapWithCode(baseUrl: string, code: string, oauthStat
 export async function requestCustomTicket(baseUrl = authServiceUrl(), fetchImpl: FetchLike = fetch) {
   const response = await fetchImpl(baseUrl.replace(/\/$/, "") + "/api/auth/ticket", { method: "POST", credentials: "include" });
   return (await jsonResponse<{ ticket: string }>(response)).ticket;
+}
+
+export async function getCurrentProfile(baseUrl = authServiceUrl(), fetchImpl: FetchLike = fetch) {
+  const response = await fetchImpl(baseUrl.replace(/\/$/, "") + "/api/auth/profile", { method: "GET", credentials: "include" });
+  return (await jsonResponse<{ member: Member }>(response)).member;
 }
 
 export async function signInWithCustomTicket(baseUrl = authServiceUrl()) {

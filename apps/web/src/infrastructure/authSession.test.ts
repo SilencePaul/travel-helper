@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { authServiceUrl, bootstrapWithCode, requestCustomTicket } from "./authSession";
+import { authServiceUrl, bootstrapWithCode, getCurrentProfile, requestCustomTicket } from "./authSession";
 
 describe("auth session", () => {
   it("requires the standalone auth service URL", () => {
@@ -18,5 +18,12 @@ describe("auth session", () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ticket: "ticket" }), { status: 200 }));
     await expect(requestCustomTicket("https://auth.example", fetchMock)).resolves.toBe("ticket");
     expect(fetchMock).toHaveBeenCalledWith("https://auth.example/api/auth/ticket", expect.objectContaining({ method: "POST", credentials: "include" }));
+  });
+
+  it("loads the authenticated member profile with credentials", async () => {
+    const member = { uid: "fs_member", displayName: "成员", role: "member", version: 0, createdAt: "2026-08-27T00:00:00.000Z" } as const;
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ member }), { status: 200 }));
+    await expect(getCurrentProfile("https://auth.example", fetchMock)).resolves.toEqual(member);
+    expect(fetchMock).toHaveBeenCalledWith("https://auth.example/api/auth/profile", expect.objectContaining({ method: "GET", credentials: "include" }));
   });
 });
