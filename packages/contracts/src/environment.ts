@@ -23,7 +23,16 @@ export const ServerEnvironmentSchema = z.object({
   PUBLIC_APP_URL: NonEmptyEnvironmentValueSchema,
   ADMIN_BOOTSTRAP_CODE: NonEmptyEnvironmentValueSchema,
   AUTH_SESSION_SECRET: NonEmptyEnvironmentValueSchema,
-  CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS: NonEmptyEnvironmentValueSchema,
+  CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS: NonEmptyEnvironmentValueSchema.superRefine((value, context) => {
+    try {
+      const credentials: unknown = JSON.parse(value);
+      if (typeof credentials !== "object" || credentials === null || Array.isArray(credentials)) {
+        context.addIssue({ code: "custom", message: "CloudBase 自定义登录凭证必须是 JSON 对象" });
+      }
+    } catch {
+      context.addIssue({ code: "custom", message: "CloudBase 自定义登录凭证必须是 JSON 对象" });
+    }
+  }),
 });
 
 export type ClientEnvironment = z.infer<typeof ClientEnvironmentSchema>;

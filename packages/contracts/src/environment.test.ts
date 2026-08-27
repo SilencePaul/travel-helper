@@ -35,16 +35,26 @@ describe("ServerEnvironmentSchema", () => {
     CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS: "{\"private_key\":\"secret\"}",
   };
 
-  it("trims required values without parsing the custom-login credential JSON", () => {
+  it("trims required values and accepts a JSON credential object", () => {
     const result = ServerEnvironmentSchema.parse({
       ...valid,
       FEISHU_APP_ID: "  cli_example  ",
-      CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS: "  not-json-but-nonempty  ",
+      CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS: "  {\"private_key\":\"secret\"}  ",
     });
 
     expect(result.FEISHU_APP_ID).toBe("cli_example");
-    expect(result.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS).toBe("not-json-but-nonempty");
+    expect(result.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS).toBe("{\"private_key\":\"secret\"}");
   });
+
+  it.each(["not-json", "null", "[]", "\"credential\"", "1"])(
+    "rejects a custom-login credential that is not a JSON object",
+    (credentials) => {
+      expect(() => ServerEnvironmentSchema.parse({
+        ...valid,
+        CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS: credentials,
+      })).toThrow();
+    },
+  );
 
   it.each([
     "VITE_CLOUDBASE_ENV_ID",
