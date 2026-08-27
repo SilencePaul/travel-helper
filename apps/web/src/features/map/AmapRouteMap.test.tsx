@@ -74,7 +74,7 @@ describe("AmapRouteMap", () => {
   });
 
   it("passes the current day city to the route provider", async () => {
-    const routeService = { getSegments: vi.fn(async () => []) };
+    const routeService = { getSegments: vi.fn(async () => ({ segments: [], failures: [] })) };
 
     render(<DayPage trip={trip} dayId="hong-kong-day" onBack={() => undefined} routeService={routeService} />);
 
@@ -87,11 +87,11 @@ describe("AmapRouteMap", () => {
   });
 
   it("clears a resolved route when the same known endpoints gain an unresolved item", async () => {
-    const routeService = { getSegments: vi.fn(async () => [{
+    const routeService = { getSegments: vi.fn(async () => ({ segments: [{
       id: "known-route", fromPlaceId: "peak", toPlaceId: "central-pier", mode: "transit" as const,
       distanceMeters: 1800, durationMinutes: 15, summary: "高德公共交通路线",
       path: [{ lng: 114.15, lat: 22.27, coordinateSystem: "GCJ02" as const }, { lng: 114.16, lat: 22.28, coordinateSystem: "GCJ02" as const }, { lng: 114.166177, lat: 22.284364, coordinateSystem: "GCJ02" as const }],
-    }]) };
+    }], failures: [] })) };
     const view = render(<DayPage trip={trip} dayId="hong-kong-day" onBack={() => undefined} routeService={routeService} />);
 
     expect(await screen.findByText(/高德公共交通路线/)).toBeVisible();
@@ -116,7 +116,7 @@ describe("AmapRouteMap", () => {
     const mapLoader = vi.fn(() => new Promise<typeof mapApi>((resolve) => { resolveMap = resolve; }));
     const mapAdapter: MapInteractionAdapter = { focusPlace: vi.fn() };
     const routeService = {
-      getSegments: vi.fn(async () => [{
+      getSegments: vi.fn(async () => ({ segments: [{
         id: "provider-route",
         fromPlaceId: "peak",
         toPlaceId: "central-pier",
@@ -129,7 +129,7 @@ describe("AmapRouteMap", () => {
           { lng: 114.16, lat: 22.28, coordinateSystem: "GCJ02" as const },
           { lng: 114.166177, lat: 22.284364, coordinateSystem: "GCJ02" as const },
         ],
-      }]),
+      }], failures: [] })),
     };
 
     render(<DayPage trip={trip} dayId="hong-kong-day" onBack={() => undefined} mapAdapter={mapAdapter} mapLoader={mapLoader} routeService={routeService} />);

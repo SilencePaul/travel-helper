@@ -39,7 +39,7 @@ describe("createAmapRouteService", () => {
     const load = vi.fn(async () => ({ Transfer }));
     const service = createAmapRouteService(load, (id) => id === peak.id ? peak : centralPier);
 
-    const [segment] = await service.getSegments({
+    const { segments: [segment] } = await service.getSegments({
       dayId: "hong-kong-day",
       city: "香港",
       placeIds: [peak.id, centralPier.id],
@@ -71,7 +71,7 @@ describe("createAmapRouteService", () => {
     class Walking { search = search; }
     const service = createAmapRouteService(async () => ({ Walking }), (id) => id === peak.id ? peak : centralPier);
 
-    const [segment] = await service.getSegments({
+    const { segments: [segment] } = await service.getSegments({
       dayId: "hong-kong-day",
       city: "香港",
       placeIds: [peak.id, centralPier.id],
@@ -102,7 +102,7 @@ describe("createAmapRouteService", () => {
     class Transfer { constructor(_options?: unknown) {} search = search; }
     const service = createAmapRouteService(async () => ({ Transfer }), (id) => id === peak.id ? peak : centralPier);
 
-    const [segment] = await service.getSegments({
+    const { segments: [segment] } = await service.getSegments({
       dayId: "hong-kong-day",
       city: "香港",
       placeIds: [peak.id, centralPier.id],
@@ -113,8 +113,8 @@ describe("createAmapRouteService", () => {
     expect(segment?.path).toHaveLength(3);
   });
 
-  it("uses a provider walking route when a same-city transit search has no plan", async () => {
-    const transitSearch = vi.fn((_origin, _destination, callback) => callback("complete", { route: { transits: [] } }));
+  it("uses a provider walking route when AMap reports no_data for a same-city transit search", async () => {
+    const transitSearch = vi.fn((_origin, _destination, callback) => callback("no_data", { route: { transits: [] } }));
     const walkingSearch = vi.fn((_origin, _destination, callback) => callback("complete", {
       routes: [{ distance: 716, time: 600, steps: [{ path: [[114.1454, 22.2757], [114.1596, 22.2864]] }] }],
     }));
@@ -122,7 +122,7 @@ describe("createAmapRouteService", () => {
     class Walking { constructor(_options?: unknown) {} search = walkingSearch; }
     const service = createAmapRouteService(async () => ({ Transfer, Walking }), (id) => id === peak.id ? peak : centralPier);
 
-    const [segment] = await service.getSegments({
+    const { segments: [segment] } = await service.getSegments({
       dayId: "hong-kong-day",
       city: "香港",
       placeIds: [peak.id, centralPier.id],
@@ -143,14 +143,29 @@ describe("createAmapRouteService", () => {
     class Walking { constructor(_options?: unknown) {} search = walkingSearch; }
     const service = createAmapRouteService(async () => ({ Transfer, Walking }), (id) => id === peak.id ? peak : centralPier);
 
-    await expect(service.getSegments({
+    const result = await service.getSegments({
       dayId: "hong-kong-day",
       city: "香港",
       placeIds: [peak.id, centralPier.id],
       modeByLeg: ["transit"],
-    })).rejects.toThrow("AMAP_ROUTE_PROVIDER_UNAVAILABLE");
+    });
 
+    expect(result.failures).toEqual([expect.objectContaining({ code: "AMAP_ROUTE_PROVIDER_UNAVAILABLE" })]);
     expect(walkingSearch).not.toHaveBeenCalled();
+  });
+
+  it("preserves successful connectors when another connector fails", async () => {
+    const ferry = { ...centralPier, id: "ferry", lng: 114.17, lat: 22.29 };
+    const search = vi.fn((origin, _destination, callback) => callback(origin[0] === peak.lng ? "complete" : "error", origin[0] === peak.lng
+      ? { plans: [{ distance: 1800, time: 900, path: [[peak.lng, peak.lat], [centralPier.lng, centralPier.lat]] }] }
+      : { info: "provider unavailable" }));
+    class Transfer { constructor(_options?: unknown) {} search = search; }
+    const service = createAmapRouteService(async () => ({ Transfer }), (id) => id === peak.id ? peak : id === centralPier.id ? centralPier : ferry);
+
+    const result = await service.getSegments({ dayId: "hong-kong-day", city: "香港", placeIds: [peak.id, centralPier.id, ferry.id], modeByLeg: ["transit", "transit"] });
+
+    expect(result.segments).toEqual([expect.objectContaining({ fromPlaceId: "peak", toPlaceId: "central-pier" })]);
+    expect(result.failures).toEqual([expect.objectContaining({ fromPlaceId: "central-pier", toPlaceId: "ferry", code: "AMAP_ROUTE_PROVIDER_UNAVAILABLE" })]);
   });
 
   it("times out a route request and ignores a late plugin callback", async () => {
@@ -163,10 +178,8 @@ describe("createAmapRouteService", () => {
     }
     const service = createAmapRouteService(async () => ({ Walking }), (id) => id === peak.id ? peak : centralPier, { timeoutMs: 10 });
     const pending = service.getSegments({ dayId: "hong-kong-day", city: "香港", placeIds: [peak.id, centralPier.id], modeByLeg: ["walking"] });
-    const rejection = expect(pending).rejects.toThrow("AMAP_ROUTE_TIMEOUT");
-
     await vi.advanceTimersByTimeAsync(10);
-    await rejection;
+    await expect(pending).resolves.toEqual(expect.objectContaining({ failures: [expect.objectContaining({ code: "AMAP_ROUTE_TIMEOUT" })] }));
     callback?.("complete", { routes: [{ distance: 1, time: 1, steps: [] }] });
   });
 });

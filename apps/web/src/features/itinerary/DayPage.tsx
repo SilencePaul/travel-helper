@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AmapRouteMap, type AmapLoader } from "../map/AmapRouteMap";
 import { createAmapRouteService } from "../map/amapRouteService";
 import { loadAmap } from "../map/amapLoader";
-import type { MapInteractionAdapter, RouteService } from "../map/types";
+import type { MapInteractionAdapter, RouteFailure, RouteService } from "../map/types";
 import { getPlace, getPlaceDetail, getPlaces, getRouteModes } from "./itineraryData";
 import { Timeline } from "./Timeline";
 import { PlaceDrawer } from "../places/PlaceDrawer";
@@ -32,11 +32,11 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, r
   const unresolvedItemIds = (day?.itemIds ?? []).filter((itemId) => !getPlace(itemId));
   const [routeResult, setRouteResult] = useState<{
     key: string;
-    segments: Awaited<ReturnType<RouteService["getSegments"]>>;
-    error?: string;
+    segments: Awaited<ReturnType<RouteService["getSegments"]>>["segments"];
+    failures: RouteFailure[];
   }>();
   const segments = routeResult?.key === routeKey ? routeResult.segments : [];
-  const routeError = routeResult?.key === routeKey ? routeResult.error : undefined;
+  const routeFailures = routeResult?.key === routeKey ? routeResult.failures : [];
   const drawerPlace = drawerPlaceId ? getPlaceDetail(drawerPlaceId) : undefined;
   const drawerRainAlternative = drawerPlace?.type === "attraction"
     ? getPlaceDetail(drawerPlace.rainAlternativeId)
@@ -60,10 +60,10 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, r
       placeIds: places.map((place) => place.id),
       modeByLeg: getRouteModes(places.map((place) => place.id)),
     }).then((nextSegments) => {
-      if (active) setRouteResult({ key: routeKey, segments: nextSegments });
+      if (active) setRouteResult({ key: routeKey, ...nextSegments });
     }).catch(() => {
       if (active) {
-        setRouteResult({ key: routeKey, segments: [], error: "暂未取得高德道路路径，未绘制直线替代路线。" });
+        setRouteResult({ key: routeKey, segments: [], failures: [] });
       }
     });
     return () => { active = false; };
@@ -97,7 +97,7 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, r
         mapLoader={mapLoader}
       />
       {unresolvedItemIds.length > 0 ? <p className="map-fallback" role="alert">有未识别地点，无法串联道路路线：{unresolvedItemIds.join("、")}</p> : null}
-      {routeError ? <p className="map-fallback" role="status">{routeError}</p> : null}
+      {routeFailures.map((failure) => <p className="map-fallback" role="status" key={`${failure.fromPlaceId}-${failure.toPlaceId}`}>“{failure.fromPlaceId} → {failure.toPlaceId}”暂未取得高德道路路径（{failure.code}），未绘制直线替代路线。</p>)}
       <section aria-labelledby="timeline-heading">
         <h2 id="timeline-heading">当天行程</h2>
         <Timeline

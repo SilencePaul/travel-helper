@@ -17,13 +17,22 @@ export type RouteSegment = {
   summary: string;
 };
 
+export type RouteFailure = {
+  fromPlaceId: string;
+  toPlaceId: string;
+  mode: TravelMode;
+  code: "AMAP_ROUTE_PROVIDER_UNAVAILABLE" | "AMAP_ROUTE_TIMEOUT" | "AMAP_ROUTE_UNAVAILABLE" | "AMAP_ROUTE_NO_TRANSIT_PLAN";
+};
+
+export type RouteQueryResult = { segments: RouteSegment[]; failures: RouteFailure[] };
+
 export interface RouteService {
   getSegments(input: {
     dayId: string;
     city: string;
     placeIds: string[];
     modeByLeg: TravelMode[];
-  }): Promise<RouteSegment[]>;
+  }): Promise<RouteQueryResult>;
 }
 
 export interface NavigationService {

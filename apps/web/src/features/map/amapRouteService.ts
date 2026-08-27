@@ -1,4 +1,4 @@
-import type { Coordinate, RouteSegment, RouteService, TimelinePlace, TravelMode } from "./types";
+import type { Coordinate, RouteFailure, RouteSegment, RouteService, TimelinePlace, TravelMode } from "./types";
 
 type AmapSearchService = { search: (origin: [number, number], destination: [number, number], callback: (status: string, result: unknown) => void) => void };
 type AmapSearchConstructor = new (options?: { city: string }) => AmapSearchService;
@@ -95,7 +95,7 @@ async function getProviderSegment(AMap: AmapRouteApi, from: TimelinePlace, to: T
     };
     const timeout = window.setTimeout(() => settle(() => reject(new Error("AMAP_ROUTE_TIMEOUT"))), timeoutMs);
     createSearchService(AMap, mode, city).search([from.lng, from.lat], [to.lng, to.lat], (status, response) => {
-      settle(() => status === "complete" ? resolve(response) : reject(new Error("AMAP_ROUTE_PROVIDER_UNAVAILABLE")));
+      settle(() => status === "complete" ? resolve(response) : status === "no_data" && mode === "transit" ? reject(new Error("AMAP_ROUTE_NO_TRANSIT_PLAN")) : reject(new Error("AMAP_ROUTE_PROVIDER_UNAVAILABLE")));
     });
   });
   const route = firstRoute(result, mode);
@@ -119,7 +119,7 @@ export function createAmapRouteService(loadAmap: AmapLoader, resolvePlace: Place
       if (places.some((place) => !place)) throw new Error("AMAP_PLACE_UNAVAILABLE");
       const AMap = await loadAmap();
       const resolvedPlaces = places as TimelinePlace[];
-      return Promise.all(resolvedPlaces.slice(0, -1).map(async (from, index) => {
+      const requests = await Promise.allSettled(resolvedPlaces.slice(0, -1).map(async (from, index) => {
         const mode = modeByLeg[index] ?? "walking";
         try {
           return await getProviderSegment(AMap, from, resolvedPlaces[index + 1]!, mode, city, index, timeoutMs);
@@ -128,6 +128,17 @@ export function createAmapRouteService(loadAmap: AmapLoader, resolvePlace: Place
           return getProviderSegment(AMap, from, resolvedPlaces[index + 1]!, "walking", city, index, timeoutMs);
         }
       }));
+      const segments: RouteSegment[] = [];
+      const failures: RouteFailure[] = [];
+      requests.forEach((request, index) => {
+        if (request.status === "fulfilled") { segments.push(request.value); return; }
+        const error = request.reason;
+        const code = error instanceof Error && ["AMAP_ROUTE_PROVIDER_UNAVAILABLE", "AMAP_ROUTE_TIMEOUT", "AMAP_ROUTE_UNAVAILABLE", "AMAP_ROUTE_NO_TRANSIT_PLAN"].includes(error.message)
+          ? error.message as RouteFailure["code"]
+          : "AMAP_ROUTE_PROVIDER_UNAVAILABLE";
+        failures.push({ fromPlaceId: resolvedPlaces[index]!.id, toPlaceId: resolvedPlaces[index + 1]!.id, mode: modeByLeg[index] ?? "walking", code });
+      });
+      return { segments, failures };
     },
   };
 }

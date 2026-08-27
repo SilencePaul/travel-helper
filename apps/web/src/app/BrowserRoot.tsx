@@ -3,7 +3,7 @@ import { useState } from "react";
 import seed from "../../../../content/trip.seed.json";
 import App from "../App";
 import { LocalTripRepository } from "../infrastructure/localTripRepository";
-import type { RouteService } from "../features/map/types";
+import type { RouteSegment, RouteService } from "../features/map/types";
 
 function createBrowserTestRepository(): TripRepository | undefined {
   if (!import.meta.env.DEV) return undefined;
@@ -34,9 +34,9 @@ function createBrowserTestRouteService(): RouteService | undefined {
       if (input.dayId.includes(":hotel")) {
         const isPark = input.placeIds.includes("park-hotel-hong-kong");
         const walking = input.modeByLeg[0] === "walking";
-        return [{ id: `${input.dayId}-${isPark ? "park" : "kowloon"}`, fromPlaceId: input.placeIds[0]!, toPlaceId: input.placeIds[1]!, mode: walking ? "walking" : "transit", distanceMeters: walking ? (isPark ? 760 : 380) : (isPark ? 2200 : 1300), durationMinutes: walking ? (isPark ? 10 : 5) : (isPark ? 22 : 13), summary: "测试高德酒店路线", path: [] }];
+        return { segments: [{ id: `${input.dayId}-${isPark ? "park" : "kowloon"}`, fromPlaceId: input.placeIds[0]!, toPlaceId: input.placeIds[1]!, mode: walking ? "walking" : "transit", distanceMeters: walking ? (isPark ? 760 : 380) : (isPark ? 2200 : 1300), durationMinutes: walking ? (isPark ? 10 : 5) : (isPark ? 22 : 13), summary: "测试高德酒店路线", path: [] }], failures: [] };
       }
-      return [
+      const fixtures = [
         {
           id: "test-peak-central",
           fromPlaceId: "peak",
@@ -65,7 +65,9 @@ function createBrowserTestRouteService(): RouteService | undefined {
             { lng: 114.1691, lat: 22.2947, coordinateSystem: "GCJ02" },
           ],
         },
-      ];
+      ] satisfies RouteSegment[];
+      const segments = fixtures.filter((segment) => input.placeIds.some((id, index) => id === segment.fromPlaceId && input.placeIds[index + 1] === segment.toPlaceId));
+      return { segments, failures: [] };
     },
   };
 }

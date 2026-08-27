@@ -19,7 +19,7 @@ const trip: Trip = {
 describe("HotelComparePage", () => {
   it("selects a hotel, synchronizes the marker, and exposes sourced snapshot caveats", async () => {
     const onSelectHotel = vi.fn();
-    const routeService = { getSegments: vi.fn(async () => [{ id: "provider", fromPlaceId: "a", toPlaceId: "b", mode: "transit" as const, distanceMeters: 1200, durationMinutes: 18, summary: "高德公共交通路线", path: [] }]) };
+    const routeService = { getSegments: vi.fn(async () => ({ segments: [{ id: "provider", fromPlaceId: "a", toPlaceId: "b", mode: "transit" as const, distanceMeters: 1200, durationMinutes: 18, summary: "高德公共交通路线", path: [] }], failures: [] })) };
     const user = userEvent.setup();
     onSelectHotel.mockResolvedValue(true);
     render(<HotelComparePage trip={trip} routeService={routeService} onSelectHotel={onSelectHotel} onBack={() => undefined} />);
