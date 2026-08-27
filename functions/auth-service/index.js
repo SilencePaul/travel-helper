@@ -2,6 +2,7 @@ const { createFeishuClient } = require("./lib/feishu");
 const { createMemoryMemberStore, createCloudBaseMemberStore } = require("./lib/members");
 const { createTicketService } = require("./lib/tickets");
 const { createMemoryAuthStore, createCloudBaseAuthStore, STATE_TTL_MS, SESSION_TTL_MS } = require("./lib/authStore");
+const { decodeCloudBaseCredentials } = require("../lib/cloudbaseCredentials");
 function header(headers = {}, name) { const key = Object.keys(headers).find((item) => item.toLowerCase() === name.toLowerCase()); return key ? headers[key] : undefined; }
 function cookies(headers) {
   return String(header(headers, "cookie") || "").split(";").reduce((result, item) => { const i = item.indexOf("="); if (i > 0) result[item.slice(0, i).trim()] = decodeURIComponent(item.slice(i + 1).trim()); return result; }, {});
@@ -23,18 +24,18 @@ function safeMember(member) {
 function createAuthHandler({ env = process.env, fetchImpl, memberStore, cloudbase, authStore, now = () => Date.now(), randomBytes, createTicket } = {}) {
   const cloudbaseMode = env.VITE_DATA_MODE === "cloudbase"
     || env.NODE_ENV === "production"
-    || Boolean(env.VITE_CLOUDBASE_ENV_ID && env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS);
+    || Boolean(env.VITE_CLOUDBASE_ENV_ID && env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64);
   const explicitStores = Boolean(memberStore && authStore);
   let effectiveCloudbase = cloudbase;
   if (!effectiveCloudbase && !explicitStores && cloudbaseMode) {
     try {
-      if (!env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS || !env.VITE_CLOUDBASE_ENV_ID) throw unavailableError();
-      effectiveCloudbase = require("@cloudbase/node-sdk").init({ env: env.VITE_CLOUDBASE_ENV_ID, credentials: JSON.parse(env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS) });
+      if (!env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64 || !env.VITE_CLOUDBASE_ENV_ID) throw unavailableError();
+      effectiveCloudbase = require("@cloudbase/node-sdk").init({ env: env.VITE_CLOUDBASE_ENV_ID, credentials: decodeCloudBaseCredentials(env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64) });
     } catch {
       throw unavailableError();
     }
-  } else if (!effectiveCloudbase && env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS && env.VITE_CLOUDBASE_ENV_ID) {
-    try { effectiveCloudbase = require("@cloudbase/node-sdk").init({ env: env.VITE_CLOUDBASE_ENV_ID, credentials: JSON.parse(env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS) }); } catch { effectiveCloudbase = undefined; }
+  } else if (!effectiveCloudbase && env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64 && env.VITE_CLOUDBASE_ENV_ID) {
+    try { effectiveCloudbase = require("@cloudbase/node-sdk").init({ env: env.VITE_CLOUDBASE_ENV_ID, credentials: decodeCloudBaseCredentials(env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64) }); } catch { effectiveCloudbase = undefined; }
   }
   let store;
   let sessions;

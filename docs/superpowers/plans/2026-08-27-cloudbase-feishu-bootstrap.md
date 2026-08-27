@@ -72,14 +72,14 @@ export const MemberSchema = z.object({
 });
 ```
 
-`ClientEnvironmentSchema` accepts only `VITE_DATA_MODE` (`local` or `cloudbase`) and a nonempty `VITE_CLOUDBASE_ENV_ID` for cloudbase mode. `ServerEnvironmentSchema` requires the CloudBase environment, Feishu ID/secret, redirect URI, public app URL, `ADMIN_BOOTSTRAP_CODE`, `AUTH_SESSION_SECRET`, and `CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS` JSON. It must trim strings and never return or log malformed values.
+`ClientEnvironmentSchema` accepts only `VITE_DATA_MODE` (`local` or `cloudbase`) and a nonempty `VITE_CLOUDBASE_ENV_ID` for cloudbase mode. `ServerEnvironmentSchema` requires the CloudBase environment, Feishu ID/secret, redirect URI, public app URL, `ADMIN_BOOTSTRAP_CODE`, `AUTH_SESSION_SECRET`, and `CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64`, which must decode to a JSON object. It must trim strings and never return or log malformed values.
 
 Add these blank, documented variables to `.env.example` without putting secrets in committed files:
 
 ```dotenv
 ADMIN_BOOTSTRAP_CODE=
 PUBLIC_APP_URL=http://localhost:5173
-CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS=
+CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64=
 ```
 
 - [ ] **Step 4: Verify and commit contracts**
@@ -114,7 +114,7 @@ import { strict as assert } from "node:assert";
 import { validateProductionConfig } from "./check-production-config.mjs";
 
 assert.deepEqual(
-  validateProductionConfig({ VITE_CLOUDBASE_ENV_ID: "env", FEISHU_APP_ID: "cli", FEISHU_APP_SECRET: "secret", ADMIN_BOOTSTRAP_CODE: "code", AUTH_SESSION_SECRET: "session", CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS: "{}", PUBLIC_APP_URL: "https://trip.example" }),
+  validateProductionConfig({ VITE_CLOUDBASE_ENV_ID: "env", FEISHU_APP_ID: "cli", FEISHU_APP_SECRET: "secret", ADMIN_BOOTSTRAP_CODE: "code", AUTH_SESSION_SECRET: "session", CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64: "e30=", PUBLIC_APP_URL: "https://trip.example" }),
   { ok: true, missing: [] },
 );
 assert.equal(validateProductionConfig({}).ok, false);
@@ -343,7 +343,7 @@ Expected: FAIL until the authenticated app shell and member view exist.
 
 The runbook must give exact console actions without showing real values:
 
-1. CloudBase → 身份认证 → 登录方式 → 启用“自定义登录”并下载私钥; put its one-line JSON in the CloudBase function secret `CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS`.
+1. CloudBase → 身份认证 → 登录方式 → 启用“自定义登录”并下载私钥; base64-encode its one-line JSON and put the result in the CloudBase function secret `CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64`.
 2. CloudBase → 环境管理 → HTTP 访问服务: route `/api/auth/*` to `auth-service` before entering the final Feishu HTTPS redirect URL.
 3. Feishu → 安全设置: enter the exact deployed `https://<domain>/api/auth/callback` URL and publish the self-built application to the two users.
 4. CloudBase console: set function secrets; do not upload `.env.local` or the downloaded private-key file.

@@ -1,4 +1,5 @@
 const { createTripCommands } = require("./lib/commands.js");
+const { decodeCloudBaseCredentials } = require("../lib/cloudbaseCredentials");
 
 function actorUidFromEvent(event) {
   return event?.userInfo?.uid;
@@ -13,9 +14,9 @@ function payloadFromEvent(event) {
 }
 
 function createDatabase(env) {
-  if (!env.VITE_CLOUDBASE_ENV_ID || !env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS) return undefined;
+  if (!env.VITE_CLOUDBASE_ENV_ID || !env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64) return undefined;
   try {
-    const cloudbase = require("@cloudbase/node-sdk").init({ env: env.VITE_CLOUDBASE_ENV_ID, credentials: JSON.parse(env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS) });
+    const cloudbase = require("@cloudbase/node-sdk").init({ env: env.VITE_CLOUDBASE_ENV_ID, credentials: decodeCloudBaseCredentials(env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64) });
     return cloudbase.database();
   } catch { return undefined; }
 }
