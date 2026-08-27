@@ -2,6 +2,7 @@ import type { Trip } from "@travel/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AmapRouteMap, type AmapLoader } from "../map/AmapRouteMap";
 import { createAmapRouteService } from "../map/amapRouteService";
+import { normalizeRouteQueryResult } from "../map/routeResult";
 import { loadAmap } from "../map/amapLoader";
 import type { MapInteractionAdapter, RouteFailure, RouteService } from "../map/types";
 import { getPlace, getPlaceDetail, getPlaces, getRouteModes } from "./itineraryData";
@@ -61,9 +62,7 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, r
       modeByLeg: getRouteModes(places.map((place) => place.id)),
     }).then((nextSegments) => {
       if (active) {
-        const normalized = Array.isArray(nextSegments)
-          ? { segments: nextSegments, failures: [] }
-          : nextSegments;
+        const normalized = normalizeRouteQueryResult(nextSegments);
         setRouteResult({ key: routeKey, ...normalized });
       }
     }).catch(() => {
@@ -102,7 +101,7 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, r
         mapLoader={mapLoader}
       />
       {unresolvedItemIds.length > 0 ? <p className="map-fallback" role="alert">有未识别地点，无法串联道路路线：{unresolvedItemIds.join("、")}</p> : null}
-      {routeFailures.map((failure) => <p className="map-fallback" role="status" key={`${failure.fromPlaceId}-${failure.toPlaceId}`}>“{failure.fromPlaceId} → {failure.toPlaceId}”暂未取得高德道路路径（{failure.code}），未绘制直线替代路线。</p>)}
+      {routeFailures.map((failure) => <p className="map-fallback" role="status" key={`${failure.fromPlaceId}-${failure.toPlaceId}`}>“{getPlace(failure.fromPlaceId)?.name ?? "起点"} → {getPlace(failure.toPlaceId)?.name ?? "终点"}”暂未取得高德道路路径（{routeFailureReason(failure.code)}），未绘制直线替代路线。</p>)}
       <section aria-labelledby="timeline-heading">
         <h2 id="timeline-heading">当天行程</h2>
         <Timeline
@@ -120,4 +119,14 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, r
       /> : null}
     </main>
   );
+}
+
+function routeFailureReason(code: RouteFailure["code"]) {
+  return {
+    AMAP_ROUTE_PROVIDER_UNAVAILABLE: "高德服务暂不可用",
+    AMAP_ROUTE_TIMEOUT: "高德路线请求超时",
+    AMAP_ROUTE_UNAVAILABLE: "未找到可用路线",
+    AMAP_ROUTE_NO_TRANSIT_PLAN: "未找到公共交通方案",
+    AMAP_ROUTE_MALFORMED_RESPONSE: "高德返回的路线信息不完整",
+  }[code];
 }

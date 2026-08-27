@@ -210,6 +210,51 @@ describe("createAmapRouteService", () => {
     await expect(pending).resolves.toEqual(expect.objectContaining({ failures: [], segments: expect.any(Array) }));
   });
 
+  it("serializes overlapping callers so provider searches never overlap or mix results", async () => {
+    const callbacks: Array<(status: string, result: unknown) => void> = [];
+    let activeSearches = 0;
+    let highestConcurrency = 0;
+    const search = vi.fn((_origin, _destination, callback) => {
+      activeSearches += 1;
+      highestConcurrency = Math.max(highestConcurrency, activeSearches);
+      callbacks.push((status, response) => {
+        activeSearches -= 1;
+        callback(status, response);
+      });
+    });
+    class Walking { constructor(_options?: unknown) {} search = search; }
+    const service = createAmapRouteService(async () => ({ Walking }), (id) => id === peak.id ? peak : centralPier);
+
+    const first = service.getSegments({ dayId: "first", city: "香港", placeIds: [peak.id, centralPier.id], modeByLeg: ["walking"] });
+    const second = service.getSegments({ dayId: "second", city: "香港", placeIds: [centralPier.id, peak.id], modeByLeg: ["walking"] });
+    await Promise.resolve();
+    expect(search).toHaveBeenCalledTimes(1);
+    expect(highestConcurrency).toBe(1);
+
+    callbacks[0]!("complete", { routes: [{ distance: 716, time: 600, steps: [{ path: [[peak.lng, peak.lat], [centralPier.lng, centralPier.lat]] }] }] });
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(search).toHaveBeenCalledTimes(2);
+    expect(highestConcurrency).toBe(1);
+    callbacks[1]!("complete", { routes: [{ distance: 712, time: 540, steps: [{ path: [[centralPier.lng, centralPier.lat], [peak.lng, peak.lat]] }] }] });
+
+    await expect(first).resolves.toEqual(expect.objectContaining({ segments: [expect.objectContaining({ fromPlaceId: peak.id, toPlaceId: centralPier.id, distanceMeters: 716 })], failures: [] }));
+    await expect(second).resolves.toEqual(expect.objectContaining({ segments: [expect.objectContaining({ fromPlaceId: centralPier.id, toPlaceId: peak.id, distanceMeters: 712 })], failures: [] }));
+  });
+
+  it.each([
+    ["empty plan", {}],
+    ["non-numeric distance", { distance: "not-a-number", time: 600, steps: [{ path: [[peak.lng, peak.lat], [centralPier.lng, centralPier.lat]] }] }],
+    ["empty route path", { distance: 716, time: 600, steps: [] }],
+    ["non-finite path coordinate", { distance: 716, time: 600, steps: [{ path: [[peak.lng, peak.lat], [Number.NaN, centralPier.lat]] }] }],
+  ])("reports a malformed route response for %s", async (_label, route) => {
+    const search = vi.fn((_origin, _destination, callback) => callback("complete", { routes: [route] }));
+    class Walking { constructor(_options?: unknown) {} search = search; }
+    const service = createAmapRouteService(async () => ({ Walking }), (id) => id === peak.id ? peak : centralPier);
+
+    await expect(service.getSegments({ dayId: "hong-kong-day", city: "香港", placeIds: [peak.id, centralPier.id], modeByLeg: ["walking"] }))
+      .resolves.toEqual(expect.objectContaining({ segments: [], failures: [expect.objectContaining({ code: "AMAP_ROUTE_MALFORMED_RESPONSE" })] }));
+  });
+
   it("times out a route request and ignores a late plugin callback", async () => {
     vi.useFakeTimers();
     let callback: ((status: string, result: unknown) => void) | undefined;

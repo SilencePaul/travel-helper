@@ -12,13 +12,14 @@ function record(value: unknown): RecordValue | undefined {
 }
 
 function coordinate(value: unknown): Coordinate | undefined {
-  if (Array.isArray(value) && typeof value[0] === "number" && typeof value[1] === "number") return { lng: value[0], lat: value[1], coordinateSystem: "GCJ02" };
+  if (Array.isArray(value) && Number.isFinite(value[0]) && Number.isFinite(value[1])) return { lng: value[0] as number, lat: value[1] as number, coordinateSystem: "GCJ02" };
   const point = record(value);
-  return typeof point?.lng === "number" && typeof point.lat === "number" ? { lng: point.lng, lat: point.lat, coordinateSystem: "GCJ02" } : undefined;
+  return point && Number.isFinite(point.lng) && Number.isFinite(point.lat) ? { lng: point.lng as number, lat: point.lat as number, coordinateSystem: "GCJ02" } : undefined;
 }
 
 function numeric(value: unknown) {
-  return typeof value === "number" ? value : typeof value === "string" ? Number(value) : 0;
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function coordinates(path: unknown) {
@@ -69,10 +70,14 @@ function firstRoute(result: unknown, mode: TravelMode) {
   const candidates = mode === "transit" ? response?.plans ?? transitRoute?.transits : response?.routes;
   const first = Array.isArray(candidates) ? record(candidates[0]) : undefined;
   if (!first) return undefined;
+  const distanceMeters = numeric(first.distance);
+  const durationSeconds = numeric(first.time ?? first.duration);
+  const path = mode === "transit" ? transitPlanPath(first) : routeStepsPath(first);
+  if (!distanceMeters || !durationSeconds || path.length < 2) return undefined;
   return {
-    distanceMeters: numeric(first.distance),
-    durationMinutes: Math.ceil(numeric(first.time ?? first.duration) / 60),
-    path: mode === "transit" ? transitPlanPath(first) : routeStepsPath(first),
+    distanceMeters,
+    durationMinutes: Math.ceil(durationSeconds / 60),
+    path,
   };
 }
 
@@ -99,7 +104,7 @@ async function getProviderSegment(AMap: AmapRouteApi, from: TimelinePlace, to: T
     });
   });
   const route = firstRoute(result, mode);
-  if (!route) throw new Error(mode === "transit" ? "AMAP_ROUTE_MALFORMED_RESPONSE" : "AMAP_ROUTE_UNAVAILABLE");
+  if (!route) throw new Error("AMAP_ROUTE_MALFORMED_RESPONSE");
   return {
     id: `${from.id}-${to.id}-${legIndex}`,
     fromPlaceId: from.id,
@@ -124,8 +129,15 @@ async function getTransitSegmentWithRetry(AMap: AmapRouteApi, from: TimelinePlac
 }
 
 export function createAmapRouteService(loadAmap: AmapLoader, resolvePlace: PlaceResolver, { timeoutMs = 10_000 }: { timeoutMs?: number } = {}): RouteService {
+  let providerQueue: Promise<void> | undefined;
+  const enqueueProviderWork = <Result>(work: () => Promise<Result>) => {
+    const next = providerQueue ? providerQueue.then(work, work) : work();
+    providerQueue = next.then(() => undefined, () => undefined);
+    return next;
+  };
   return {
-    async getSegments({ city, placeIds, modeByLeg }) {
+    getSegments({ city, placeIds, modeByLeg }) {
+      return enqueueProviderWork(async () => {
       const places = placeIds.map(resolvePlace);
       if (places.some((place) => !place)) throw new Error("AMAP_PLACE_UNAVAILABLE");
       const AMap = await loadAmap();
@@ -155,7 +167,8 @@ export function createAmapRouteService(loadAmap: AmapLoader, resolvePlace: Place
           : "AMAP_ROUTE_PROVIDER_UNAVAILABLE";
         failures.push({ fromPlaceId: resolvedPlaces[index]!.id, toPlaceId: resolvedPlaces[index + 1]!.id, mode: modeByLeg[index] ?? "walking", code });
       });
-      return { segments, failures };
+        return { segments, failures };
+      });
     },
   };
 }
