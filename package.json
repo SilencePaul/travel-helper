@@ -13,10 +13,13 @@
     "test:amap-poi-validation": "node scripts/amap-poi-validation.test.mjs",
     "check:amap-pois": "node --env-file=.env.local scripts/amap-poi-validation.mjs",
     "test:production-config": "node scripts/check-production-config.test.mjs",
-    "check:production-config": "node --env-file=.env.local scripts/check-production-config.mjs"
+    "check:production-config": "node --env-file=.env.local scripts/check-production-config.mjs",
+    "seed:cloudbase": "node --env-file=.env.local scripts/seed-cloudbase.mjs",
+    "apply:cloudbase-security": "node --env-file=.env.local scripts/apply-cloudbase-security.mjs"
   },
   "devDependencies": {
     "@cloudbase/cli": "^3.8.1",
+    "@cloudbase/manager-node": "^5.8.2",
     "@playwright/test": "^1.62.1",
     "eslint": "^10.9.1",
     "typescript": "^6.0.3"

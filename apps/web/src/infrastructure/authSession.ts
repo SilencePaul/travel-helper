@@ -14,8 +14,13 @@ export function authServiceUrl(environment: AuthEnvironment = import.meta.env as
   return parsed.toString().replace(/\/$/, "");
 }
 
+function authRoute(baseUrl: string, route: string) {
+  const base = baseUrl.replace(/\/$/, "");
+  return (base.endsWith("/api/auth") ? base : base + "/api/auth") + route;
+}
+
 export function startLogin(environment?: AuthEnvironment) {
-  window.location.assign(authServiceUrl(environment) + "/api/auth/start");
+  window.location.assign(authRoute(authServiceUrl(environment), "/start"));
 }
 
 async function jsonResponse<T>(response: Response): Promise<T> {
@@ -30,7 +35,7 @@ async function jsonResponse<T>(response: Response): Promise<T> {
 }
 
 export async function bootstrapWithCode(baseUrl: string, code: string, oauthState: string, fetchImpl: FetchLike = fetch) {
-  const response = await fetchImpl(baseUrl.replace(/\/$/, "") + "/api/auth/bootstrap", {
+  const response = await fetchImpl(authRoute(baseUrl, "/bootstrap"), {
     method: "POST",
     credentials: "include",
     headers: { "content-type": "application/json" },
@@ -40,12 +45,12 @@ export async function bootstrapWithCode(baseUrl: string, code: string, oauthStat
 }
 
 export async function requestCustomTicket(baseUrl = authServiceUrl(), fetchImpl: FetchLike = fetch) {
-  const response = await fetchImpl(baseUrl.replace(/\/$/, "") + "/api/auth/ticket", { method: "POST", credentials: "include" });
+  const response = await fetchImpl(authRoute(baseUrl, "/ticket"), { method: "POST", credentials: "include" });
   return (await jsonResponse<{ ticket: string }>(response)).ticket;
 }
 
 export async function getCurrentProfile(baseUrl = authServiceUrl(), fetchImpl: FetchLike = fetch) {
-  const response = await fetchImpl(baseUrl.replace(/\/$/, "") + "/api/auth/profile", { method: "GET", credentials: "include" });
+  const response = await fetchImpl(authRoute(baseUrl, "/profile"), { method: "GET", credentials: "include" });
   return (await jsonResponse<{ member: Member }>(response)).member;
 }
 
@@ -54,6 +59,6 @@ export async function signInWithCustomTicket(baseUrl = authServiceUrl()) {
 }
 
 export async function logout(baseUrl = authServiceUrl(), fetchImpl: FetchLike = fetch) {
-  await fetchImpl(baseUrl.replace(/\/$/, "") + "/api/auth/logout", { method: "POST", credentials: "include" });
+  await fetchImpl(authRoute(baseUrl, "/logout"), { method: "POST", credentials: "include" });
   await getCloudbaseAuth().signOut();
 }

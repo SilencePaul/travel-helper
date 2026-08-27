@@ -1,4 +1,5 @@
 const { z } = require("zod");
+function writableRecord(record) { const { _id, ...value } = record; return value; }
 
 const BudgetItemSchema = z.object({
   id: z.string().min(1),
@@ -99,7 +100,7 @@ function createCloudBaseSessionRevoker() {
         : associationIds(sessionIds);
       const updates = await this.prepareSessionsForUid(transaction, uid, ids, revokedAt);
       const sessions = transaction.collection("auth_sessions");
-      for (const update of updates) await sessions.doc(update.id).set(update.value);
+      for (const update of updates) await sessions.doc(update.id).set(writableRecord(update.value));
     },
   };
 }
@@ -163,10 +164,10 @@ function createTripCommands({ db, now = () => new Date(), sessionRevoker = creat
           await sessionRevoker.prepareSessionsForUid(transaction, target.uid, sessionIds, timestamp);
         }
       }
-      await members.doc(target.uid).set(next);
-      for (const update of tripUpdates) await transaction.collection("trips").doc(update.id).set(update.value);
+      await members.doc(target.uid).set(writableRecord(next));
+      for (const update of tripUpdates) await transaction.collection("trips").doc(update.id).set(writableRecord(update.value));
       if (input.action === "removeMember") await sessionRevoker.revokeSessionsForUid(transaction, target.uid, timestamp, sessionIds);
-      if (nextAdminIndex) await transaction.collection("membership_index").doc("admins").set(nextAdminIndex);
+      if (nextAdminIndex) await transaction.collection("membership_index").doc("admins").set(writableRecord(nextAdminIndex));
       await audit(transaction, actor, input.action, target.displayName, ["role", "version", ...(role === "member" ? ["approvedAt"] : []), ...(input.action === "removeMember" ? ["memberUids", "sessions"] : [])]);
       return { member: safeMember(next) };
     });
@@ -204,8 +205,8 @@ function createTripCommands({ db, now = () => new Date(), sessionRevoker = creat
         if (!tripIds.includes(next.id)) tripIds.push(next.id);
         memberUpdates.push({ uid, value: { ...member, tripIds } });
       }
-      await trips.doc(next.id).set(next);
-      for (const update of memberUpdates) await transaction.collection("members").doc(update.uid).set(update.value);
+      await trips.doc(next.id).set(writableRecord(next));
+      for (const update of memberUpdates) await transaction.collection("members").doc(update.uid).set(writableRecord(update.value));
       await idempotency.doc(input.idempotencyKey).set({ actorUid, tripId: next.id, expectedVersion: input.expectedVersion, trip: next, createdAt: now().toISOString() });
       await audit(transaction, actor, "saveTrip", undefined, ["trip"]);
       return { trip: next };

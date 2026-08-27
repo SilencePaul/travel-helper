@@ -14,6 +14,12 @@ describe("auth session", () => {
     expect(fetchMock.mock.calls[0]![1].body).toBe(JSON.stringify({ code: "one-time", oauthState: "state" }));
   });
 
+  it("does not duplicate the configured CloudBase gateway path", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ role: "admin" }), { status: 200 }));
+    await bootstrapWithCode("https://auth.example/api/auth", "one-time", "state", fetchMock);
+    expect(fetchMock).toHaveBeenCalledWith("https://auth.example/api/auth/bootstrap", expect.anything());
+  });
+
   it("returns a custom ticket from the standalone auth service", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ticket: "ticket" }), { status: 200 }));
     await expect(requestCustomTicket("https://auth.example", fetchMock)).resolves.toBe("ticket");

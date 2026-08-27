@@ -1,4 +1,5 @@
 const crypto = require("node:crypto");
+function writableRecord(record) { const { _id, ...value } = record; return value; }
 
 function sha256(value) { return crypto.createHash("sha256").update(value).digest("hex"); }
 function uidForOpenId(openId) { return "fs_" + sha256(openId).slice(0, 29); }
@@ -108,7 +109,7 @@ function createMemoryMemberStore({ now = () => new Date(), bootstrapCode } = {})
   };
 }
 
-function createCloudBaseMemberStore({ db, now = () => new Date(), bootstrapCode } = {}) {
+function createCloudBaseMemberStore({ db, now = () => new Date(), bootstrapCode, bootstrapTripId } = {}) {
   if (!db || typeof db.collection !== "function" || typeof db.runTransaction !== "function") {
     const error = new Error("CLOUDBASE_TRANSACTION_UNAVAILABLE"); error.code = error.message; throw error;
   }
@@ -151,8 +152,8 @@ function createCloudBaseMemberStore({ db, now = () => new Date(), bootstrapCode 
         const next = existing
           ? { ...existing, tripIds: existing.tripIds === undefined ? [] : existing.tripIds, sessionIds: existing.sessionIds === undefined ? [] : existing.sessionIds }
           : memberForIdentity(identity, "pending", now());
-        await transactionMembers.doc(uid).set(next);
-        await transactionMembershipIndex.doc("members").set({ ...indexes.members, memberUids: [...new Set([...indexes.members.memberUids, uid])] });
+        await transactionMembers.doc(uid).set(writableRecord(next));
+        await transactionMembershipIndex.doc("members").set(writableRecord({ ...indexes.members, memberUids: [...new Set([...indexes.members.memberUids, uid])] }));
         return next;
       });
     },
@@ -193,10 +194,22 @@ function createCloudBaseMemberStore({ db, now = () => new Date(), bootstrapCode 
         if (existing.role === "admin") {
           const error = new Error("BOOTSTRAP_ALREADY_CONSUMED"); error.code = error.message; throw error;
         }
-        const admin = { ...existing, role: "admin", tripIds: existing.tripIds === undefined ? [] : existing.tripIds, sessionIds: existing.sessionIds === undefined ? [] : existing.sessionIds, approvedAt: now().toISOString(), version: (existing.version || 0) + 1 };
-        await transactionMembers.doc(targetUid).set(admin);
-        await transactionBootstrap.doc("singleton").set({ ...record, consumed: true, adminUids: [targetUid], consumedAt: now().toISOString() });
-        await transactionMembershipIndex.doc("admins").set({ ...(adminIndex || {}), adminUids: [targetUid] });
+        const tripIds = existing.tripIds === undefined ? [] : existing.tripIds;
+        let bootstrapTrip;
+        if (bootstrapTripId) {
+          const result = await transaction.collection("trips").doc(bootstrapTripId).get();
+          const currentTrip = readRecord(result);
+          if (!currentTrip || !Array.isArray(currentTrip.memberUids) || currentTrip.memberUids.length !== 0) {
+            const error = new Error("MEMBERSHIP_ASSOCIATIONS_UNAVAILABLE"); error.code = error.message; throw error;
+          }
+          tripIds.push(bootstrapTripId);
+          bootstrapTrip = { ...currentTrip, memberUids: [targetUid], version: (currentTrip.version || 0) + 1 };
+        }
+        const admin = { ...existing, role: "admin", tripIds, sessionIds: existing.sessionIds === undefined ? [] : existing.sessionIds, approvedAt: now().toISOString(), version: (existing.version || 0) + 1 };
+        await transactionMembers.doc(targetUid).set(writableRecord(admin));
+        if (bootstrapTrip) await transaction.collection("trips").doc(bootstrapTripId).set(writableRecord(bootstrapTrip));
+        await transactionBootstrap.doc("singleton").set(writableRecord({ ...record, consumed: true, adminUids: [targetUid], consumedAt: now().toISOString() }));
+        await transactionMembershipIndex.doc("admins").set(writableRecord({ ...(adminIndex || {}), adminUids: [targetUid] }));
         return admin;
       });
     },
@@ -213,8 +226,8 @@ function createCloudBaseMemberStore({ db, now = () => new Date(), bootstrapCode 
         if ((current.role === "admin") !== adminUids.includes(uid)) throw membershipIndexUnavailable();
         const nextAdminUids = role === "admin" ? [...new Set([...adminUids, uid])] : adminUids.filter((item) => item !== uid);
         const next = { ...current, role, tripIds: current.tripIds === undefined ? [] : current.tripIds, sessionIds: current.sessionIds === undefined ? [] : current.sessionIds, version: (current.version || 0) + 1, ...(role === "member" || role === "admin" ? { approvedAt: now().toISOString() } : {}) };
-        await transactionMembers.doc(uid).set(next);
-        await indexDoc.set({ ...index, adminUids: nextAdminUids });
+        await transactionMembers.doc(uid).set(writableRecord(next));
+        await indexDoc.set(writableRecord({ ...index, adminUids: nextAdminUids }));
         return next;
       });
     },

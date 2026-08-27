@@ -40,8 +40,9 @@ test("CloudBase bootstrap uses direct membership index reads without transaction
   const db = createDb({
     auth_bootstrap: { singleton: { codeHash: sha256("correct"), consumed: false } },
     membership_index: { admins: { adminUids: [] }, members: { memberUids: [] } },
+    trips: { "trip-2026-gba": { id: "trip-2026-gba", memberUids: [], version: 0 } },
   });
-  const store = createCloudBaseMemberStore({ db, bootstrapCode: "correct", now: () => new Date("2026-08-27T12:00:00.000Z") });
+  const store = createCloudBaseMemberStore({ db, bootstrapCode: "correct", bootstrapTripId: "trip-2026-gba", now: () => new Date("2026-08-27T12:00:00.000Z") });
 
   const identity = { openId: "ou_admin", displayName: "一鸣" };
   await store.upsertPending(identity);
@@ -49,7 +50,8 @@ test("CloudBase bootstrap uses direct membership index reads without transaction
 
   assert.equal(admin.role, "admin");
   assert.deepEqual(db.data.get("membership_index").get("admins").adminUids, [uidForOpenId("ou_admin")]);
-  assert.deepEqual(db.data.get("members").get(uidForOpenId("ou_admin")).sessionIds, []);
+  assert.deepEqual(db.data.get("members").get(uidForOpenId("ou_admin")).tripIds, ["trip-2026-gba"]);
+  assert.deepEqual(db.data.get("trips").get("trip-2026-gba").memberUids, [uidForOpenId("ou_admin")]);
 });
 
 test("CloudBase bootstrap fails closed when the administrator index is missing or stale", async () => {
@@ -148,4 +150,13 @@ test("CloudBase session creation records the session ID on the member document",
 
   assert.deepEqual(db.data.get("members").get(uid).sessionIds, [sessionId]);
   assert.equal(db.data.get("auth_sessions").get(sessionId).uid, uid);
+});
+
+test("CloudBase auth records never write the reserved _id field", async () => {
+  const db = createDb();
+  const sessions = createCloudBaseAuthStore({ db, now: () => 1000, randomBytes: () => Buffer.alloc(32, 7) });
+
+  const state = await sessions.createState();
+
+  assert.equal(Object.hasOwn(db.data.get("auth_oauth_states").get(state), "_id"), false);
 });

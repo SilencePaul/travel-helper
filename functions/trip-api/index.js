@@ -13,9 +13,9 @@ function payloadFromEvent(event) {
 }
 
 function createDatabase(env) {
-  if (!env.VITE_CLOUDBASE_ENV_ID || !env.TENCENTCLOUD_SECRET_ID || !env.TENCENTCLOUD_SECRET_KEY) return undefined;
+  if (!env.VITE_CLOUDBASE_ENV_ID || !env.CLOUDBASE_SERVER_SECRET_ID || !env.CLOUDBASE_SERVER_SECRET_KEY) return undefined;
   try {
-    const cloudbase = require("@cloudbase/node-sdk").init({ env: env.VITE_CLOUDBASE_ENV_ID, secretId: env.TENCENTCLOUD_SECRET_ID, secretKey: env.TENCENTCLOUD_SECRET_KEY });
+    const cloudbase = require("@cloudbase/node-sdk").init({ env: env.VITE_CLOUDBASE_ENV_ID, secretId: env.CLOUDBASE_SERVER_SECRET_ID, secretKey: env.CLOUDBASE_SERVER_SECRET_KEY });
     return cloudbase.database();
   } catch { return undefined; }
 }

@@ -64,6 +64,15 @@ test("OAuth callback redirects the browser to the app auth route without issuing
   assert.deepEqual(responseBody(ticket), { error: "PENDING_APPROVAL" });
 });
 
+test("accepts paths after the CloudBase gateway strips its route prefix", async () => {
+  const handler = createAuthHandler({
+    env: { FEISHU_APP_ID: "cli", FEISHU_APP_SECRET: "secret", FEISHU_REDIRECT_URI: "https://auth/callback", PUBLIC_APP_URL: "https://trip", ADMIN_BOOTSTRAP_CODE: "code", AUTH_SESSION_SECRET: "secret", VITE_CLOUDBASE_ENV_ID: "env" },
+    fetchImpl: async () => new Response("{}"),
+  });
+
+  assert.equal((await makeRequest(handler, "GET", "/start")).statusCode, 302);
+});
+
 test("bootstrap code is consumed once and creates exactly one administrator", async () => {
   const issuedTickets = [];
   const handler = createAuthHandler({
@@ -161,7 +170,7 @@ test("CloudBase mode fails closed when CloudBase initialization is unavailable",
     env: {
       VITE_DATA_MODE: "cloudbase",
       VITE_CLOUDBASE_ENV_ID: "travel-prod",
-      TENCENTCLOUD_SECRET_ID: "secret-id",
+      CLOUDBASE_SERVER_SECRET_ID: "secret-id",
       FEISHU_APP_ID: "cli",
       FEISHU_APP_SECRET: "secret",
       FEISHU_REDIRECT_URI: "https://auth/callback",

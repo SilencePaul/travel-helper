@@ -23,23 +23,23 @@ function safeMember(member) {
 function createAuthHandler({ env = process.env, fetchImpl, memberStore, cloudbase, authStore, now = () => Date.now(), randomBytes, createTicket } = {}) {
   const cloudbaseMode = env.VITE_DATA_MODE === "cloudbase"
     || env.NODE_ENV === "production"
-    || Boolean(env.VITE_CLOUDBASE_ENV_ID && env.TENCENTCLOUD_SECRET_ID && env.TENCENTCLOUD_SECRET_KEY);
+    || Boolean(env.VITE_CLOUDBASE_ENV_ID && env.CLOUDBASE_SERVER_SECRET_ID && env.CLOUDBASE_SERVER_SECRET_KEY);
   const explicitStores = Boolean(memberStore && authStore);
   let effectiveCloudbase = cloudbase;
   if (!effectiveCloudbase && !explicitStores && cloudbaseMode) {
     try {
-      effectiveCloudbase = require("@cloudbase/node-sdk").init({ env: env.VITE_CLOUDBASE_ENV_ID, secretId: env.TENCENTCLOUD_SECRET_ID, secretKey: env.TENCENTCLOUD_SECRET_KEY });
+      effectiveCloudbase = require("@cloudbase/node-sdk").init({ env: env.VITE_CLOUDBASE_ENV_ID, secretId: env.CLOUDBASE_SERVER_SECRET_ID, secretKey: env.CLOUDBASE_SERVER_SECRET_KEY });
       if (!effectiveCloudbase) throw unavailableError();
     } catch {
       throw unavailableError();
     }
-  } else if (!effectiveCloudbase && env.VITE_CLOUDBASE_ENV_ID && env.TENCENTCLOUD_SECRET_ID && env.TENCENTCLOUD_SECRET_KEY) {
-    try { effectiveCloudbase = require("@cloudbase/node-sdk").init({ env: env.VITE_CLOUDBASE_ENV_ID, secretId: env.TENCENTCLOUD_SECRET_ID, secretKey: env.TENCENTCLOUD_SECRET_KEY }); } catch { effectiveCloudbase = undefined; }
+  } else if (!effectiveCloudbase && env.VITE_CLOUDBASE_ENV_ID && env.CLOUDBASE_SERVER_SECRET_ID && env.CLOUDBASE_SERVER_SECRET_KEY) {
+    try { effectiveCloudbase = require("@cloudbase/node-sdk").init({ env: env.VITE_CLOUDBASE_ENV_ID, secretId: env.CLOUDBASE_SERVER_SECRET_ID, secretKey: env.CLOUDBASE_SERVER_SECRET_KEY }); } catch { effectiveCloudbase = undefined; }
   }
   let store;
   let sessions;
   try {
-    store = memberStore || (effectiveCloudbase ? createCloudBaseMemberStore({ db: effectiveCloudbase.database(), bootstrapCode: env.ADMIN_BOOTSTRAP_CODE }) : createMemoryMemberStore({ bootstrapCode: env.ADMIN_BOOTSTRAP_CODE }));
+    store = memberStore || (effectiveCloudbase ? createCloudBaseMemberStore({ db: effectiveCloudbase.database(), bootstrapCode: env.ADMIN_BOOTSTRAP_CODE, bootstrapTripId: env.BOOTSTRAP_TRIP_ID }) : createMemoryMemberStore({ bootstrapCode: env.ADMIN_BOOTSTRAP_CODE }));
     sessions = authStore || (effectiveCloudbase ? createCloudBaseAuthStore({ db: effectiveCloudbase.database(), now, randomBytes }) : createMemoryAuthStore({ now, randomBytes, memberStore: store }));
   } catch {
     if (cloudbaseMode && !explicitStores) throw unavailableError();
@@ -50,15 +50,15 @@ function createAuthHandler({ env = process.env, fetchImpl, memberStore, cloudbas
   const secure = String(env.PUBLIC_APP_URL || "").startsWith("https://");
   const cors = { "access-control-allow-origin": env.PUBLIC_APP_URL || "*", "access-control-allow-credentials": "true", "access-control-allow-methods": "GET,POST,OPTIONS", "access-control-allow-headers": "content-type", vary: "Origin" };
   return async function handler(event = {}) {
-    const url = pathOf(event); const method = String(event.httpMethod || event.method || "GET").toUpperCase(); const headers = { ...cors };
+    const url = pathOf(event); const routePath = url.pathname.startsWith("/api/auth/") ? url.pathname : "/api/auth" + url.pathname; const method = String(event.httpMethod || event.method || "GET").toUpperCase(); const headers = { ...cors };
     if (method === "OPTIONS") return { statusCode: 204, headers, body: "" };
     try {
-      if (url.pathname === "/api/auth/start" && method === "GET") {
+      if (routePath === "/api/auth/start" && method === "GET") {
         const state = await sessions.createState(); const redirect = new URL("https://open.feishu.cn/open-apis/authen/v1/authorize");
         redirect.searchParams.set("app_id", env.FEISHU_APP_ID); redirect.searchParams.set("redirect_uri", env.FEISHU_REDIRECT_URI); redirect.searchParams.set("state", state);
         return { statusCode: 302, headers: { ...headers, location: redirect.toString(), "set-cookie": setCookie("oauth_state", state, secure, STATE_TTL_MS / 1000) }, body: "" };
       }
-      if (url.pathname === "/api/auth/callback" && method === "GET") {
+      if (routePath === "/api/auth/callback" && method === "GET") {
         const state = url.searchParams.get("state"); const code = url.searchParams.get("code"); const stateCookie = cookies(event.headers).oauth_state;
         if (!code) return json(400, { error: "MISSING_OAUTH_CODE" }, headers);
         if (!state || !stateCookie || state !== stateCookie || !(await sessions.consumeState(state))) return json(400, { error: "INVALID_OAUTH_STATE" }, headers);
@@ -73,7 +73,7 @@ function createAuthHandler({ env = process.env, fetchImpl, memberStore, cloudbas
         return { statusCode: 302, headers: { ...headers, location: appUrl.toString(), "set-cookie": setCookie("auth_session", session, secure) }, body: "" };
       }
       const sessionToken = cookies(event.headers).auth_session; const session = await sessions.getSession(sessionToken);
-      if (url.pathname === "/api/auth/bootstrap" && method === "POST") {
+      if (routePath === "/api/auth/bootstrap" && method === "POST") {
         const body = bodyOf(event);
         if (!session || !body || body.oauthState !== session.oauthState || typeof body.code !== "string" || !body.code) return json(400, { error: "INVALID_BOOTSTRAP_REQUEST" }, headers);
         const member = await store.findByUid(session.uid);
@@ -84,17 +84,17 @@ function createAuthHandler({ env = process.env, fetchImpl, memberStore, cloudbas
           return json(200, { role: admin.role }, headers);
         } catch (error) { const codeName = errorCode(error); return json(codeName === "BOOTSTRAP_ALREADY_CONSUMED" ? 409 : 403, { error: codeName }, headers); }
       }
-      if (url.pathname === "/api/auth/ticket" && method === "POST") {
+      if (routePath === "/api/auth/ticket" && method === "POST") {
         if (!session) return json(401, { error: "AUTH_REQUIRED" }, headers);
         try { return json(200, { ticket: await tickets.issueForUid(session.uid) }, headers); } catch (error) { const codeName = errorCode(error); return json(codeName === "PENDING_APPROVAL" ? 403 : 401, { error: codeName }, headers); }
       }
-      if (url.pathname === "/api/auth/profile" && method === "GET") {
+      if (routePath === "/api/auth/profile" && method === "GET") {
         if (!session) return json(401, { error: "AUTH_REQUIRED" }, headers);
         const member = await store.findByUid(session.uid);
         if (!member) return json(401, { error: "NOT_AUTHORIZED" }, headers);
         return json(200, { member: safeMember(member) }, headers);
       }
-      if (url.pathname === "/api/auth/logout" && method === "POST") {
+      if (routePath === "/api/auth/logout" && method === "POST") {
         await sessions.revokeSession(sessionToken);
         return json(200, { status: "logged_out" }, { ...headers, "set-cookie": "auth_session=; Path=/; HttpOnly; Max-Age=0" });
       }

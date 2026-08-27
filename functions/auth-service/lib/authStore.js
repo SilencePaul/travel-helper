@@ -2,6 +2,7 @@ const crypto = require("node:crypto");
 
 const STATE_TTL_MS = 10 * 60 * 1000;
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+function writableRecord(record) { const { _id, ...value } = record; return value; }
 
 function randomId(randomBytes) {
   return randomBytes(32).toString("base64url");
@@ -56,7 +57,7 @@ function createCloudBaseAuthStore({ db, now = () => Date.now(), randomBytes = cr
   return {
     async createState() {
       const id = randomId(randomBytes);
-      await states.doc(id).set({ _id: id, expiresAt: now() + STATE_TTL_MS, consumed: false });
+      await states.doc(id).set({ expiresAt: now() + STATE_TTL_MS, consumed: false });
       return id;
     },
     async consumeState(id) {
@@ -64,13 +65,13 @@ function createCloudBaseAuthStore({ db, now = () => Date.now(), randomBytes = cr
       return db.runTransaction(async (transaction) => {
         const record = readDoc(await transaction.collection("auth_oauth_states").doc(id).get());
         if (!record || record.consumed || record.expiresAt <= now()) return false;
-        await transaction.collection("auth_oauth_states").doc(id).set({ ...record, consumed: true, consumedAt: now() });
+        await transaction.collection("auth_oauth_states").doc(id).set(writableRecord({ ...record, consumed: true, consumedAt: now() }));
         return true;
       });
     },
     async createSession({ uid, oauthState }) {
       const id = randomId(randomBytes);
-      const session = { _id: id, uid, oauthState, expiresAt: now() + SESSION_TTL_MS, revoked: false };
+      const session = { uid, oauthState, expiresAt: now() + SESSION_TTL_MS, revoked: false };
       await db.runTransaction(async (transaction) => {
         const memberDoc = transaction.collection("members").doc(uid);
         const result = await memberDoc.get();
@@ -90,7 +91,7 @@ function createCloudBaseAuthStore({ db, now = () => Date.now(), randomBytes = cr
       return record;
     },
     async revokeSession(id) {
-      if (id) await sessions.doc(id).set({ _id: id, revoked: true, expiresAt: now() });
+      if (id) await sessions.doc(id).set({ revoked: true, expiresAt: now() });
     },
   };
 }
