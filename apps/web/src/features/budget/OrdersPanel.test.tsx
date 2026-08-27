@@ -20,3 +20,14 @@ test("does not offer an invalid partial transition without a paid amount", () =>
   expect(screen.getByRole("option", { name: "部分支付" })).toBeDisabled();
   expect(select).toHaveAccessibleDescription("请先录入介于 0 与预计金额之间的已付金额，才能标记为部分支付。");
 });
+
+test("retains a paid-amount draft and reports an inline error when persistence rejects", async () => {
+  const user = userEvent.setup();
+  render(<OrdersPanel orders={orders} onStatusChange={() => undefined} onPaidChange={async () => { throw new Error("offline"); }} />);
+  const input = screen.getByLabelText("山顶缆车已付金额");
+  await user.clear(input);
+  await user.type(input, "80");
+  await user.click(screen.getByRole("button", { name: "保存金额" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("保存付款金额失败");
+  expect(input).toHaveValue(80);
+});

@@ -162,6 +162,9 @@ function TripRoutes({ createDayId = () => "day-ui", routeService }: Pick<AppProp
       const target = (current.orders ?? []).find((order) => order.id === orderId);
       if (!target) throw new Error("订单不存在，无法更新付款金额");
       return { ...current, orders: current.orders.map((order) => order.id === orderId ? applyOrderPayment(order, paid) : order) };
+    }).then((saved) => {
+      if (!saved) throw new Error("保存付款金额失败，请重试");
+      return saved;
     });
   }
 

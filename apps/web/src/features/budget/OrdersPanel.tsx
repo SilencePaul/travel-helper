@@ -15,9 +15,9 @@ export function OrdersPanel({ orders, onStatusChange, onPaidChange, disabled = f
   const [error, setError] = useState<string>();
   useEffect(() => {
     /* oxlint-disable react/set-state-in-effect -- persisted order updates resync untouched local drafts. */
-    setDrafts((current) => Object.fromEntries(orders.map((order) => [order.id, savingId === order.id ? current[order.id] ?? (order.paid / 100).toFixed(2) : (order.paid / 100).toFixed(2)])));
+    setDrafts(Object.fromEntries(orders.map((order) => [order.id, (order.paid / 100).toFixed(2)])));
     /* oxlint-enable react/set-state-in-effect */
-  }, [orders, savingId]);
+  }, [orders]);
   async function savePaid(order: BudgetItem) {
     const value = Number(drafts[order.id] ?? (order.paid / 100).toFixed(2));
     if (!Number.isFinite(value) || value < 0) { setError("请输入非负的已付金额"); return; }
