@@ -1,6 +1,6 @@
 import type { Member, TripRepository } from "@travel/contracts";
 import { useCallback, useEffect, useState } from "react";
-import { BrowserRouter, Route, Routes, useNavigate } from "react-router-dom";
+import { BrowserRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import seed from "../../../../content/trip.seed.json";
 import { TripApp } from "../App";
 import { LocalTripRepository } from "../infrastructure/localTripRepository";
@@ -167,27 +167,29 @@ export function ProductionAuthGate() {
 
 function ProductionRoutes({ authState, setAuthState, refreshAuth }: { authState: ProductionAuthState; setAuthState: (state: ProductionAuthState) => void; refreshAuth: () => Promise<void> }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const handleUnauthorized = useCallback((error: unknown) => {
     const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
     setAuthState({ status: code === "PENDING_APPROVAL" ? "pending" : "login" });
     void logout().catch(() => undefined);
     navigate(code === "PENDING_APPROVAL" ? "/auth/pending" : "/", { replace: true });
   }, [navigate, setAuthState]);
+  const home = authState.status === "checking"
+    ? <p role="status">正在验证登录状态</p>
+    : authState.status === "pending"
+      ? <PendingApprovalPage onAuthenticated={() => void refreshAuth()} />
+      : authState.status === "authenticated"
+        ? <TripApp member={authState.member} onUnauthorized={handleUnauthorized} />
+        : <LoginPage />;
+  const isHostingCallback = new URLSearchParams(location.search).get("auth_callback") === "1";
 
   return (
     <Routes>
+      <Route path="/" element={isHostingCallback ? <AuthCallbackPage onAuthenticated={() => void refreshAuth()} /> : home} />
       <Route path="/auth/callback" element={<AuthCallbackPage onAuthenticated={() => void refreshAuth()} />} />
       <Route path="/auth/bootstrap" element={<BootstrapPage onAuthenticated={() => void refreshAuth()} />} />
       <Route path="/auth/pending" element={<PendingApprovalPage onAuthenticated={() => void refreshAuth()} />} />
-      <Route path="*" element={
-        authState.status === "checking"
-          ? <p role="status">正在验证登录状态</p>
-          : authState.status === "pending"
-            ? <PendingApprovalPage onAuthenticated={() => void refreshAuth()} />
-            : authState.status === "authenticated"
-              ? <TripApp member={authState.member} onUnauthorized={handleUnauthorized} />
-              : <LoginPage />
-      } />
+      <Route path="*" element={home} />
     </Routes>
   );
 }

@@ -15,12 +15,21 @@ vi.mock("../infrastructure/cloudbaseClient", () => ({
 describe("ProductionAuthGate", () => {
   beforeEach(() => {
     getCurrentUser.mockResolvedValue(null);
+    window.history.replaceState({}, "", "/");
   });
 
   it("does not mount trip content or a local repository before CloudBase auth", async () => {
     render(<ProductionAuthGate />);
     expect(await screen.findByRole("button", { name: "使用飞书登录" })).toBeInTheDocument();
     expect(screen.queryByText("正在加载旅行计划")).not.toBeInTheDocument();
+  });
+
+  it("handles an OAuth callback marker from the hosting root", async () => {
+    window.history.replaceState({}, "", "/?auth_callback=1&status=bootstrap&state=test-state");
+
+    render(<ProductionAuthGate />);
+
+    expect(await screen.findByRole("heading", { name: "初始化管理员" })).toBeInTheDocument();
   });
 
   it("does not mount the member-management route for an authenticated non-admin", async () => {

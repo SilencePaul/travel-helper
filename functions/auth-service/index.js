@@ -76,8 +76,9 @@ function createAuthHandler({ env = process.env, fetchImpl, memberStore, cloudbas
         const session = await sessions.createSession({ uid: member.uid, oauthState: state });
         const status = member.role === "pending" ? ((await store.hasAdmin?.()) ? "pending" : "bootstrap") : "approved";
         const appUrl = new URL(env.PUBLIC_APP_URL);
-        appUrl.pathname = "/auth/callback";
+        appUrl.pathname = "/";
         appUrl.search = "";
+        appUrl.searchParams.set("auth_callback", "1");
         appUrl.searchParams.set("state", state);
         appUrl.searchParams.set("status", status);
         return { statusCode: 302, headers: { ...headers, location: appUrl.toString(), "set-cookie": setCookie("auth_session", session, secure) }, body: "" };

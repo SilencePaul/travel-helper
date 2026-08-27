@@ -52,7 +52,8 @@ test("OAuth callback redirects the browser to the app auth route without issuing
   assert.equal(callback.statusCode, 302);
   const callbackUrl = new URL(callback.headers.location);
   assert.equal(callbackUrl.origin, "https://trip.example");
-  assert.equal(callbackUrl.pathname, "/auth/callback");
+  assert.equal(callbackUrl.pathname, "/");
+  assert.equal(callbackUrl.searchParams.get("auth_callback"), "1");
   assert.equal(callbackUrl.searchParams.get("status"), "bootstrap");
   assert.equal(callbackUrl.searchParams.get("state"), state);
   assert.equal(callback.headers["set-cookie"].startsWith("auth_session="), true);
