@@ -2,13 +2,14 @@ import { expect, test } from "@playwright/test";
 
 test("renders the travel app shell", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "一鸣与美垚的旅行" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /两个人，\s*一条向南的路线。/ })).toBeVisible();
   await expect(page.getByText("正在使用本地计划")).toBeVisible();
 });
 
 test("opens a day from the dynamic overview", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("tab", { name: /D3/ }).click();
+  await page.getByRole("button", { name: "查看当天详情" }).click();
   await expect(page).toHaveURL(/day\/day-2026-10-05/);
 });
 
@@ -156,6 +157,7 @@ test("shows seeded order totals and direct AMap launch fallback", async ({ page 
   await expect(page.getByText("CNY 11,150.00 · 已付 0.00")).toBeVisible();
   await expect(page.getByText("北京 → 深圳、珠海 → 北京机票（两人）", { exact: true })).toBeVisible();
   await page.getByRole("tab", { name: /D3/ }).click();
+  await page.getByRole("button", { name: "查看当天详情" }).click();
   await page.locator("#timeline-place-peak button").click();
   const drawer = page.getByRole("dialog", { name: "太平山顶" });
   await expect(drawer.getByRole("link", { name: "开始导航" })).toHaveAttribute("href", /mode=walk/);
@@ -208,6 +210,7 @@ test("selects a map-linked hotel and recalculates its stay after extending Hong 
   await page.goto("/?__testRouteMap=1");
   await expect(page.getByRole("tab")).toHaveCount(6);
   await page.getByRole("tab", { name: /D3/ }).click();
+  await page.getByRole("button", { name: "查看当天详情" }).click();
   await page.getByRole("button", { name: "返回行程总览" }).click();
   await page.getByRole("button", { name: "酒店比较" }).click();
   await expect(page.getByTestId("hotel-nights")).toHaveText("2 晚");
