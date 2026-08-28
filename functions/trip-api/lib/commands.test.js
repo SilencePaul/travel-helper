@@ -26,6 +26,8 @@ function createDb({ members = [], trips = [trip()], authSessions = [] } = {}) {
     ]),
     audits: [],
     idempotency: new Map(),
+    trip_preferences: new Map(),
+    trip_decision_idempotency: new Map(),
   };
   const collection = (name, allowQueries = true) => {
     const store = name === "trip_idempotency" ? data.idempotency : name === "trip_audits" ? undefined : data[name];
@@ -123,6 +125,16 @@ test("a trip member can load only their own trip", async () => {
     () => commands.execute({ action: "getTrip", tripId: "trip-2026-autumn" }, "fs_other"),
     { code: "MEMBERSHIP_REQUIRED" },
   );
+});
+
+test("a member saves an idempotent preference and sees it in the private decision workspace", async () => {
+  const db = createDb({ members: [member("fs_member", "member")], trips: [{ ...trip(), memberUids: ["fs_member"] }] });
+  const commands = createTripCommands({ db, now: () => new Date("2026-08-28T00:00:00.000Z") });
+  const input = { action: "upsertPreference", tripId: "trip-2026-autumn", expectedRevision: 0, idempotencyKey: "preference-001", answers: { pace: "slow" } };
+  const saved = await commands.execute(input, "fs_member");
+  assert.equal(saved.preference.status, "editing");
+  assert.deepEqual((await commands.execute({ action: "getDecisionWorkspace", tripId: "trip-2026-autumn" }, "fs_member")).preferences, [saved.preference]);
+  assert.deepEqual(await commands.execute(input, "fs_member"), saved);
 });
 
 test("an authenticated pending user can read only their own safe member profile", async () => {

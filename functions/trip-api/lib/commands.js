@@ -48,6 +48,8 @@ const TripSchema = z.object({
 const ActionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("getCurrentMember") }),
   z.object({ action: z.literal("getTrip"), tripId: z.string().min(1) }),
+  z.object({ action: z.literal("getDecisionWorkspace"), tripId: z.string().min(1) }),
+  z.object({ action: z.literal("upsertPreference"), tripId: z.string().min(1), expectedRevision: z.number().int().nonnegative(), idempotencyKey: z.string().min(8).max(128), answers: z.record(z.string(), z.union([z.string(), z.array(z.string()), z.number(), z.boolean(), z.null()])), freeText: z.object({ mustHave: z.string().optional(), mustAvoid: z.string().optional(), note: z.string().optional() }).optional() }),
   z.object({ action: z.literal("listMembers") }),
   z.object({ action: z.enum(["approveMember", "rejectMember", "removeMember"]), uid: z.string().min(4).max(32) }),
   z.object({ action: z.literal("saveTrip"), tripId: z.string().min(1).optional(), trip: TripSchema, expectedVersion: z.number().int().nonnegative(), idempotencyKey: z.string().min(8).max(128) }),
@@ -257,6 +259,51 @@ function createTripCommands({ db, now = () => new Date(), sessionRevoker = creat
     });
   }
 
+  async function assertTripMember(transaction, tripId, actorUid) {
+    await getActor(transaction, actorUid);
+    const current = one(await transaction.collection("trips").doc(tripId).get());
+    if (!current) throw codedError("TRIP_NOT_FOUND");
+    if (!Array.isArray(current.memberUids) || !current.memberUids.includes(actorUid)) throw codedError("FORBIDDEN");
+    return current;
+  }
+
+  async function getDecisionWorkspace(input, actorUid) {
+    return db.runTransaction(async (transaction) => {
+      const trip = await assertTripMember(transaction, input.tripId, actorUid);
+      const preferences = transaction.collection("trip_preferences");
+      const records = [];
+      for (const uid of trip.memberUids) {
+        const record = one(await preferences.doc(`${input.tripId}:${uid}`).get());
+        if (record) records.push(record);
+      }
+      return { tripId: input.tripId, preferences: records.map(writableRecord), candidates: [], feedback: [], placements: [], confirmations: [], workspaceCursor: 0, fetchedAt: now().toISOString() };
+    });
+  }
+
+  async function upsertPreference(input, actorUid) {
+    return db.runTransaction(async (transaction) => {
+      await assertTripMember(transaction, input.tripId, actorUid);
+      const idempotency = transaction.collection("trip_decision_idempotency");
+      const prior = one(await idempotency.doc(input.idempotencyKey).get());
+      if (prior) {
+        if (prior.actorUid !== actorUid || prior.canonical !== canonical(input)) throw codedError("IDEMPOTENCY_KEY_REUSED");
+        return prior.result;
+      }
+      const preferences = transaction.collection("trip_preferences");
+      const id = `${input.tripId}:${actorUid}`;
+      const current = one(await preferences.doc(id).get());
+      const revision = current?.revision || 0;
+      if (revision !== input.expectedRevision) throw codedError("VERSION_CONFLICT", { currentVersion: revision, latest: current && writableRecord(current) });
+      const timestamp = now().toISOString();
+      const preference = { id, tripId: input.tripId, ownerUid: actorUid, answers: input.answers, ...(input.freeText ? { freeText: input.freeText } : {}), status: current?.status || "editing", revision: revision + 1, updatedAt: timestamp, updatedBy: actorUid };
+      await preferences.doc(id).set(preference);
+      const result = { preference };
+      await idempotency.doc(input.idempotencyKey).set({ actorUid, canonical: canonical(input), result });
+      await audit(transaction, await getActor(transaction, actorUid), "upsertPreference", id, ["answers", "freeText", "revision"]);
+      return result;
+    });
+  }
+
   async function getCurrentMember(actorUid) {
     return db.runTransaction(async (transaction) => {
       const member = one(await transaction.collection("members").doc(actorUid).get());
@@ -280,6 +327,8 @@ function createTripCommands({ db, now = () => new Date(), sessionRevoker = creat
       }
       if (input.action === "getCurrentMember") return getCurrentMember(actorUid);
       if (input.action === "getTrip") return getTrip(input, actorUid);
+      if (input.action === "getDecisionWorkspace") return getDecisionWorkspace(input, actorUid);
+      if (input.action === "upsertPreference") return upsertPreference(input, actorUid);
       if (input.action === "saveTrip") return saveTrip(input, actorUid);
       return changeMember(input, actorUid);
     },

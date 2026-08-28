@@ -7,3 +7,4 @@ export * from "./repository";
 export * from "./trip";
 export * from "./environment";
 export * from "./membership";
+export * from "./decision";
