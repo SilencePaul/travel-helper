@@ -35,6 +35,7 @@ vi.mock("../infrastructure/cloudbaseClient", () => ({
 
 vi.mock("../infrastructure/authSession", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../infrastructure/authSession")>()),
+  authServiceUrl: () => "https://auth.example.test",
   exchangeAuthenticationCode,
   recoverAuthenticatedMember,
   signInWithIssuedTicket,
@@ -63,7 +64,7 @@ describe("ProductionAuthGate", () => {
 
     render(<ProductionAuthGate />);
 
-    expect(await screen.findByText("正在加载旅行计划")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /两个人，\s*一条向南的路线。/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "使用飞书继续" })).not.toBeInTheDocument();
   });
 
@@ -102,7 +103,7 @@ describe("ProductionAuthGate", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("暂时无法确认登录状态");
     await userEvent.click(screen.getByRole("button", { name: "重新检查登录状态" }));
-    expect(await screen.findByText("旅行计划暂时无法加载")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /两个人，\s*一条向南的路线。/ })).toBeInTheDocument();
     expect(recoverAuthenticatedMember.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(screen.queryByRole("button", { name: "使用飞书继续" })).not.toBeInTheDocument();
   });
