@@ -11,12 +11,12 @@ test("uses the authenticated custom UID and ignores a payload actor UID", async 
   assert.deepEqual(calls[0], { payload: { action: "listMembers", actorUid: "attacker" }, actorUid: "fs_member" });
 });
 
-test("fails closed when runtime auth is empty even if event or context identities are forged", async () => {
+test("uses the trusted CloudBase runtime UID and ignores event or context identities", async () => {
   const calls = [];
   const handler = createTripHandler({ getUserInfo: () => ({ uid: "internal-only" }), commands: { execute: async (_payload, actorUid) => { calls.push(actorUid); return { ok: true }; } } });
 
-  assert.deepEqual(await handler({ data: { action: "listMembers" }, userInfo: { customUserId: "fs_event_admin" } }, { userInfo: { customUserId: "fs_context_admin" } }), { error: "AUTH_REQUIRED" });
-  assert.deepEqual(calls, []);
+  assert.deepEqual(await handler({ data: { action: "listMembers" }, userInfo: { customUserId: "fs_event_admin" } }, { userInfo: { customUserId: "fs_context_admin" } }), { ok: true });
+  assert.deepEqual(calls, ["internal-only"]);
 });
 
 test("uses the custom user ID exposed by the CloudBase runtime auth", async () => {

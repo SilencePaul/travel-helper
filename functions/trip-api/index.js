@@ -3,17 +3,17 @@ const { createTripCommands } = require("./lib/commands.js");
 function uidFromIdentity(identity) {
   if (!identity || typeof identity !== "object") return undefined;
   if (typeof identity.customUserId === "string" && identity.customUserId) return identity.customUserId;
+  if (typeof identity.uid === "string" && identity.uid) return identity.uid;
   return undefined;
 }
 
 function createRuntimeGetUserInfo(env) {
   if (!env.VITE_CLOUDBASE_ENV_ID) return undefined;
   try {
-    const cloudbase = require("@cloudbase/node-sdk").init({
-      env: env.VITE_CLOUDBASE_ENV_ID,
-      secretId: env.CLOUDBASE_SERVER_SECRET_ID,
-      secretKey: env.CLOUDBASE_SERVER_SECRET_KEY,
-    });
+    // Caller identity is injected by the CloudBase function runtime. Initializing
+    // this client with server credentials turns it into a service client and
+    // prevents getUserInfo() from seeing the browser's custom-login identity.
+    const cloudbase = require("@cloudbase/node-sdk").init({ env: env.VITE_CLOUDBASE_ENV_ID });
     const auth = cloudbase.auth();
     return () => auth.getUserInfo();
   } catch {
