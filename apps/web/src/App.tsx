@@ -13,6 +13,7 @@ import {
   type TravelDay,
   type Trip,
   type TripRepository,
+  type DecisionWorkspaceRepository,
   type Member,
 } from "@travel/contracts";
 import type { RouteService } from "./features/map/types";
@@ -24,9 +25,12 @@ import { HotelComparePage } from "./features/hotels/HotelComparePage";
 import "./styles/global.css";
 import { MemberManagementPage } from "./features/members/MemberManagementPage";
 import { OfflineStatus } from "./components/OfflineStatus";
+import { CloudBaseDecisionWorkspaceRepository } from "./infrastructure/cloudbaseDecisionWorkspaceRepository";
+import { DecisionWorkspacePage } from "./features/decisions/DecisionWorkspacePage";
 
 type AppProps = {
   repository?: TripRepository;
+  decisionRepository?: DecisionWorkspaceRepository;
   createDayId?: () => string;
   tripId?: string;
   routeService?: RouteService;
@@ -57,7 +61,7 @@ function withDayRange(trip: Trip, days: TravelDay[], unscheduledItemIds = trip.u
   };
 }
 
-function TripRoutes({ createDayId = () => "day-ui", routeService, member, onUnauthorized, onLogout, enforceAdmin, showOfflineStatus }: Pick<AppProps, "createDayId" | "routeService" | "member" | "onUnauthorized" | "onLogout"> & { enforceAdmin: boolean; showOfflineStatus: boolean }) {
+function TripRoutes({ createDayId = () => "day-ui", routeService, member, onUnauthorized, onLogout, decisionRepository, enforceAdmin, showOfflineStatus }: Pick<AppProps, "createDayId" | "routeService" | "member" | "onUnauthorized" | "onLogout" | "decisionRepository"> & { enforceAdmin: boolean; showOfflineStatus: boolean }) {
   const { trip, mutateTrip, syncState, pendingCommandCount, unassignedOfflineCount, conflictPaused } = useTrip();
   const navigate = useNavigate();
   const [requestedDayId, setRequestedDayId] = useState<string>();
@@ -193,6 +197,7 @@ function TripRoutes({ createDayId = () => "day-ui", routeService, member, onUnau
               onMoveDay={reorderDays}
               isSaving={syncState === "正在保存"}
               onOpenHotels={() => navigate("/hotels")}
+              onOpenDecisions={() => navigate("/decisions")}
               member={member}
               onManageMembers={member?.role === "admin" ? () => navigate("/admin/members") : undefined}
               onLogout={onLogout}
@@ -203,6 +208,9 @@ function TripRoutes({ createDayId = () => "day-ui", routeService, member, onUnau
           }
         />
         <Route path="/hotels" element={<HotelComparePage trip={trip} routeService={routeService} onSelectHotel={selectHotel} onBack={() => navigate("/")} />} />
+        <Route path="/decisions" element={decisionRepository && member
+          ? <DecisionWorkspacePage repository={decisionRepository} trip={trip} member={member} onBack={() => navigate("/")} />
+          : <main className="decision-page"><button type="button" onClick={() => navigate("/")}>返回行程</button><p role="status">共同决定仅在两位成员登录共享行程后启用。</p></main>} />
         <Route path="/admin/members" element={enforceAdmin && member?.role !== "admin" ? <p role="alert">无权访问</p> : <MemberManagementPage onUnauthorized={onUnauthorized} onBack={() => navigate("/", { replace: true })} />} />
         <Route
           path="/day/:dayId"
@@ -228,11 +236,12 @@ function DayRoute({ trip, onBack, routeService }: { trip: Trip; onBack: (dayId: 
   return <DayPage trip={trip} dayId={dayId} onBack={() => onBack(dayId)} routeService={routeService} />;
 }
 
-export function TripApp({ repository, createDayId, tripId, routeService, member, onUnauthorized, onLogout }: AppProps) {
+export function TripApp({ repository, decisionRepository, createDayId, tripId, routeService, member, onUnauthorized, onLogout }: AppProps) {
   const enforceAdmin = repository?.syncMode === "cloudbase" || !import.meta.env.DEV;
+  const [defaultDecisionRepository] = useState<DecisionWorkspaceRepository | undefined>(() => decisionRepository ?? (import.meta.env.VITE_DATA_MODE === "cloudbase" ? new CloudBaseDecisionWorkspaceRepository() : undefined));
   return (
     <TripProvider repository={repository} tripId={tripId} actorUid={member?.uid} onUnauthorized={onUnauthorized}>
-      <TripRoutes createDayId={createDayId} routeService={routeService} member={member} onUnauthorized={onUnauthorized} onLogout={onLogout} enforceAdmin={enforceAdmin} showOfflineStatus={repository === undefined} />
+      <TripRoutes createDayId={createDayId} routeService={routeService} member={member} onUnauthorized={onUnauthorized} onLogout={onLogout} decisionRepository={decisionRepository ?? defaultDecisionRepository} enforceAdmin={enforceAdmin} showOfflineStatus={repository === undefined} />
     </TripProvider>
   );
 }

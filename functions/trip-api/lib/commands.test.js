@@ -339,6 +339,7 @@ test("the first member confirmation keeps a tentative candidate tentative", asyn
   assert.equal(result.candidate.revision, 3);
   assert.equal(result.receipt.memberUid, "fs_admin");
   assert.equal(result.receipt.active, true);
+  assert.equal(result.receipt.updatedAt, "2026-08-28T01:00:00.000Z");
 });
 
 test("the second active member confirmation confirms a tentative candidate", async () => {
@@ -410,6 +411,25 @@ test("an active confirmation requires a planned or linked tentative placement", 
     expectedCandidateRevision: 2,
     active: true,
     idempotencyKey: "confirm-no-placement-001",
+  }, "fs_admin"), { code: "INVALID_CONFIRMATION_STATE" });
+});
+
+test("a member cannot withdraw a confirmation receipt that is not active", async () => {
+  const db = createDb({
+    members: [member("fs_admin", "admin"), member("fs_member", "member")],
+    trips: [{ ...trip(), memberUids: ["fs_admin", "fs_member"] }],
+    candidates: [candidate()],
+    placements: [placement()],
+  });
+  const commands = createTripCommands({ db });
+
+  await assert.rejects(() => commands.execute({
+    action: "setConfirmationReceipt",
+    tripId: "trip-2026-autumn",
+    candidateId: "candidate-1",
+    expectedCandidateRevision: 2,
+    active: false,
+    idempotencyKey: "withdraw-missing-001",
   }, "fs_admin"), { code: "INVALID_CONFIRMATION_STATE" });
 });
 
@@ -489,6 +509,7 @@ test("candidate feedback is append-only and idempotent for its author", async ()
   assert.deepEqual(replay, first);
   assert.equal(db.data.trip_candidate_feedback.size, 1);
   assert.equal(first.feedback.actorUid, "fs_member");
+  assert.equal(first.feedback.updatedAt, "2026-08-28T02:00:00.000Z");
 });
 
 test("a tentative placement validates the trip day and replays without duplication", async () => {
@@ -813,7 +834,7 @@ test("a claimed scoped agent submits an atomic two-candidate proposal batch", as
   assert.equal(workspace.evidence.length, 2);
 });
 
-test("agent web evidence is server-verified and a later blockage is explicit", async () => {
+test("agent web evidence is server-verified, changed evidence becomes stale, and blockage is explicit", async () => {
   const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
   const db = createDb({
     members: [member("fs_member", "member")],
@@ -838,7 +859,8 @@ test("agent web evidence is server-verified and a later blockage is explicit", a
     revision: 2,
     expiresAt: "2026-08-28T08:00:00.000Z",
   });
-  const commands = createTripCommands({ db, now: () => new Date("2026-08-28T07:10:00.000Z"), randomId: () => "evidence-web-1" });
+  const evidenceIds = ["evidence-web-1", "evidence-stale-1"];
+  const commands = createTripCommands({ db, now: () => new Date("2026-08-28T07:10:00.000Z"), randomId: () => evidenceIds.shift() });
   const evidenceCommand = {
     agentRunId: "agent-run-1",
     sequence: 1,
@@ -875,17 +897,55 @@ test("agent web evidence is server-verified and a later blockage is explicit", a
   assert.equal(verified.candidate.verificationState, "web_verified");
   assert.equal(verified.candidate.revision, 3);
 
-  const blockedCommand = {
+  const changedEvidenceCommand = {
     agentRunId: "agent-run-1",
     sequence: 2,
+    idempotencyKey: "changed-evidence-001",
+    action: "appendEvidenceSnapshot",
+    payload: {
+      candidateId: "candidate-1",
+      expectedCandidateRevision: 3,
+      evidence: {
+        sourceKind: "flyai",
+        sourceName: "FlyAI",
+        capturedAt: "2026-08-28T07:08:00.000Z",
+        queryContext: { dates: { start: "2026-10-01", end: "2026-10-02" }, travelers: 2, roomOrTicket: "双床房" },
+        captureMethod: "api_result",
+        facts: {
+          propertyName: "海边酒店",
+          address: "香港",
+          checkInDate: "2026-10-01",
+          checkOutDate: "2026-10-02",
+          travelers: 2,
+          roomTypeOrBed: "双床房",
+          availability: "available",
+          priceAmount: 2100,
+          currency: "HKD",
+          priceDisplay: "total",
+          cancellationPolicy: "不可取消",
+        },
+        supersedesEvidenceId: "evidence-web-1",
+        changeReason: "价格与取消政策发生变化",
+      },
+    },
+  };
+  const changed = await commands.executeAgent({ ...changedEvidenceCommand, signature: agentSignature(privateKey, changedEvidenceCommand) });
+  assert.equal(changed.evidence.verificationOutcome, "stale");
+  assert.equal(changed.candidate.verificationState, "stale");
+  assert.equal(changed.candidate.currentEvidenceId, "evidence-stale-1");
+  assert.equal(db.data.trip_evidence_snapshots.get("evidence-web-1").verificationOutcome, "web_verified");
+
+  const blockedCommand = {
+    agentRunId: "agent-run-1",
+    sequence: 3,
     idempotencyKey: "web-blocked-001",
     action: "reportVerificationBlocked",
-    payload: { candidateId: "candidate-1", expectedCandidateRevision: 3, reason: "captcha" },
+    payload: { candidateId: "candidate-1", expectedCandidateRevision: 4, reason: "captcha" },
   };
   const blocked = await commands.executeAgent({ ...blockedCommand, signature: agentSignature(privateKey, blockedCommand) });
   assert.equal(blocked.candidate.verificationState, "needs_takeover");
   assert.equal(blocked.candidate.changeReason, "captcha");
-  assert.equal(blocked.candidate.revision, 4);
+  assert.equal(blocked.candidate.revision, 5);
 });
 
 test("a scoped agent generates a summary only for the supplied current revisions", async () => {

@@ -587,6 +587,7 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
             throw codedError("INVALID_CONFIRMATION_STATE");
           }
         }
+        if (!input.active && !previousReceipt?.active) throw codedError("INVALID_CONFIRMATION_STATE");
         const timestamp = now().toISOString();
         const receipt = {
           id: receiptId,
@@ -597,6 +598,7 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
           ...(input.reason ? { reason: input.reason } : {}),
           revision: (previousReceipt?.revision || 0) + 1,
           actedAt: timestamp,
+          updatedAt: timestamp,
         };
         await receipts.doc(receiptId).set(receipt);
 
@@ -637,6 +639,7 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
           ...(input.reason ? { reason: input.reason } : {}),
           revision: 1,
           createdAt: timestamp,
+          updatedAt: timestamp,
         };
         await transaction.collection("trip_candidate_feedback").doc(feedback.id).set(feedback);
         await indexDecisionResource(transaction, input.tripId, "candidate", candidate.id);
@@ -893,20 +896,24 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
     if (!evidenceId || one(await transaction.collection("trip_evidence_snapshots").doc(evidenceId).get())) throw codedError("INVALID_REQUEST");
     const timestamp = now().toISOString();
     const webVerified = isWebVerifiedEvidence(current, input.payload.evidence);
+    const changedSincePrevious = Boolean(
+      input.payload.evidence.supersedesEvidenceId && input.payload.evidence.changeReason,
+    );
+    const verificationState = webVerified ? "web_verified" : changedSincePrevious ? "stale" : "candidate";
     const evidence = {
       id: evidenceId,
       tripId: run.tripId,
       candidateId: current.id,
       ...input.payload.evidence,
       fieldCompleteness: Object.keys(input.payload.evidence.facts),
-      verificationOutcome: webVerified ? "web_verified" : "candidate",
+      verificationOutcome: verificationState,
       revision: 1,
       updatedAt: timestamp,
     };
     const candidate = {
       ...current,
       currentEvidenceId: evidence.id,
-      verificationState: webVerified ? "web_verified" : "candidate",
+      verificationState,
       revision: current.revision + 1,
       updatedAt: timestamp,
     };
@@ -960,7 +967,11 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
       let input;
       try { input = AgentApiSchema.parse(event); } catch { throw codedError("INVALID_REQUEST"); }
       if (input.action === "claimAgentRun") {
-        return db.runTransaction((transaction) => effectiveAgentBridge.claim(transaction, input));
+        return db.runTransaction(async (transaction) => {
+          const run = one(await transaction.collection("trip_agent_runs").doc(input.agentRunId).get());
+          if (run) await assertTripMember(transaction, run.tripId, run.creatorUid);
+          return effectiveAgentBridge.claim(transaction, input);
+        });
       }
       const outcome = await db.runTransaction((transaction) => effectiveAgentBridge.run(
         transaction,

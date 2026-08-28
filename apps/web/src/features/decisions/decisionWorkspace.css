@@ -11,6 +11,30 @@
   padding: clamp(1.25rem, 3vw, 3rem);
 }
 
+.decision-page { margin: 0 auto; max-width: 88rem; padding: 1rem clamp(0.75rem, 2vw, 2rem) 4rem; }
+.decision-page-nav { align-items: center; display: flex; justify-content: space-between; margin-bottom: 1rem; }
+.decision-page-nav button,
+.decision-preference-form button,
+.decision-action-row button { background: transparent; border: 1px solid var(--decision-green, #104c40); color: var(--decision-green, #104c40); cursor: pointer; font: inherit; padding: 0.55rem 0.75rem; }
+.decision-page-nav button:disabled,
+.decision-preference-form button:disabled,
+.decision-action-row button:disabled { cursor: not-allowed; opacity: 0.45; }
+.decision-preference-form { background: #fffaf0; border: 1px solid #d9d0be; display: grid; gap: 0.85rem; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 1rem; padding: 1rem; }
+.decision-preference-form > div:first-child { grid-column: 1 / -1; }
+.decision-preference-form p { font-size: 0.72rem; font-weight: 800; letter-spacing: 0.12em; margin: 0; }
+.decision-preference-form h2 { color: #104c40; font-family: "Songti SC", "STSong", serif; margin: 0.25rem 0; }
+.decision-preference-form label { display: grid; font-size: 0.78rem; font-weight: 700; gap: 0.35rem; }
+.decision-preference-form input,
+.decision-preference-form select,
+.decision-preference-form textarea { background: #fffdf7; border: 1px solid #c9bfac; color: #224e48; font: inherit; padding: 0.65rem; }
+.decision-preference-form textarea { min-height: 4rem; resize: vertical; }
+.decision-form-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; grid-column: 1 / -1; }
+.decision-page-message { background: #fff3d9; border-left: 3px solid #dc6038; padding: 0.7rem 0.9rem; }
+.decision-action-desk { background: #f0eadb; border: 1px solid #d9d0be; margin-top: 1rem; padding: 1rem; }
+.decision-action-desk h2 { color: #104c40; font-family: "Songti SC", "STSong", serif; }
+.decision-action-row { align-items: center; border-top: 1px dashed #bdb29e; display: flex; flex-wrap: wrap; gap: 0.5rem; padding: 0.75rem 0; }
+.decision-action-row strong { margin-right: auto; }
+
 .decision-workspace-heading,
 .decision-section-heading { max-width: 49rem; }
 .decision-workspace-heading > p,
@@ -65,6 +89,7 @@
 .decision-confirmation--tentative { color: #9a6832; }
 
 @media (max-width: 700px) {
+  .decision-preference-form { grid-template-columns: 1fr; }
   .decision-workspace { margin-inline: -0.25rem; padding: 1.1rem; }
   .decision-preference-grid,
   .decision-summary-columns { grid-template-columns: 1fr; }

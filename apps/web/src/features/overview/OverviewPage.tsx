@@ -21,6 +21,7 @@ export type OverviewPageProps = {
   onMoveDay: (activeDayId: string, overDayId: string) => void | Promise<unknown>;
   isSaving?: boolean;
   onOpenHotels?: () => void;
+  onOpenDecisions?: () => void;
   member?: Member;
   onManageMembers?: () => void;
   onLogout?: () => void | Promise<void>;
@@ -40,6 +41,7 @@ export function OverviewPage({
   onMoveDay,
   isSaving = false,
   onOpenHotels = () => undefined,
+  onOpenDecisions = () => undefined,
   member,
   onManageMembers,
   onLogout,
@@ -206,6 +208,7 @@ export function OverviewPage({
         <span className="text-navigation__current" aria-current="page">行程</span>
         {member ? <span className="signed-in-user">已登录：{member.displayName}</span> : null}
         <button type="button" onClick={onOpenHotels}>酒店比较</button>
+        <button type="button" onClick={onOpenDecisions}>共同决定</button>
         {onManageMembers ? <button type="button" onClick={onManageMembers}>成员管理</button> : null}
         {onLogout ? <button type="button" onClick={() => void signOut()} disabled={signingOut}>{signingOut ? "正在退出" : "退出登录"}</button> : null}
         {accountError ? <span role="alert">{accountError}</span> : null}

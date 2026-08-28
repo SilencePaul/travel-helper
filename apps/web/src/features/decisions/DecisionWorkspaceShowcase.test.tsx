@@ -101,7 +101,7 @@ test("renders feedback, tentative placement, and both-traveler confirmation prog
 });
 
 test("keeps the proposal rail to at most four tickets", () => {
-  render(<DecisionWorkspaceShowcase workspace={{ ...workspace, candidates: [...workspace.candidates, { ...workspace.candidates[0], id: "hotel-2", name: "Extra ticket" }, { ...workspace.candidates[0], id: "hotel-3", name: "Hidden ticket" }] }} />);
+  render(<DecisionWorkspaceShowcase workspace={{ ...workspace, candidates: [...workspace.candidates, { ...workspace.candidates[0]!, id: "hotel-2", name: "Extra ticket" }, { ...workspace.candidates[0]!, id: "hotel-3", name: "Hidden ticket" }] }} />);
 
   expect(screen.getAllByTestId("decision-candidate-ticket")).toHaveLength(4);
   expect(screen.queryByText("Hidden ticket")).not.toBeInTheDocument();

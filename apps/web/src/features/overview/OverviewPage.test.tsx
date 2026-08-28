@@ -196,6 +196,7 @@ test("keeps day selection on the travel pass and opens details separately", asyn
 test("exposes the travel actions in text navigation and calls their original callbacks", async () => {
   const user = userEvent.setup();
   const onOpenHotels = vi.fn();
+  const onOpenDecisions = vi.fn();
   const onManageMembers = vi.fn();
   const onLogout = vi.fn();
 
@@ -209,6 +210,7 @@ test("exposes the travel actions in text navigation and calls their original cal
       onDeleteDay={() => undefined}
       onMoveDay={() => undefined}
       onOpenHotels={onOpenHotels}
+      onOpenDecisions={onOpenDecisions}
       member={{ uid: "member-yiming", displayName: "一鸣", role: "admin", version: 0, createdAt: "2026-08-28T00:00:00.000Z" }}
       onManageMembers={onManageMembers}
       onLogout={onLogout}
@@ -218,6 +220,7 @@ test("exposes the travel actions in text navigation and calls their original cal
   const navigation = screen.getByRole("navigation", { name: "行程操作" });
   expect(screen.getByText("行程")).toHaveClass("text-navigation__current");
   expect(navigation).toHaveTextContent("酒店比较");
+  expect(navigation).toHaveTextContent("共同决定");
   expect(navigation).toHaveTextContent("成员管理");
   expect(navigation).toHaveTextContent("退出登录");
   expect(screen.getByRole("button", { name: "新增一天" })).toBeVisible();
@@ -225,10 +228,12 @@ test("exposes the travel actions in text navigation and calls their original cal
   expect(screen.getByRole("button", { name: "删除当天" })).toBeVisible();
 
   await user.click(screen.getByRole("button", { name: "酒店比较" }));
+  await user.click(screen.getByRole("button", { name: "共同决定" }));
   await user.click(screen.getByRole("button", { name: "成员管理" }));
   await user.click(screen.getByRole("button", { name: "退出登录" }));
 
   expect(onOpenHotels).toHaveBeenCalledOnce();
+  expect(onOpenDecisions).toHaveBeenCalledOnce();
   expect(onManageMembers).toHaveBeenCalledOnce();
   expect(onLogout).toHaveBeenCalledOnce();
 });
