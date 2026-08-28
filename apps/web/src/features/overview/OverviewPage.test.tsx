@@ -106,10 +106,11 @@ test("renders every dynamic travel day and traveler", async () => {
   );
 
   expect(screen.getAllByRole("tab", { name: /D\d/ })).toHaveLength(8);
+  expect(screen.getByRole("heading", { name: "两个人，一条向南的路线。" })).toBeVisible();
   expect(screen.getByText("一鸣 / 美垚")).toBeVisible();
   expect(screen.getAllByText("待预报").length).toBeGreaterThan(0);
-  expect(screen.getByText("暂无订单数据")).toBeVisible();
-  expect(screen.getByText("尚未录入订单")).toBeVisible();
+  expect(screen.queryByText("暂无订单数据")).not.toBeInTheDocument();
+  expect(screen.queryByText("尚未录入订单")).not.toBeInTheDocument();
   expect(screen.queryByText("预算待完善")).not.toBeInTheDocument();
   expect(screen.queryByText("预订待完善")).not.toBeInTheDocument();
   expect(screen.getByRole("tab", { name: /D1/ })).toHaveAttribute("aria-selected", "true");
@@ -131,6 +132,45 @@ test("renders every dynamic travel day and traveler", async () => {
 
   await userEvent.click(screen.getByRole("tab", { name: /D3/ }));
   expect(onSelectDay).toHaveBeenCalledWith("day-3");
+});
+
+test("exposes the travel actions in text navigation and calls their original callbacks", async () => {
+  const user = userEvent.setup();
+  const onOpenHotels = vi.fn();
+  const onManageMembers = vi.fn();
+  const onLogout = vi.fn();
+
+  render(
+    <OverviewPage
+      trip={threeDayTrip}
+      selectedDayId="day-1"
+      onSelectDay={() => undefined}
+      onAddDay={() => undefined}
+      onDuplicateDay={() => undefined}
+      onDeleteDay={() => undefined}
+      onMoveDay={() => undefined}
+      onOpenHotels={onOpenHotels}
+      member={{ uid: "member-yiming", displayName: "一鸣", role: "admin", version: 0, createdAt: "2026-08-28T00:00:00.000Z" }}
+      onManageMembers={onManageMembers}
+      onLogout={onLogout}
+    />,
+  );
+
+  const navigation = screen.getByRole("navigation", { name: "行程操作" });
+  expect(navigation).toHaveTextContent("酒店比较");
+  expect(navigation).toHaveTextContent("成员管理");
+  expect(navigation).toHaveTextContent("退出登录");
+  expect(screen.getByRole("button", { name: "新增一天" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "复制当天" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "删除当天" })).toBeVisible();
+
+  await user.click(screen.getByRole("button", { name: "酒店比较" }));
+  await user.click(screen.getByRole("button", { name: "成员管理" }));
+  await user.click(screen.getByRole("button", { name: "退出登录" }));
+
+  expect(onOpenHotels).toHaveBeenCalledOnce();
+  expect(onManageMembers).toHaveBeenCalledOnce();
+  expect(onLogout).toHaveBeenCalledOnce();
 });
 
 test("warns about removed hotel and ticket orders before a date reduction, then keeps the orders", async () => {

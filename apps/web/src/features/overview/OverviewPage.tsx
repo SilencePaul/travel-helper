@@ -3,6 +3,7 @@ import type { OrderStatus } from "@travel/contracts";
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import { DayStrip } from "./DayStrip";
 import { getDayPanelId, getDayTabId } from "./dayTabIds";
+import { TravelPassHero } from "./TravelPassHero";
 import { BudgetPanel } from "../budget/BudgetPanel";
 import { OrdersPanel } from "../budget/OrdersPanel";
 import { WeatherSummary } from "../weather/WeatherSummary";
@@ -198,29 +199,19 @@ export function OverviewPage({
 
   return (
     <main className="overview">
-      <header className="hero">
-        <div>
-          <p className="eyebrow">{trip.title}</p>
-          <h1>一鸣与美垚的旅行</h1>
-          <p className="travelers">{trip.travelers.map((traveler) => traveler.name).join(" / ")}</p>
-        </div>
-        <dl className="trip-statuses">
-          <div><dt>预算</dt><dd>{(trip.orders ?? []).length ? "已汇总订单" : "暂无订单数据"}</dd></div>
-          <div><dt>预订</dt><dd>{(trip.orders ?? []).length ? "可在下方更新状态" : "尚未录入订单"}</dd></div>
-        </dl>
-        <div className="hero-actions">
-          {member ? <span className="signed-in-user">已登录：{member.displayName}</span> : null}
-          <button type="button" className="hotel-open" onClick={onOpenHotels}>酒店比较</button>
-          {onManageMembers ? <button type="button" onClick={onManageMembers}>成员管理</button> : null}
-          {onLogout ? <button type="button" onClick={() => void signOut()} disabled={signingOut}>{signingOut ? "正在退出" : "退出登录"}</button> : null}
-          {accountError ? <span role="alert">{accountError}</span> : null}
-        </div>
-      </header>
+      <TravelPassHero trip={trip} member={member} />
+      <nav className="text-navigation" aria-label="行程操作">
+        {member ? <span className="signed-in-user">已登录：{member.displayName}</span> : null}
+        <button type="button" onClick={onOpenHotels}>酒店比较</button>
+        {onManageMembers ? <button type="button" onClick={onManageMembers}>成员管理</button> : null}
+        {onLogout ? <button type="button" onClick={() => void signOut()} disabled={signingOut}>{signingOut ? "正在退出" : "退出登录"}</button> : null}
+        {accountError ? <span role="alert">{accountError}</span> : null}
+      </nav>
 
       <section aria-labelledby="days-heading">
         <div className="section-heading">
           <div>
-            <p className="eyebrow">动态行程</p>
+            <p className="eyebrow">ROUTE MANIFEST</p>
             <h2 id="days-heading">每日计划</h2>
           </div>
           <div className="day-actions">
