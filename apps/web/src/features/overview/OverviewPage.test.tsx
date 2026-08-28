@@ -157,6 +157,7 @@ test("exposes the travel actions in text navigation and calls their original cal
   );
 
   const navigation = screen.getByRole("navigation", { name: "行程操作" });
+  expect(screen.getByText("行程")).toHaveClass("text-navigation__current");
   expect(navigation).toHaveTextContent("酒店比较");
   expect(navigation).toHaveTextContent("成员管理");
   expect(navigation).toHaveTextContent("退出登录");

@@ -201,6 +201,7 @@ export function OverviewPage({
     <main className="overview">
       <TravelPassHero trip={trip} member={member} />
       <nav className="text-navigation" aria-label="行程操作">
+        <span className="text-navigation__current" aria-current="page">行程</span>
         {member ? <span className="signed-in-user">已登录：{member.displayName}</span> : null}
         <button type="button" onClick={onOpenHotels}>酒店比较</button>
         {onManageMembers ? <button type="button" onClick={onManageMembers}>成员管理</button> : null}
