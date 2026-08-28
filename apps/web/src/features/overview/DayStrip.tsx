@@ -76,6 +76,7 @@ function SortableDay({
         aria-controls={getDayPanelId(day.id)}
         tabIndex={tabStop ? 0 : -1}
         className="day-tab"
+        data-current={selected ? "true" : undefined}
         onClick={() => onSelectDay(day.id)}
         onKeyDown={onKeyDown}
       >
