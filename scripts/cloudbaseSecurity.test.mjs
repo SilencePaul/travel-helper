@@ -10,4 +10,7 @@ test("allows browser reads only for trip members", () => {
     name: "auth_exchange_codes",
     rule: { read: false, write: false },
   });
+  for (const name of ["trip_preferences", "trip_preference_summaries", "trip_candidates", "trip_evidence_snapshots", "trip_candidate_feedback", "trip_confirmation_receipts", "trip_tentative_placements", "trip_decision_audits", "trip_decision_events", "trip_decision_meta", "trip_decision_indexes", "trip_decision_idempotency", "trip_agent_runs", "trip_agent_idempotency"]) {
+    assert.deepEqual(rules.find((entry) => entry.name === name), { name, rule: { read: false, write: false } });
+  }
 });
