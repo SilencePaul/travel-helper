@@ -130,7 +130,7 @@ describe("ProductionAuthGate", () => {
     await userEvent.click(screen.getByRole("button", { name: "成员管理" }));
     expect(await screen.findByRole("heading", { name: "成员管理" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "返回行程总览" }));
-    expect(await screen.findByRole("heading", { name: "一鸣与美垚的旅行" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "两个人，一条向南的路线。" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "退出登录" }));
     expect(onLogout).toHaveBeenCalledTimes(1);
   });
