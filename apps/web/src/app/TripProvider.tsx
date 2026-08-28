@@ -10,7 +10,7 @@ import seed from "../../../../content/trip.seed.json";
 import { LocalTripRepository } from "../infrastructure/localTripRepository";
 import { CloudBaseTripRepository, isUnauthorizedError } from "../infrastructure/cloudbaseTripRepository";
 import { enqueuePendingCommand, listPendingCommands, replayPendingCommands } from "../infrastructure/offlineQueue";
-import { getTripSnapshot, saveTripSnapshot } from "../infrastructure/offlineStore";
+import { getTripSnapshot, getUnassignedOfflineRecordCount, saveTripSnapshot } from "../infrastructure/offlineStore";
 import {
   TripContext,
   type TripMutation,
@@ -21,6 +21,7 @@ type TripProviderProps = {
   children: ReactNode;
   repository?: TripRepository;
   tripId?: string;
+  actorUid?: string;
   onUnauthorized?: (error: unknown) => void;
 };
 
@@ -33,6 +34,7 @@ export function TripProvider({
   children,
   repository: injectedRepository,
   tripId = seed.id,
+  actorUid = "local-browser",
   onUnauthorized,
 }: TripProviderProps) {
   const [defaultRepository] = useState<TripRepository>(() => injectedRepository ?? (import.meta.env.VITE_DATA_MODE === "cloudbase" ? new CloudBaseTripRepository() : new LocalTripRepository(seed)));
@@ -43,8 +45,10 @@ export function TripProvider({
   const [authLost, setAuthLost] = useState(false);
   const [syncState, setSyncState] = useState<TripSyncState>(isCloudbase ? "已同步" : "正在使用本地计划");
   const [pendingCommandCount, setPendingCommandCount] = useState(0);
+  const [unassignedOfflineCount, setUnassignedOfflineCount] = useState(0);
   const [conflictPaused, setConflictPaused] = useState(false);
   const [loadedSession, setLoadedSession] = useState<number>();
+  const [reloadAttempt, setReloadAttempt] = useState(0);
   const tripRef = useRef<Trip | undefined>(undefined);
   const sessionRef = useRef(0);
   const mutationQueueRef = useRef<Promise<unknown>>(Promise.resolve());
@@ -57,12 +61,15 @@ export function TripProvider({
 
   const refreshPendingCount = useCallback(async (session?: number) => {
     try {
-      const commands = await listPendingCommands(tripId);
-      if (session === undefined || session === sessionRef.current) setPendingCommandCount(commands.length);
+      const [commands, unassignedCount] = await Promise.all([listPendingCommands(actorUid, tripId), getUnassignedOfflineRecordCount()]);
+      if (session === undefined || session === sessionRef.current) {
+        setPendingCommandCount(commands.length);
+        setUnassignedOfflineCount(unassignedCount);
+      }
     } catch {
       if (session === undefined || session === sessionRef.current) setPendingCommandCount(0);
     }
-  }, [tripId]);
+  }, [actorUid, tripId]);
 
   const invalidateSession = useCallback((error: unknown) => {
     if (invalidatedRef.current) return;
@@ -76,7 +83,8 @@ export function TripProvider({
     setLoadError(false);
     setAuthLost(true);
     setSyncState(isCloudbase ? "已同步" : "正在使用本地计划");
-    setPendingCommandCount(0);
+      setPendingCommandCount(0);
+      setUnassignedOfflineCount(0);
     setConflictPaused(false);
     /* oxlint-enable react/set-state-in-effect */
     onUnauthorized?.(error);
@@ -89,9 +97,9 @@ export function TripProvider({
     const next = structuredClone(snapshot);
     tripRef.current = next;
     setTrip(next);
-    void saveTripSnapshot(next).catch(() => undefined);
+    void saveTripSnapshot(actorUid, next).catch(() => undefined);
     return true;
-  }, []);
+  }, [actorUid]);
 
   useEffect(() => {
     const session = sessionRef.current + 1;
@@ -149,7 +157,7 @@ export function TripProvider({
             setLoadError(true);
             return;
           }
-          void getTripSnapshot(tripId).then((cachedTrip) => {
+          void getTripSnapshot(actorUid, tripId).then((cachedTrip) => {
             if (!active || session !== sessionRef.current) return;
             if (cachedTrip) {
               applySnapshot(cachedTrip, session);
@@ -166,7 +174,7 @@ export function TripProvider({
       if (sessionRef.current === session) sessionRef.current += 1;
       unsubscribe?.();
     };
-  }, [applySnapshot, invalidateSession, isCloudbase, refreshPendingCount, repository, tripId]);
+  }, [actorUid, applySnapshot, invalidateSession, isCloudbase, refreshPendingCount, reloadAttempt, repository, tripId]);
 
   const replayQueuedCommands = useCallback(() => {
     const session = sessionRef.current;
@@ -183,7 +191,7 @@ export function TripProvider({
             : await repository.save(command.patch, command.expectedVersion);
           if (session === sessionRef.current && !invalidatedRef.current) applySnapshot(saved, session);
           return saved;
-        }, tripId);
+        }, actorUid, tripId);
         if (session !== sessionRef.current || invalidatedRef.current) return;
         await refreshPendingCount(session);
         if (session !== sessionRef.current || invalidatedRef.current) return;
@@ -200,7 +208,7 @@ export function TripProvider({
       if (replayingRef.current?.promise === promise) replayingRef.current = undefined;
     });
     return promise;
-  }, [applySnapshot, isCloudbase, refreshPendingCount, repository, tripId]);
+  }, [actorUid, applySnapshot, isCloudbase, refreshPendingCount, repository, tripId]);
 
   useEffect(() => {
     if (loadedSession !== sessionRef.current || !tripRef.current || !isOnline()) return;
@@ -232,6 +240,7 @@ export function TripProvider({
         if (!isOnline()) {
           const optimistic = { ...next, version: current.version + 1 };
           await enqueuePendingCommand({
+            actorUid,
             tripId: optimistic.id,
             expectedVersion: current.version,
             patch: optimistic,
@@ -266,7 +275,7 @@ export function TripProvider({
 
     mutationQueueRef.current = task.then(() => undefined, () => undefined);
     return task;
-  }, [applySnapshot, invalidateSession, isCloudbase, refreshPendingCount, repository]);
+  }, [actorUid, applySnapshot, invalidateSession, isCloudbase, refreshPendingCount, repository]);
 
   const saveTrip = useCallback(async (next: Trip) => {
     const saved = await mutateTrip(() => next);
@@ -275,19 +284,19 @@ export function TripProvider({
   }, [mutateTrip]);
 
   if (loadError) {
-    return <p role="alert">旅行计划加载失败，请刷新后重试。</p>;
+    return <main className="trip-state" role="alert"><p className="eyebrow">连接异常</p><h1>旅行计划暂时无法加载</h1><p>登录状态仍会保留。请检查网络后重试。</p><button type="button" onClick={() => { setLoadError(false); setReloadAttempt((value) => value + 1); }}>重新加载</button></main>;
   }
 
   if (authLost) {
-    return <p role="alert">登录状态已失效，请重新登录。</p>;
+    return <main className="trip-state" role="alert"><p className="eyebrow">身份失效</p><h1>登录状态已失效</h1><p>正在返回登录页，请重新使用飞书进入。</p></main>;
   }
 
   if (!trip) {
-    return <p role="status">正在加载旅行计划</p>;
+    return <main className="trip-state" role="status"><p className="eyebrow">同步行程</p><h1>正在加载旅行计划</h1><p>正在读取共享行程与最新变更。</p></main>;
   }
 
   return (
-    <TripContext.Provider value={{ trip, saveTrip, mutateTrip, syncState, pendingCommandCount, conflictPaused }}>
+    <TripContext.Provider value={{ trip, saveTrip, mutateTrip, syncState, pendingCommandCount, unassignedOfflineCount, conflictPaused }}>
       {children}
     </TripContext.Provider>
   );

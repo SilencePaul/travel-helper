@@ -1,9 +1,10 @@
 function createTicketService({ cloudbase, memberStore, createTicket } = {}) {
   const issue = createTicket || ((uid) => cloudbase.auth().createTicket(uid));
   return {
-    async issueForUid(uid) {
+    async issueForUid(uid, { allowPending = false } = {}) {
       const member = await memberStore.findByUid(uid);
-      if (!member || (member.role !== "admin" && member.role !== "member")) {
+      const allowed = member && (member.role === "admin" || member.role === "member" || (allowPending && member.role === "pending"));
+      if (!allowed) {
         const error = new Error(member?.role === "pending" ? "PENDING_APPROVAL" : "NOT_AUTHORIZED");
         error.code = error.message;
         throw error;

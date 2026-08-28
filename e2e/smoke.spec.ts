@@ -150,10 +150,11 @@ test("restaurant drawer shows sourced details and restores focus on desktop", as
   await expect(card).toBeFocused();
 });
 
-test("shows truthful empty order state and direct AMap launch fallback", async ({ page }) => {
+test("shows seeded order totals and direct AMap launch fallback", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "总预算" })).toBeVisible();
-  await expect(page.getByText("尚未录入订单；酒店候选价格仅作比较，不会被当作已预订或已付款。" )).toBeVisible();
+  await expect(page.getByText("CNY 11,150.00 · 已付 0.00")).toBeVisible();
+  await expect(page.getByText("北京 → 深圳、珠海 → 北京机票（两人）", { exact: true })).toBeVisible();
   await page.getByRole("tab", { name: /D3/ }).click();
   await page.locator("#timeline-place-peak button").click();
   const drawer = page.getByRole("dialog", { name: "太平山顶" });

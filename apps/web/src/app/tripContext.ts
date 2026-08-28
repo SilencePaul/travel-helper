@@ -16,6 +16,7 @@ export type TripContextValue = {
   mutateTrip: (mutation: TripMutation) => Promise<Trip | undefined>;
   syncState: TripSyncState;
   pendingCommandCount: number;
+  unassignedOfflineCount: number;
   conflictPaused: boolean;
 };
 

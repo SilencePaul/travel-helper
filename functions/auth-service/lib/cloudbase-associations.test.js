@@ -170,3 +170,10 @@ test("CloudBase auth records never write the reserved _id field", async () => {
 
   assert.equal(Object.hasOwn(db.data.get("auth_oauth_states").get(state), "_id"), false);
 });
+
+test("a missing persistent exchange code is rejected instead of becoming an empty identity", async () => {
+  const db = createDb({ auth_exchange_codes: {} });
+  const sessions = createCloudBaseAuthStore({ db, now: () => 1_000 });
+
+  assert.equal(await sessions.getExchange("does-not-exist"), undefined);
+});

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { authServiceUrl, bootstrapWithCode, getCurrentProfile, recoverAuthenticatedMember, requestCustomTicket } from "./authSession";
+import { authServiceUrl, bootstrapWithCode, exchangeAuthenticationCode, getCurrentCloudbaseMember, getCurrentProfile, logout, recoverAuthenticatedMember, requestCustomTicket, signInWithIssuedTicket } from "./authSession";
 
 describe("auth session", () => {
   it("requires the standalone auth service URL", () => {
@@ -33,27 +33,64 @@ describe("auth session", () => {
     expect(fetchMock).toHaveBeenCalledWith("https://auth.example/api/auth/profile", expect.objectContaining({ method: "GET", credentials: "include" }));
   });
 
-  it("recovers an approved server session when the CloudBase user is temporarily empty", async () => {
+  it("exchanges a callback code without relying on browser cookies", async () => {
     const member = { uid: "fs_admin", displayName: "一鸣", role: "admin", version: 1, createdAt: "2026-08-27T00:00:00.000Z" } as const;
-    const getProfile = vi.fn().mockResolvedValue(member);
-    const getCurrentUser = vi.fn().mockResolvedValue(null);
-    const signIn = vi.fn().mockResolvedValue(undefined);
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ member, ticket: "custom-ticket" }), { status: 200 }));
 
-    await expect(recoverAuthenticatedMember({ getProfile, getCurrentUser, signIn })).resolves.toEqual(member);
-    expect(getProfile).toHaveBeenCalledTimes(1);
-    expect(signIn).toHaveBeenCalledTimes(1);
+    await expect(exchangeAuthenticationCode("https://auth.example/api/auth", "one-time", fetchMock)).resolves.toEqual({ member, ticket: "custom-ticket" });
+    expect(fetchMock).toHaveBeenCalledWith("https://auth.example/api/auth/exchange", expect.objectContaining({
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: "one-time" }),
+    }));
   });
 
-  it("does not request another ticket when the CloudBase user already exists", async () => {
+  it("replaces stale CloudBase state with the exchanged ticket and verifies the resulting user", async () => {
+    const order: string[] = [];
+    const auth = {
+      signOut: vi.fn(async () => { order.push("sign-out"); }),
+      signInWithCustomTicket: vi.fn(async (getTicket: () => Promise<string>) => { order.push(await getTicket()); }),
+      getCurrentUser: vi.fn(async () => ({ uid: "fs_admin" })),
+    };
+
+    await signInWithIssuedTicket("custom-ticket", "fs_admin", auth);
+
+    expect(order).toEqual(["sign-out", "custom-ticket"]);
+    expect(auth.getCurrentUser).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads the current member through the authenticated trip function", async () => {
     const member = { uid: "fs_admin", displayName: "一鸣", role: "admin", version: 1, createdAt: "2026-08-27T00:00:00.000Z" } as const;
-    const signIn = vi.fn();
+    const callFunction = vi.fn().mockResolvedValue({ result: { member } });
 
-    await recoverAuthenticatedMember({
-      getProfile: vi.fn().mockResolvedValue(member),
+    await expect(getCurrentCloudbaseMember(callFunction)).resolves.toEqual(member);
+    expect(callFunction).toHaveBeenCalledWith({ name: "trip-api", data: { action: "getCurrentMember" } });
+  });
+
+  it("recovers only from an existing CloudBase user session", async () => {
+    const member = { uid: "fs_admin", displayName: "一鸣", role: "admin", version: 1, createdAt: "2026-08-27T00:00:00.000Z" } as const;
+    const getMember = vi.fn().mockResolvedValue(member);
+
+    await expect(recoverAuthenticatedMember({
       getCurrentUser: vi.fn().mockResolvedValue({ uid: member.uid }),
-      signIn,
-    });
+      getMember,
+    })).resolves.toEqual(member);
 
-    expect(signIn).not.toHaveBeenCalled();
+    expect(getMember).toHaveBeenCalledTimes(1);
+    await expect(recoverAuthenticatedMember({
+      getCurrentUser: vi.fn().mockResolvedValue(null),
+      getMember,
+    })).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+
+    expect(getMember).toHaveBeenCalledTimes(1);
+  });
+
+  it("always clears the local CloudBase session when server logout is unavailable", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error("offline"));
+    const auth = { signOut: vi.fn().mockResolvedValue(undefined) };
+
+    await expect(logout("https://auth.example", fetchMock, auth)).resolves.toBeUndefined();
+
+    expect(auth.signOut).toHaveBeenCalledTimes(1);
   });
 });

@@ -4,25 +4,33 @@ const { createTripHandler } = require("./index.js");
 
 test("uses the authenticated custom UID and ignores a payload actor UID", async () => {
   const calls = [];
-  const handler = createTripHandler({ commands: { execute: async (payload, actorUid) => { calls.push({ payload, actorUid }); return { ok: true }; } } });
+  const handler = createTripHandler({ getUserInfo: () => ({ customUserId: "fs_member" }), commands: { execute: async (payload, actorUid) => { calls.push({ payload, actorUid }); return { ok: true }; } } });
 
-  const result = await handler({ data: { action: "listMembers", actorUid: "attacker" }, userInfo: { uid: "fs_member" } });
+  const result = await handler({ data: { action: "listMembers", actorUid: "attacker" }, userInfo: { customUserId: "fs_attacker" } });
   assert.deepEqual(result, { ok: true });
   assert.deepEqual(calls[0], { payload: { action: "listMembers", actorUid: "attacker" }, actorUid: "fs_member" });
-  assert.deepEqual(await handler({ action: "listMembers", actorUid: "attacker" }), { error: "AUTH_REQUIRED" });
 });
 
-test("trusts only the CloudBase userInfo UID as the actor", async () => {
+test("fails closed when runtime auth is empty even if event or context identities are forged", async () => {
   const calls = [];
-  const handler = createTripHandler({ commands: { execute: async (payload, actorUid) => { calls.push(actorUid); return { ok: true }; } } });
+  const handler = createTripHandler({ getUserInfo: () => ({ uid: "internal-only" }), commands: { execute: async (_payload, actorUid) => { calls.push(actorUid); return { ok: true }; } } });
 
-  assert.deepEqual(await handler({ data: { action: "listMembers" }, authInfo: { uid: "spoofed-auth-info" } }), { error: "AUTH_REQUIRED" });
-  assert.deepEqual(await handler({ data: { action: "listMembers" }, auth: { uid: "spoofed-auth" } }), { error: "AUTH_REQUIRED" });
-  assert.deepEqual(await handler({ data: { action: "listMembers" }, userInfo: { uid: "fs_member" }, authInfo: { uid: "spoofed-auth-info" }, auth: { uid: "spoofed-auth" } }), { ok: true });
-  assert.deepEqual(calls, ["fs_member"]);
+  assert.deepEqual(await handler({ data: { action: "listMembers" }, userInfo: { customUserId: "fs_event_admin" } }, { userInfo: { customUserId: "fs_context_admin" } }), { error: "AUTH_REQUIRED" });
+  assert.deepEqual(calls, []);
+});
+
+test("uses the custom user ID exposed by the CloudBase runtime auth", async () => {
+  const calls = [];
+  const handler = createTripHandler({
+    getUserInfo: () => ({ uid: "cloudbase-internal-uid", customUserId: "fs_member" }),
+    commands: { execute: async (payload, actorUid) => { calls.push({ payload, actorUid }); return { ok: true }; } },
+  });
+
+  assert.deepEqual(await handler({ data: { action: "listMembers" } }), { ok: true });
+  assert.deepEqual(calls, [{ payload: { action: "listMembers" }, actorUid: "fs_member" }]);
 });
 
 test("returns only stable command errors", async () => {
-  const handler = createTripHandler({ commands: { execute: async () => { const error = new Error("provider details"); error.code = "UNEXPECTED_PROVIDER_ERROR"; throw error; } } });
-  assert.deepEqual(await handler({ action: "listMembers", userInfo: { uid: "fs_member" } }), { error: "TRIP_API_UNAVAILABLE" });
+  const handler = createTripHandler({ getUserInfo: () => ({ customUserId: "fs_member" }), commands: { execute: async () => { const error = new Error("provider details"); error.code = "UNEXPECTED_PROVIDER_ERROR"; throw error; } } });
+  assert.deepEqual(await handler({ action: "listMembers" }), { error: "TRIP_API_UNAVAILABLE" });
 });

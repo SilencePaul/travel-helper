@@ -46,6 +46,21 @@ h2 { margin: 0; font-size: 24px; }
 .trip-statuses dt { color: #707871; font-size: 12px; }
 .trip-statuses dd { margin: 6px 0 0; font-size: 14px; }
 .hotel-open { align-self: end; min-height: 42px; padding: 8px 14px; border: 1px solid #31594d; border-radius: 999px; color: #fff; background: #31594d; }
+.hero-actions { display: flex; grid-column: 1 / -1; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.hero-actions button { min-height: 42px; padding: 8px 14px; border: 1px solid #cfd3ca; border-radius: 999px; color: #273128; background: #faf9f5; }
+.hero-actions .hotel-open { border-color: #31594d; color: #fff; background: #31594d; }
+.signed-in-user { margin-right: auto; color: #657166; font-size: 13px; }
+.hero-actions [role="alert"] { width: 100%; color: #8a332d; text-align: right; }
+.member-management { padding-top: 44px; }
+.member-management h1 { margin: 28px 0; }
+.member-management section { margin-top: 18px; padding: 22px; border: 1px solid #d9dbd5; border-radius: 20px; background: #faf9f5; }
+.member-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0; border-bottom: 1px solid #e1e3dd; }
+.member-row:last-child { border-bottom: 0; }
+.member-row button { min-height: 38px; margin-left: 8px; padding: 7px 12px; border: 1px solid #cfd3ca; border-radius: 999px; background: #fff; }
+.trip-state { display: grid; width: min(620px, calc(100% - 32px)); min-height: 100vh; margin: 0 auto; align-content: center; gap: 14px; }
+.trip-state h1 { font-size: clamp(34px, 7vw, 58px); }
+.trip-state p { margin: 0; color: #657166; line-height: 1.6; }
+.trip-state button { justify-self: start; min-height: 42px; padding: 8px 16px; border: 1px solid #31594d; border-radius: 999px; color: #fff; background: #31594d; }
 
 .section-heading { display: flex; justify-content: space-between; gap: 24px; align-items: end; margin-bottom: 18px; }
 .day-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
@@ -373,6 +388,7 @@ h2 { margin: 0; font-size: 24px; }
 .auth-security { margin: 13px 0 0; color: #778078; font-size: 11px; text-align: center; }
 .auth-pass-footer { display: flex; justify-content: space-between; gap: 12px; padding-top: 17px; border-top: 1px solid #c9c4b6; color: #788078; font-size: 10px; font-weight: 650; letter-spacing: .11em; }
 .auth-form { display: grid; gap: 10px; }
+.auth-actions { display: grid; gap: 10px; }
 .auth-form label { color: #536158; font-size: 12px; font-weight: 650; }
 .auth-input { width: 100%; min-height: 50px; margin-bottom: 8px; padding: 10px 13px; border: 1px solid #abb0a6; border-radius: 12px; color: #183229; background: #fffaf0; font-size: 16px; }
 .auth-error, .auth-status { margin: 14px 0 0; padding: 11px 12px; border-radius: 10px; font-size: 13px; line-height: 1.55; }
@@ -404,4 +420,39 @@ h2 { margin: 0; font-size: 24px; }
 @media (prefers-reduced-motion: reduce) {
   .auth-pass, .auth-progress span { animation: none; }
   .auth-primary, .auth-secondary { transition: none; }
+}
+.member-row--verification {
+  align-items: end;
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: minmax(10rem, 1fr) minmax(10rem, 0.8fr) auto;
+}
+
+.member-row--verification small,
+.member-row--verification label {
+  display: block;
+}
+
+.member-row--verification small {
+  color: var(--muted);
+  margin-top: 0.25rem;
+}
+
+.member-row--verification input {
+  box-sizing: border-box;
+  margin-top: 0.25rem;
+  width: 100%;
+}
+
+.auth-verification code {
+  font-size: 1.05em;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+@media (max-width: 720px) {
+  .member-row--verification {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
 }

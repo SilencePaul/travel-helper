@@ -24,6 +24,30 @@ function pathOf(event) {
 function bodyOf(event) { if (!event.body) return {}; try { return typeof event.body === "string" ? JSON.parse(event.body) : event.body; } catch { return undefined; } }
 function errorCode(error) { return error && typeof error.code === "string" ? error.code : "AUTH_REQUEST_FAILED"; }
 function unavailableError() { const error = new Error("AUTH_SERVICE_UNAVAILABLE"); error.code = "AUTH_SERVICE_UNAVAILABLE"; return error; }
+function customLoginCredentials(env) {
+  const direct = env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS;
+  const encoded = env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64;
+  if (!direct && !encoded) return undefined;
+  try {
+    const value = JSON.parse(direct || Buffer.from(encoded, "base64").toString("utf8"));
+    if (!value || typeof value !== "object"
+      || value.env_id !== env.VITE_CLOUDBASE_ENV_ID
+      || typeof value.private_key_id !== "string" || !value.private_key_id
+      || typeof value.private_key !== "string" || !value.private_key) throw unavailableError();
+    return value;
+  } catch {
+    throw unavailableError();
+  }
+}
+function cloudbaseInitConfig(env) {
+  const credentials = customLoginCredentials(env);
+  return {
+    env: env.VITE_CLOUDBASE_ENV_ID,
+    secretId: env.CLOUDBASE_SERVER_SECRET_ID,
+    secretKey: env.CLOUDBASE_SERVER_SECRET_KEY,
+    ...(credentials ? { credentials } : {}),
+  };
+}
 function safeMember(member) {
   if (!member) return undefined;
   const { uid, displayName, avatarUrl, role, version, createdAt, approvedAt } = member;
@@ -38,13 +62,13 @@ function createAuthHandler({ env = process.env, fetchImpl, memberStore, cloudbas
   let effectiveCloudbase = cloudbase;
   if (!effectiveCloudbase && !explicitStores && cloudbaseMode) {
     try {
-      effectiveCloudbase = require("@cloudbase/node-sdk").init({ env: env.VITE_CLOUDBASE_ENV_ID, secretId: env.CLOUDBASE_SERVER_SECRET_ID, secretKey: env.CLOUDBASE_SERVER_SECRET_KEY });
+      effectiveCloudbase = require("@cloudbase/node-sdk").init(cloudbaseInitConfig(env));
       if (!effectiveCloudbase) throw unavailableError();
     } catch {
       throw unavailableError();
     }
   } else if (!effectiveCloudbase && env.VITE_CLOUDBASE_ENV_ID && env.CLOUDBASE_SERVER_SECRET_ID && env.CLOUDBASE_SERVER_SECRET_KEY) {
-    try { effectiveCloudbase = require("@cloudbase/node-sdk").init({ env: env.VITE_CLOUDBASE_ENV_ID, secretId: env.CLOUDBASE_SERVER_SECRET_ID, secretKey: env.CLOUDBASE_SERVER_SECRET_KEY }); } catch { effectiveCloudbase = undefined; }
+    try { effectiveCloudbase = require("@cloudbase/node-sdk").init(cloudbaseInitConfig(env)); } catch { effectiveCloudbase = undefined; }
   }
   let store;
   let sessions;
@@ -73,15 +97,32 @@ function createAuthHandler({ env = process.env, fetchImpl, memberStore, cloudbas
         if (!code) return json(400, { error: "MISSING_OAUTH_CODE" }, headers);
         if (!state || !stateCookie || state !== stateCookie || !(await sessions.consumeState(state))) return json(400, { error: "INVALID_OAUTH_STATE" }, headers);
         const identity = await feishu.resolveAuthorizationCode(code); const member = await store.upsertPending(identity);
-        const session = await sessions.createSession({ uid: member.uid, oauthState: state });
         const status = member.role === "pending" ? ((await store.hasAdmin?.()) ? "pending" : "bootstrap") : "approved";
+        const session = status === "bootstrap" ? await sessions.createSession({ uid: member.uid, oauthState: state }) : undefined;
+        const exchangeCode = await sessions.createExchange({ uid: member.uid, oauthState: state });
         const appUrl = new URL(env.PUBLIC_APP_URL);
         appUrl.pathname = "/";
         appUrl.search = "";
         appUrl.searchParams.set("auth_callback", "1");
         appUrl.searchParams.set("state", state);
         appUrl.searchParams.set("status", status);
-        return { statusCode: 302, headers: { ...headers, location: appUrl.toString(), "set-cookie": setCookie("auth_session", session, secure) }, body: "" };
+        appUrl.searchParams.set("exchange_code", exchangeCode);
+        return { statusCode: 302, headers: { ...headers, location: appUrl.toString(), ...(session ? { "set-cookie": setCookie("auth_session", session, secure) } : {}) }, body: "" };
+      }
+      if (routePath === "/api/auth/exchange" && method === "POST") {
+        const body = bodyOf(event);
+        const exchange = body && typeof body.code === "string" ? await sessions.getExchange(body.code) : undefined;
+        if (!exchange) return json(400, { error: "INVALID_EXCHANGE_CODE" }, headers);
+        const member = await store.findByUid(exchange.uid);
+        if (!member || member.role === "removed") return json(401, { error: "NOT_AUTHORIZED" }, headers);
+        try {
+          const ticket = await tickets.issueForUid(exchange.uid, { allowPending: true });
+          const consumed = await sessions.consumeExchange(body.code);
+          if (!consumed || consumed.uid !== exchange.uid) return json(409, { error: "INVALID_EXCHANGE_CODE" }, headers);
+          return json(200, { member: safeMember(member), ticket }, headers);
+        } catch {
+          return json(503, { error: "AUTH_SERVICE_UNAVAILABLE" }, headers);
+        }
       }
       const sessionToken = cookies(event.headers).auth_session; const session = await sessions.getSession(sessionToken);
       if (routePath === "/api/auth/bootstrap" && method === "POST") {
@@ -115,9 +156,19 @@ function createAuthHandler({ env = process.env, fetchImpl, memberStore, cloudbas
 }
 
 exports.createAuthHandler = createAuthHandler;
+exports.cloudbaseInitConfig = cloudbaseInitConfig;
 exports.createMemoryAuthStore = createMemoryAuthStore;
 exports.createCloudBaseAuthStore = createCloudBaseAuthStore;
-exports.main = createAuthHandler();
+let defaultHandler;
+exports.main = async function main(event) {
+  try {
+    defaultHandler ||= createAuthHandler();
+    return await defaultHandler(event);
+  } catch (error) {
+    console.error("[auth-service]", errorCode(error));
+    return json(500, { error: "AUTH_REQUEST_FAILED" });
+  }
+};
 
 if (require.main === module) {
   const http = require("node:http");

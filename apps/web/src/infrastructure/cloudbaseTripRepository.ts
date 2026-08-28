@@ -53,7 +53,8 @@ function serviceErrorCode(value: unknown): string | undefined {
 }
 
 function isUnauthorizedCode(code: string | undefined) {
-  return code === "UNAUTHORIZED"
+  return code === "unauthenticated"
+    || code === "UNAUTHORIZED"
     || code === "AUTH_REQUIRED"
     || code === "MEMBERSHIP_REQUIRED"
     || code === "FORBIDDEN"
@@ -99,10 +100,12 @@ export class CloudBaseTripRepository implements TripRepository {
 
   async load(tripId: string): Promise<Trip> {
     try {
-      const result = await this.database.collection("trips").doc(tripId).get();
-      const trip = first(result.data);
-      if (!trip) throw new RepositoryUnavailableError();
-      const parsed = parsedTrip(trip);
+      const response = await this.functions.callFunction({ name: "trip-api", data: { action: "getTrip", tripId } });
+      const result = response?.result;
+      const code = serviceErrorCode(result);
+      if (isUnauthorizedCode(code)) throw unauthorizedError(code);
+      if (!result || typeof result !== "object" || !("trip" in result)) throw new RepositoryUnavailableError();
+      const parsed = parsedTrip((result as { trip: unknown }).trip);
       this.versions.set(tripId, Math.max(this.versions.get(tripId) ?? -1, parsed.version));
       return parsed;
     } catch (error) {

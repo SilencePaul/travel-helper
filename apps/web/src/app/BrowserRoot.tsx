@@ -16,7 +16,12 @@ type ProductionAuthState =
   | { status: "checking" }
   | { status: "login" }
   | { status: "pending" }
+  | { status: "error" }
   | { status: "authenticated"; member: Member };
+
+function authErrorCode(error: unknown) {
+  return error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
+}
 
 function createBrowserTestRepository(): TripRepository | undefined {
   if (!import.meta.env.DEV) return undefined;
@@ -114,11 +119,20 @@ function createBrowserTestRouteService(): RouteService | undefined {
   };
 }
 
+export function browserDataMode(isDevelopment: boolean, configuredMode: string | undefined): "cloudbase" | "local" | "invalid" {
+  if (configuredMode === "cloudbase") return "cloudbase";
+  return isDevelopment ? "local" : "invalid";
+}
+
 export function BrowserRoot() {
-  if (!import.meta.env.DEV || import.meta.env.VITE_DATA_MODE === "cloudbase") {
-    return <ProductionAuthGate />;
-  }
-  return <DevBrowserRoot />;
+  const mode = browserDataMode(import.meta.env.DEV, import.meta.env.VITE_DATA_MODE);
+  if (mode === "cloudbase") return <ProductionAuthGate />;
+  if (mode === "local") return <DevBrowserRoot />;
+  return (
+    <AuthShell step="配置检查" title="旅行助手尚未正确发布" description="生产环境没有连接到共享行程服务。">
+      <p className="auth-error" role="alert">请联系管理员检查数据模式配置后重新发布。</p>
+    </AuthShell>
+  );
 }
 
 function DevBrowserRoot() {
@@ -136,8 +150,11 @@ export function ProductionAuthGate() {
     try {
       const member = await recoverAuthenticatedMember();
       acceptMember(member);
-    } catch {
-      setAuthState({ status: "login" });
+    } catch (error) {
+      const code = authErrorCode(error);
+      if (code === "PENDING_APPROVAL") setAuthState({ status: "pending" });
+      else if (["AUTH_REQUIRED", "MEMBERSHIP_REQUIRED", "NOT_AUTHORIZED", "REMOVED"].includes(String(code))) setAuthState({ status: "login" });
+      else setAuthState({ status: "error" });
     }
   }, [acceptMember]);
   /* oxlint-disable react/set-state-in-effect -- initial auth state synchronizes with the external auth session */
@@ -148,12 +165,12 @@ export function ProductionAuthGate() {
 
   return (
     <BrowserRouter>
-      <ProductionRoutes authState={authState} setAuthState={setAuthState} acceptMember={acceptMember} />
+      <ProductionRoutes authState={authState} setAuthState={setAuthState} acceptMember={acceptMember} onRetryAuth={refreshAuth} />
     </BrowserRouter>
   );
 }
 
-function ProductionRoutes({ authState, setAuthState, acceptMember }: { authState: ProductionAuthState; setAuthState: (state: ProductionAuthState) => void; acceptMember: (member: Member) => void }) {
+function ProductionRoutes({ authState, setAuthState, acceptMember, onRetryAuth }: { authState: ProductionAuthState; setAuthState: (state: ProductionAuthState) => void; acceptMember: (member: Member) => void; onRetryAuth: () => Promise<void> }) {
   const navigate = useNavigate();
   const location = useLocation();
   const handleUnauthorized = useCallback((error: unknown) => {
@@ -162,12 +179,19 @@ function ProductionRoutes({ authState, setAuthState, acceptMember }: { authState
     void logout().catch(() => undefined);
     navigate(code === "PENDING_APPROVAL" ? "/auth/pending" : "/", { replace: true });
   }, [navigate, setAuthState]);
+  const handleLogout = useCallback(async () => {
+    await logout();
+    setAuthState({ status: "login" });
+    navigate("/", { replace: true });
+  }, [navigate, setAuthState]);
   const home = authState.status === "checking"
     ? <AuthShell step="身份检查" title="正在寻找你的旅行通行证" description="如果已经登录，我们会直接带你回到行程。"><div className="auth-progress" role="status"><span aria-hidden="true" /><span aria-hidden="true" /><span aria-hidden="true" /><b>正在恢复登录状态…</b></div></AuthShell>
+    : authState.status === "error"
+      ? <AuthShell step="连接检查" title="暂时无法确认登录状态" description="登录信息仍保留在这台设备上，请在网络恢复后重试。"><p className="auth-error" role="alert">暂时无法确认登录状态，请检查网络。</p><button className="auth-secondary" type="button" onClick={() => { setAuthState({ status: "checking" }); void onRetryAuth(); }}>重新检查登录状态</button></AuthShell>
     : authState.status === "pending"
-      ? <PendingApprovalPage onAuthenticated={acceptMember} />
+      ? <PendingApprovalPage onAuthenticated={acceptMember} onLogout={handleLogout} />
       : authState.status === "authenticated"
-        ? <TripApp member={authState.member} onUnauthorized={handleUnauthorized} />
+        ? <TripApp member={authState.member} onUnauthorized={handleUnauthorized} onLogout={handleLogout} />
         : <LoginPage />;
   const isHostingCallback = new URLSearchParams(location.search).get("auth_callback") === "1";
 
@@ -176,7 +200,7 @@ function ProductionRoutes({ authState, setAuthState, acceptMember }: { authState
       <Route path="/" element={isHostingCallback ? <AuthCallbackPage onAuthenticated={acceptMember} /> : home} />
       <Route path="/auth/callback" element={<AuthCallbackPage onAuthenticated={acceptMember} />} />
       <Route path="/auth/bootstrap" element={<BootstrapPage onAuthenticated={acceptMember} />} />
-      <Route path="/auth/pending" element={<PendingApprovalPage onAuthenticated={acceptMember} />} />
+      <Route path="/auth/pending" element={<PendingApprovalPage onAuthenticated={acceptMember} onLogout={handleLogout} />} />
       <Route path="*" element={home} />
     </Routes>
   );

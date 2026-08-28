@@ -20,7 +20,10 @@ function createDb({ members = [], trips = [trip()], authSessions = [] } = {}) {
     members: new Map(members.map((item) => [item.uid, structuredClone(item)])),
     trips: new Map(trips.map((item) => [item.id, structuredClone(item)])),
     auth_sessions: new Map(authSessions.map((item) => [item._id, structuredClone(item)])),
-    membership_index: new Map([["admins", { uids: members.filter((item) => item.role === "admin").map((item) => item.uid) }]]),
+    membership_index: new Map([
+      ["admins", { adminUids: members.filter((item) => item.role === "admin").map((item) => item.uid) }],
+      ["members", { memberUids: members.map((item) => item.uid) }],
+    ]),
     audits: [],
     idempotency: new Map(),
   };
@@ -47,7 +50,10 @@ function createDb({ members = [], trips = [trip()], authSessions = [] } = {}) {
 }
 
 test("only an administrator can approve a pending member", async () => {
-  const db = createDb({ members: [member("fs_admin", "admin", "一鸣"), member("fs_pending", "pending", "美垚")] });
+  const db = createDb({
+    members: [{ ...member("fs_admin", "admin", "一鸣"), tripIds: ["trip-2026-autumn"] }, member("fs_pending", "pending", "美垚")],
+    trips: [{ ...trip(), memberUids: ["fs_admin"] }],
+  });
   const commands = createTripCommands({ db, now: () => new Date("2026-08-27T12:00:00.000Z") });
 
   await assert.rejects(() => commands.execute({ action: "approveMember", uid: "fs_pending" }, "fs_pending"), { code: "MEMBERSHIP_REQUIRED" });
@@ -57,6 +63,77 @@ test("only an administrator can approve a pending member", async () => {
   assert.equal(db.data.members.get("fs_pending").role, "member");
   assert.equal(db.data.audits[0].action, "approveMember");
   assert.equal("openId" in db.data.audits[0], false);
+});
+
+test("an approved member is atomically attached to the administrator's trip and can load and save it", async () => {
+  const admin = { ...member("fs_admin", "admin", "一鸣"), tripIds: ["trip-2026-autumn"] };
+  const db = createDb({
+    members: [admin, member("fs_pending", "pending", "美垚")],
+    trips: [{ ...trip(), memberUids: ["fs_admin"] }],
+  });
+  const commands = createTripCommands({ db, now: () => new Date("2026-08-27T12:00:00.000Z") });
+
+  await commands.execute({ action: "approveMember", uid: "fs_pending" }, "fs_admin");
+
+  assert.deepEqual(db.data.members.get("fs_pending").tripIds, ["trip-2026-autumn"]);
+  assert.deepEqual(db.data.trips.get("trip-2026-autumn").memberUids, ["fs_admin", "fs_pending"]);
+  assert.equal(db.data.trips.get("trip-2026-autumn").version, 1);
+
+  const loaded = await commands.execute({ action: "getTrip", tripId: "trip-2026-autumn" }, "fs_pending");
+  const saved = await commands.execute({
+    action: "saveTrip",
+    trip: { ...loaded.trip, title: "两个人的旅行" },
+    expectedVersion: loaded.trip.version,
+    idempotencyKey: "approved-member-save",
+  }, "fs_pending");
+
+  assert.equal(saved.trip.title, "两个人的旅行");
+  assert.equal(saved.trip.version, 2);
+  assert.deepEqual(saved.trip.memberUids, ["fs_admin", "fs_pending"]);
+});
+
+test("approval enforces the private trip's two-active-member limit without counting pending records", async () => {
+  const admin = { ...member("fs_admin", "admin"), tripIds: ["trip-2026-autumn"] };
+  const active = { ...member("fs_member", "member"), tripIds: ["trip-2026-autumn"] };
+  const db = createDb({
+    members: [admin, active, member("fs_pending", "pending")],
+    trips: [{ ...trip(), memberUids: ["fs_admin", "fs_member"] }],
+  });
+  db.data.membership_index.set("members", { memberUids: ["fs_admin", "fs_member", "fs_pending"] });
+  const commands = createTripCommands({ db });
+
+  await assert.rejects(
+    () => commands.execute({ action: "approveMember", uid: "fs_pending" }, "fs_admin"),
+    { code: "MEMBER_LIMIT_REACHED" },
+  );
+  assert.equal(db.data.members.get("fs_pending").role, "pending");
+  assert.deepEqual(db.data.trips.get("trip-2026-autumn").memberUids, ["fs_admin", "fs_member"]);
+});
+
+test("a trip member can load only their own trip", async () => {
+  const db = createDb({
+    members: [member("fs_member", "member")],
+    trips: [{ ...trip(), memberUids: ["fs_member"] }],
+  });
+  const commands = createTripCommands({ db });
+
+  const result = await commands.execute({ action: "getTrip", tripId: "trip-2026-autumn" }, "fs_member");
+  assert.equal(result.trip.id, "trip-2026-autumn");
+  await assert.rejects(
+    () => commands.execute({ action: "getTrip", tripId: "trip-2026-autumn" }, "fs_other"),
+    { code: "MEMBERSHIP_REQUIRED" },
+  );
+});
+
+test("an authenticated pending user can read only their own safe member profile", async () => {
+  const db = createDb({ members: [member("fs_pending", "pending", "美垚")] });
+  const commands = createTripCommands({ db });
+
+  assert.deepEqual(
+    await commands.execute({ action: "getCurrentMember" }, "fs_pending"),
+    { member: { uid: "fs_pending", role: "pending", displayName: "美垚", version: 0, createdAt: "2026-08-27T00:00:00.000Z" } },
+  );
+  await assert.rejects(() => commands.execute({ action: "getCurrentMember" }, "fs_missing"), { code: "MEMBERSHIP_REQUIRED" });
 });
 
 test("removing the final administrator is rejected", async () => {
@@ -218,7 +295,10 @@ test("removeMember fails closed when server-owned associations are missing", asy
 });
 
 test("audit records include actor UID and safe changed fields only", async () => {
-  const db = createDb({ members: [member("fs_admin", "admin", "一鸣"), member("fs_pending", "pending", "美垚")] });
+  const db = createDb({
+    members: [{ ...member("fs_admin", "admin", "一鸣"), tripIds: ["trip-2026-autumn"] }, member("fs_pending", "pending", "美垚")],
+    trips: [{ ...trip(), memberUids: ["fs_admin"] }],
+  });
   const commands = createTripCommands({ db, now: () => new Date("2026-08-27T12:00:00.000Z") });
 
   await commands.execute({ action: "approveMember", uid: "fs_pending" }, "fs_admin");
@@ -228,7 +308,7 @@ test("audit records include actor UID and safe changed fields only", async () =>
     actorName: "一鸣",
     action: "approveMember",
     targetName: "美垚",
-    changedFields: ["role", "version", "approvedAt"],
+    changedFields: ["role", "version", "approvedAt", "tripIds", "memberUids"],
     createdAt: "2026-08-27T12:00:00.000Z",
   });
   assert.equal("openId" in db.data.audits[0], false);

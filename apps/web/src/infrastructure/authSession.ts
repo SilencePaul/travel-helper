@@ -1,5 +1,5 @@
-import { getCloudbaseAuth } from "./cloudbaseClient";
-import type { Member } from "@travel/contracts";
+import { getCloudbaseAuth, getCloudbaseClient } from "./cloudbaseClient";
+import { MemberSchema, type Member } from "@travel/contracts";
 
 type AuthEnvironment = { VITE_AUTH_SERVICE_URL?: string };
 type FetchLike = typeof fetch;
@@ -54,27 +54,71 @@ export async function getCurrentProfile(baseUrl = authServiceUrl(), fetchImpl: F
   return (await jsonResponse<{ member: Member }>(response)).member;
 }
 
+export async function exchangeAuthenticationCode(baseUrl: string, code: string, fetchImpl: FetchLike = fetch) {
+  const response = await fetchImpl(authRoute(baseUrl, "/exchange"), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ code }),
+  });
+  const body = await jsonResponse<{ member?: unknown; ticket?: unknown }>(response);
+  const member = MemberSchema.safeParse(body.member);
+  if (!member.success || typeof body.ticket !== "string" || !body.ticket) {
+    throw Object.assign(new Error("INVALID_EXCHANGE_RESPONSE"), { code: "INVALID_EXCHANGE_RESPONSE" });
+  }
+  return { member: member.data, ticket: body.ticket };
+}
+
+type TicketAuth = {
+  signOut: () => Promise<unknown>;
+  signInWithCustomTicket: (getTicket: () => Promise<string>) => Promise<unknown>;
+  getCurrentUser: () => Promise<unknown>;
+};
+
+export async function signInWithIssuedTicket(ticket: string, expectedUid: string, auth: TicketAuth = getCloudbaseAuth()) {
+  await auth.signOut();
+  await auth.signInWithCustomTicket(() => Promise.resolve(ticket));
+  const current = await auth.getCurrentUser();
+  const uid = current && typeof current === "object" && "uid" in current ? (current as { uid?: unknown }).uid : undefined;
+  if (uid !== expectedUid) throw Object.assign(new Error("AUTH_REQUIRED"), { code: "AUTH_REQUIRED" });
+}
+
+type CallFunctionLike = (options: { name: string; data: Record<string, unknown> }) => Promise<{ result?: unknown }>;
+
+export async function getCurrentCloudbaseMember(callFunction: CallFunctionLike = (options) => getCloudbaseClient().callFunction(options)) {
+  const response = await callFunction({ name: "trip-api", data: { action: "getCurrentMember" } });
+  const result = response?.result;
+  const code = result && typeof result === "object" && "error" in result ? (result as { error?: unknown }).error : undefined;
+  if (typeof code === "string") throw Object.assign(new Error(code), { code });
+  const parsed = MemberSchema.safeParse(result && typeof result === "object" && "member" in result ? (result as { member?: unknown }).member : undefined);
+  if (!parsed.success) throw Object.assign(new Error("AUTH_REQUIRED"), { code: "AUTH_REQUIRED" });
+  return parsed.data;
+}
+
 export async function signInWithCustomTicket(baseUrl = authServiceUrl()) {
   return getCloudbaseAuth().signInWithCustomTicket(() => requestCustomTicket(baseUrl));
 }
 
 type RecoveryDependencies = {
-  getProfile?: () => Promise<Member>;
   getCurrentUser?: () => Promise<unknown>;
-  signIn?: () => Promise<unknown>;
+  getMember?: () => Promise<Member>;
 };
 
 export async function recoverAuthenticatedMember({
-  getProfile = () => getCurrentProfile(),
   getCurrentUser = () => getCloudbaseAuth().getCurrentUser(),
-  signIn = () => signInWithCustomTicket(),
+  getMember = () => getCurrentCloudbaseMember(),
 }: RecoveryDependencies = {}) {
-  const member = await getProfile();
-  if ((member.role === "admin" || member.role === "member") && !(await getCurrentUser())) await signIn();
-  return member;
+  const current = await getCurrentUser();
+  if (!current) throw Object.assign(new Error("AUTH_REQUIRED"), { code: "AUTH_REQUIRED" });
+  return getMember();
 }
 
-export async function logout(baseUrl = authServiceUrl(), fetchImpl: FetchLike = fetch) {
-  await fetchImpl(authRoute(baseUrl, "/logout"), { method: "POST", credentials: "include" });
-  await getCloudbaseAuth().signOut();
+export async function logout(baseUrl = authServiceUrl(), fetchImpl: FetchLike = fetch, auth: Pick<TicketAuth, "signOut"> = getCloudbaseAuth()) {
+  try {
+    await fetchImpl(authRoute(baseUrl, "/logout"), { method: "POST", credentials: "include" });
+  } catch {
+    // The first-party CloudBase session is the source of truth for approved users.
+    // An unavailable legacy cookie endpoint must not trap the user in a local session.
+  } finally {
+    await auth.signOut();
+  }
 }

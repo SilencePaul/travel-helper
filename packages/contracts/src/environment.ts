@@ -57,7 +57,6 @@ export const ServerEnvironmentSchema = z.object({
   FEISHU_REDIRECT_URI: NonEmptyEnvironmentValueSchema,
   PUBLIC_APP_URL: NonEmptyEnvironmentValueSchema,
   ADMIN_BOOTSTRAP_CODE: NonEmptyEnvironmentValueSchema,
-  AUTH_SESSION_SECRET: NonEmptyEnvironmentValueSchema,
   CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64: Base64EnvironmentValueSchema,
 });
 

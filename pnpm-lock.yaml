@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  axios@<0.33.0: 0.33.0
+
 importers:
 
   .:
@@ -109,8 +112,8 @@ importers:
   functions/auth-service:
     dependencies:
       '@cloudbase/node-sdk':
-        specifier: ^2.11.0
-        version: 2.11.0
+        specifier: ^3.18.3
+        version: 3.18.3(ws@8.21.3)
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -118,8 +121,8 @@ importers:
   functions/trip-api:
     dependencies:
       '@cloudbase/node-sdk':
-        specifier: ^2.11.0
-        version: 2.11.0
+        specifier: ^3.18.3
+        version: 3.18.3(ws@8.21.3)
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -682,6 +685,23 @@ packages:
   '@cloudbase/adapter-wx_mp@1.3.1':
     resolution: {integrity: sha512-rS0N1aD1a0zc421ds17/HzM4RChQ6T2ixMz87bhPJ1yveqJt/KUqYxiXJDWhZ803wwTmJs8aqNkgugsNusNhbg==}
 
+  '@cloudbase/ai@2.30.0':
+    resolution: {integrity: sha512-RtBux47omXWcMhiiDDVJ96d2JlqnQ/bzKC6GG3ROgupYG3ReQyv1IssCpg5cnzmZ+l651IqdOpt27VTuO3kEGQ==}
+
+  '@cloudbase/app@2.32.0':
+    resolution: {integrity: sha512-78+eSo8OLO4iUiifdynZo4dK4wNlyaz5x9423muSibyl4FLwt5/Xt0t9s7StFmGaBdvB75UYM9dGWxOdIFRzaw==}
+    peerDependencies:
+      '@cloudbase/signature-nodejs': '>=1.0.0'
+      jsonwebtoken: '>=8.0.0'
+      ws: ^8.18.0
+    peerDependenciesMeta:
+      '@cloudbase/signature-nodejs':
+        optional: true
+      jsonwebtoken:
+        optional: true
+      ws:
+        optional: true
+
   '@cloudbase/cli@3.8.1':
     resolution: {integrity: sha512-UTazVglGgMSqhsIk7MlbwRuSX/43vG83Ps598RIN5p/bF8I48pXlRlPQGj1m0PbE5VZFZS4I+tEudEr1MMt3Fw==}
     hasBin: true
@@ -692,8 +712,8 @@ packages:
   '@cloudbase/database@0.6.2':
     resolution: {integrity: sha512-d9Y+Eay+xOzvt23I+iNvt83dQi8AaqQQvjSuk0vLaMIngCcS1i/63++O5ZAK4B+W9YDYJkgtHVSoeCUdmDgOSg==}
 
-  '@cloudbase/database@1.4.1':
-    resolution: {integrity: sha512-BYLXHS6c+WhxAvvdak8Z3W+heScqBBPu/CQ76gC8v1Scuy5qf4qxuPWNzyoxde/eZsmc+BRRCFyIq4xUnIot8g==}
+  '@cloudbase/database@1.4.3':
+    resolution: {integrity: sha512-JzmdsGjy9LwzSQQ0Fv4OlNHNK61BRXdJSembTpy4408AQA3q2Ip3N5eB3v9OpAlFMvP/6MGmOQ/ZuUPKfJddJA==}
 
   '@cloudbase/js-sdk@3.8.2':
     resolution: {integrity: sha512-pEWMbwbn5j9AbsQlKSwe4kJw3FEzWbMhqL2KmWR+AJHv7eNtR3UvfZ0HyS484OV+tiGRsHH42tzM+12ZDt8c+Q==}
@@ -701,12 +721,9 @@ packages:
   '@cloudbase/manager-node@5.8.2':
     resolution: {integrity: sha512-kzjqjxGChbyTBCCM3xa+ahnLtgyk/7P7dIqgsUub+7vgJRMJZOZdMkUrshXGrViFoMjuXe0A9/B+I01PKLouUQ==}
 
-  '@cloudbase/node-sdk@2.11.0':
-    resolution: {integrity: sha512-IhSca97W3UwFlJiJFZ7vJON4S7bjmRJAzqxCaD6ARFrGAK4QNjzZIsFV0ot+e3ehJ+5YxfOV3+QrTI72cvWtSA==}
-    engines: {node: '>=8.6.0'}
-
-  '@cloudbase/signature-nodejs@1.0.0-beta.0':
-    resolution: {integrity: sha512-gpKqwsVk/D2PzvFamYNReymXSdvRSY90eZ1ARf+1wZ8oT6OpK9kr6nmevGykMxN1n17Gn92hBbWqAxU9o3+kAQ==}
+  '@cloudbase/node-sdk@3.18.3':
+    resolution: {integrity: sha512-qluLOIyPhK8AWmUeS1Qt/S4cV/07pv/L79Cne8beFove775FL9Wi2tSsawZuwGUygIUySljqQaLPUl+lrJ4Leg==}
+    engines: {node: '>=12'}
 
   '@cloudbase/signature-nodejs@1.1.0':
     resolution: {integrity: sha512-Uqj7tbeAufyAl8xxHr0BxmO9mcfjYqs/FNTDif/38KeRRB438kRlnqd06nXNkJdJWgryw0xQGDxiywVxbAaLxg==}
@@ -714,8 +731,26 @@ packages:
   '@cloudbase/signature-nodejs@2.0.0':
     resolution: {integrity: sha512-eFtRiZuD21+/s/4opejhcN8msFLBK5POwkT445yyA47kps35qXrHGqlLQgt00bmRU4VtjwN6LHr2O3PjHjWW6Q==}
 
+  '@cloudbase/signature-nodejs@2.2.0':
+    resolution: {integrity: sha512-2y2rieOpJNnBA2MW7sLJKek3iFOjgr8TNicw5qjBkcdVczLR0cFzxMhip75NLCwarFTIAONE3oeNxoQ19eVHcA==}
+
   '@cloudbase/toolbox@0.8.3':
     resolution: {integrity: sha512-Q+RT/cG0HH8V3N3ovRMKPgoOvD22Owdp5GkHDP5TKN7GpLWv3tvkfUDXFtH2jLFL+69t0qiNrP4ZlVH1/900pg==}
+
+  '@cloudbase/types@2.30.0':
+    resolution: {integrity: sha512-tVapfLLDA1MlmG2OwC5eq5eSra9l3EgpeJnx1kNR4CGh8zQRrVvFRyaRLo4BrzY0p/5xqX3iJliRmcASF7Ip7g==}
+
+  '@cloudbase/types@2.32.0':
+    resolution: {integrity: sha512-HPsMEHHt5SAyD3tpv/C/v2nYudSawE48ixjK5Y9w3R/82auJag0AUsZGfCExgdPa4Zud9OvGx5127ssEXLgadw==}
+
+  '@cloudbase/utilities@2.30.0':
+    resolution: {integrity: sha512-52DfQH5qgfOtrwj26KCGw6cz0pUjuJludJ7fccUKCzBtn/QwPudwtXo7gOUTtKKDubW3+VUCjjBm7UiDwFu+ag==}
+
+  '@cloudbase/utilities@2.32.0':
+    resolution: {integrity: sha512-vYrr1aXOpU+/IrkHMSTxi/k2d4N8raNu+E3IrKtWt4w7Y0Ke3DLvCHeUJcuWECvQBVhzmg1ert4DcXVUymSKlg==}
+
+  '@cloudbase/wx-cloud-client-sdk@1.7.1':
+    resolution: {integrity: sha512-NzLOoYDAeoRh2lRjCtvr6yXu4KPVHqZtPxyv70e+3b2+dZIDE5S5gtU8daE7xS5u4TwPqKB/E2vmgRTYOsCS9w==}
 
   '@cloudbase/wx-cloud-client-sdk@1.8.10':
     resolution: {integrity: sha512-XtWR1zNwKUqnAK1psvhK93EUnZBWhVorUdA1lHNWyI661YsdpLcxPRiX+/yoIrTo24MJyd/KguSuHluq3hsHqA==}
@@ -1346,6 +1381,10 @@ packages:
     peerDependencies:
       '@testing-library/dom': '>=7.21.4'
 
+  '@tootallnate/once@2.0.1':
+    resolution: {integrity: sha512-HqmEUIGRJ5fSXchkVgR5F7qn48bDBzv0kWj/Kfu5e6uci4UlEeng4331LnBkWffb++Ei3FOVLxo8JJWMFBDMeQ==}
+    engines: {node: '>= 10'}
+
   '@trickfilm400/rollup-plugin-off-main-thread@3.0.0-pre1':
     resolution: {integrity: sha512-/67zpWDBLV+oYAEL682s1ktXL0HgqX76f6gaVGkGnVZlBbm1zd0v4Bz8MFF2GGhoX9rvfq3KSQHubFHwa6w6/Q==}
     engines: {node: '>=12'}
@@ -1644,8 +1683,8 @@ packages:
   aws4@1.13.2:
     resolution: {integrity: sha512-lHe62zvbTB5eEABUVi/AwVh0ZKY9rMMDhmm+eeyuuUQbQ3+J+fONVQOZyj+DdrvD4BY33uYniyRJ4UJIaSKAfw==}
 
-  axios@0.21.4:
-    resolution: {integrity: sha512-ut5vewkiu8jjGBdqpM44XxjuCjq9LAKeHVmoVfHVzy8eHgxxq8SbAVQNovDA8mVi05kP0Ea/n/UzcSHcTJQfNg==}
+  axios@0.33.0:
+    resolution: {integrity: sha512-juz19g7B3UWT9r3+tgRFQf2Bdy6IKDVroiyuVOUrkILVKHpqHL++K1l8ybvfdEP9B/VE72vk8vllbnedVCm/og==}
 
   babel-plugin-polyfill-corejs2@0.4.17:
     resolution: {integrity: sha512-aTyf30K/rqAsNwN76zYrdtx8obu0E4KoUME29B1xj+B3WxgvWkp943vYQ+z8Mv3lw9xHXMHpvSPOBxzAkIa94w==}
@@ -2253,6 +2292,10 @@ packages:
     resolution: {integrity: sha512-1lLKB2Mu3aGP1Q/2eCOx0fNbRMe7XdwktwOruhfqqd0rIJWwN4Dh+E3hrPSlDCXnSR7UtZ1N38rVXm+6+MEhJQ==}
     engines: {node: '>= 0.12'}
 
+  form-data@4.0.6:
+    resolution: {integrity: sha512-vKatAh4SlVfgbv+YtmhiRjhEMJsYpsG1Y2rMQtR+SVSbytsSD1YGzDIcrAJmdFec88u/+VoGmxnl+80gL1tRCQ==}
+    engines: {node: '>= 6'}
+
   fs-constants@1.0.0:
     resolution: {integrity: sha512-y6OAwoSIf7FyjMIv94u+b5rdheZEjzR63GTyZJm5qh4Bi+2YgwLCcI/fPFZkL5PSixOt6ZNKm+w+Hfp/Bciwow==}
 
@@ -2397,6 +2440,10 @@ packages:
   html-encoding-sniffer@6.0.0:
     resolution: {integrity: sha512-CV9TW3Y3f8/wT0BRFc1/KAVQ3TUHiXmaAb6VW9vtiMFf7SLoMd1PdAc4W3KFOFETBJUb90KatHqlsZMWV+R9Gg==}
     engines: {node: ^20.19.0 || ^22.12.0 || >=24.0.0}
+
+  http-proxy-agent@5.0.0:
+    resolution: {integrity: sha512-n2hY8YdoRE1i7r6M0w9DIw5GgZN0G25P8zLCRQ8rjXtTU3vsNFBI/vWK/UIeE6g5MUUz6avwAPXmL6Fy9D/90w==}
+    engines: {node: '>= 6'}
 
   http-signature@1.2.0:
     resolution: {integrity: sha512-CAbnr6Rz4CYQkLYUtSNXxQPUH2gK8f3iWexVlsnMeD+GjlsQ0Xsy1cOX+mN3dtxYomRy21CiOzU8Uhw6OwncEQ==}
@@ -2697,10 +2744,6 @@ packages:
     resolution: {integrity: sha512-p/nXbhSEcu3pZRdkW1OfJhpsVtW1gd4Wa1fnQc9YLiTfAjn0312eMKimbdIQzuZl9aa9xUGaRlP9T/CJE/ditQ==}
     engines: {node: '>=0.10.0'}
 
-  jsonwebtoken@8.5.1:
-    resolution: {integrity: sha512-XjwVfRS6jTMsqYs0EsuJ4LGxXV14zQybNd4L2r0UvbVnSF9Af8x7p5MzbJ90Ioz/9TI41/hTCvznF/loiSzn8w==}
-    engines: {node: '>=4', npm: '>=1.4.28'}
-
   jsonwebtoken@9.0.3:
     resolution: {integrity: sha512-MT/xP0CrubFRNLNKvxJ2BYfy53Zkm++5bX9dtuPbqAeQpTVe0MQTFhao8+Cp//EmJp244xt6Drw/GVEGCUj40g==}
     engines: {node: '>=12', npm: '>=6'}
@@ -2709,14 +2752,8 @@ packages:
     resolution: {integrity: sha512-P2bSOMAc/ciLz6DzgjVlGJP9+BrJWu5UDGK70C2iweC5QBIeFf0ZXRvGjEj2uYgrY2MkAAhsSWHDWlFtEroZWw==}
     engines: {node: '>=0.6.0'}
 
-  jwa@1.4.2:
-    resolution: {integrity: sha512-eeH5JO+21J78qMvTIDdBXidBd6nG2kZjg5Ohz/1fpa28Z4CcsWUzJ1ZZyFq/3z3N17aZy+ZuBoHljASbL1WfOw==}
-
   jwa@2.0.1:
     resolution: {integrity: sha512-hRF04fqJIP8Abbkq5NKGN0Bbr3JxlQ+qhZufXVr0DvujKy93ZCbXZMHDL4EOtodSbCWxOqR8MS1tXA5hwqCXDg==}
-
-  jws@3.2.3:
-    resolution: {integrity: sha512-byiJ0FLRdLdSVSReO/U4E7RoEyOCKnEnEPMjq3HxWtvzLsV08/i5RQKsFVNkCldrCaPr2vDNAOMsfs8T/Hze7g==}
 
   jws@4.0.1:
     resolution: {integrity: sha512-EKI/M/yqPncGUUh44xz0PxSidXFr/+r0pA70+gIYhjv+et7yxM+s29Y+VGDkovRofQem0fs7Uvf4+YmAdyRduA==}
@@ -3212,6 +3249,9 @@ packages:
   process-nextick-args@2.0.1:
     resolution: {integrity: sha512-3ouUOpQhtgrbOa17J7+uxOTpITYWaGP7/AhoR3+A+/1e9skrzelGi/dXzEYyvbxubEF6Wn2ypscTKiKJFFn1ag==}
 
+  proxy-from-env@1.1.0:
+    resolution: {integrity: sha512-D+zkORCbA9f1tdWRK0RaCR3GPv50cMxcrz4X8k5LTSUD1Dkw47mKJEZQNunItRTkWwgtaUSo1RVFRIG9ZXiFYg==}
+
   psl@1.15.0:
     resolution: {integrity: sha512-JZd3gMVBAVQkSs6HdNZo9Sdo0LNcQeMNP3CozBJb3JYC/QUYZTnKxP+f8oWRX4rHP5EurWxqAHTSwUCjlNKa1w==}
 
@@ -3398,10 +3438,6 @@ packages:
 
   seek-bzip@1.0.6:
     resolution: {integrity: sha512-e1QtP3YL5tWww8uKaOCQ18UxIT2laNBXHjV/S2WYCiK4udiv8lkG89KRIoCjUagnAmCBurjF4zEVX2ByBbnCjQ==}
-    hasBin: true
-
-  semver@5.7.2:
-    resolution: {integrity: sha512-cBznnQ9KjJqU67B52RMC65CMarK2600WFnbkcaiwWq3xy/5haFJlshgnpjovMVJ+Hff49d8GEn0b87C5pDQ10g==}
     hasBin: true
 
   semver@6.3.1:
@@ -4037,8 +4073,8 @@ packages:
     resolution: {integrity: sha512-EvGK8EJ3DhaHfbRlETOWAS5pO9MZITeauHKJyb8wyajUfQUenkIg2MvLDTZ4T/TgIcm3HU0TFBgWWboAZ30UHg==}
     engines: {node: '>=18'}
 
-  xml2js@0.5.0:
-    resolution: {integrity: sha512-drPFnkQJik/O+uPKpqSgr22mpuFHqKdbS835iAQrUC73L2F5WkboIRd63ai/2Yg6I1jzifPFKH2NTK+cfglkIA==}
+  xml2js@0.6.2:
+    resolution: {integrity: sha512-T4rieHaC1EXcES0Kxxj4JWgaUQHDk+qwHcYOCFHfiwKz7tOVPLq7Hjq9dM1WCMhylqMEfP7hMcOIChvotiZegA==}
     engines: {node: '>=4.0.0'}
 
   xmlbuilder@11.0.1:
@@ -4789,6 +4825,25 @@ snapshots:
       '@cloudbase/adapter-interface': 0.7.1
       web-streams-polyfill: 4.3.0
 
+  '@cloudbase/ai@2.30.0':
+    dependencies:
+      '@cloudbase/types': 2.30.0
+      '@cloudbase/utilities': 2.30.0
+      '@mattiasbuelens/web-streams-adapter': 0.1.0
+      text-encoding-shim: 1.0.5
+      web-streams-polyfill: 4.3.0
+
+  '@cloudbase/app@2.32.0(@cloudbase/signature-nodejs@2.2.0)(jsonwebtoken@9.0.3)(ws@8.21.3)':
+    dependencies:
+      '@cloudbase/adapter-interface': 0.7.1
+      '@cloudbase/adapter-wx_mp': 1.3.1
+      '@cloudbase/types': 2.32.0
+      '@cloudbase/utilities': 2.32.0
+    optionalDependencies:
+      '@cloudbase/signature-nodejs': 2.2.0
+      jsonwebtoken: 9.0.3
+      ws: 8.21.3
+
   '@cloudbase/cli@3.8.1': {}
 
   '@cloudbase/cloud-api@0.5.5':
@@ -4811,7 +4866,7 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@cloudbase/database@1.4.1':
+  '@cloudbase/database@1.4.3':
     dependencies:
       bson: 4.7.2
       lodash.clonedeep: 4.5.0
@@ -4865,25 +4920,27 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@cloudbase/node-sdk@2.11.0':
+  '@cloudbase/node-sdk@3.18.3(ws@8.21.3)':
     dependencies:
-      '@cloudbase/database': 1.4.1
-      '@cloudbase/signature-nodejs': 1.0.0-beta.0
+      '@cloudbase/ai': 2.30.0
+      '@cloudbase/app': 2.32.0(@cloudbase/signature-nodejs@2.2.0)(jsonwebtoken@9.0.3)(ws@8.21.3)
+      '@cloudbase/database': 1.4.3
+      '@cloudbase/signature-nodejs': 2.2.0
+      '@cloudbase/types': 2.32.0
+      '@cloudbase/wx-cloud-client-sdk': 1.7.1
       agentkeepalive: 4.6.0
-      axios: 0.21.4
-      jsonwebtoken: 8.5.1
-      request: 2.88.2
+      axios: 0.33.0
+      form-data: 4.0.6
+      http-proxy-agent: 5.0.0
+      https-proxy-agent: 5.0.1
+      jsonwebtoken: 9.0.3
       retry: 0.13.1
-      xml2js: 0.5.0
+      web-streams-polyfill: 4.3.0
+      xml2js: 0.6.2
     transitivePeerDependencies:
       - debug
-
-  '@cloudbase/signature-nodejs@1.0.0-beta.0':
-    dependencies:
-      '@types/clone': 0.1.30
-      clone: 2.1.2
-      is-stream: 2.0.1
-      url: 0.11.4
+      - supports-color
+      - ws
 
   '@cloudbase/signature-nodejs@1.1.0':
     dependencies:
@@ -4893,6 +4950,13 @@ snapshots:
       url: 0.11.4
 
   '@cloudbase/signature-nodejs@2.0.0':
+    dependencies:
+      '@types/clone': 2.1.4
+      clone: 2.1.2
+      is-stream: 2.0.1
+      url: 0.11.4
+
+  '@cloudbase/signature-nodejs@2.2.0':
     dependencies:
       '@types/clone': 2.1.4
       clone: 2.1.2
@@ -4930,6 +4994,30 @@ snapshots:
     transitivePeerDependencies:
       - encoding
       - supports-color
+
+  '@cloudbase/types@2.30.0':
+    dependencies:
+      '@cloudbase/adapter-interface': 0.7.1
+
+  '@cloudbase/types@2.32.0':
+    dependencies:
+      '@cloudbase/adapter-interface': 0.7.1
+
+  '@cloudbase/utilities@2.30.0':
+    dependencies:
+      '@cloudbase/adapter-interface': 0.7.1
+      '@cloudbase/types': 2.30.0
+      jwt-decode: 3.1.2
+
+  '@cloudbase/utilities@2.32.0':
+    dependencies:
+      '@cloudbase/adapter-interface': 0.7.1
+      '@cloudbase/types': 2.32.0
+      jwt-decode: 3.1.2
+
+  '@cloudbase/wx-cloud-client-sdk@1.7.1':
+    dependencies:
+      core-js-pure: 3.50.0
 
   '@cloudbase/wx-cloud-client-sdk@1.8.10':
     dependencies:
@@ -5347,6 +5435,8 @@ snapshots:
     dependencies:
       '@testing-library/dom': 10.4.1
 
+  '@tootallnate/once@2.0.1': {}
+
   '@trickfilm400/rollup-plugin-off-main-thread@3.0.0-pre1':
     dependencies:
       ejs: 3.1.10
@@ -5700,9 +5790,11 @@ snapshots:
 
   aws4@1.13.2: {}
 
-  axios@0.21.4:
+  axios@0.33.0:
     dependencies:
       follow-redirects: 1.16.0
+      form-data: 4.0.6
+      proxy-from-env: 1.1.0
     transitivePeerDependencies:
       - debug
 
@@ -6395,6 +6487,14 @@ snapshots:
       combined-stream: 1.0.8
       mime-types: 2.1.35
 
+  form-data@4.0.6:
+    dependencies:
+      asynckit: 0.4.0
+      combined-stream: 1.0.8
+      es-set-tostringtag: 2.1.0
+      hasown: 2.0.4
+      mime-types: 2.1.35
+
   fs-constants@1.0.0: {}
 
   fs-extra@11.3.1:
@@ -6561,6 +6661,14 @@ snapshots:
       '@exodus/bytes': 1.15.1
     transitivePeerDependencies:
       - '@noble/hashes'
+
+  http-proxy-agent@5.0.0:
+    dependencies:
+      '@tootallnate/once': 2.0.1
+      agent-base: 6.0.2
+      debug: 4.4.3
+    transitivePeerDependencies:
+      - supports-color
 
   http-signature@1.2.0:
     dependencies:
@@ -6837,19 +6945,6 @@ snapshots:
 
   jsonpointer@5.0.1: {}
 
-  jsonwebtoken@8.5.1:
-    dependencies:
-      jws: 3.2.3
-      lodash.includes: 4.3.0
-      lodash.isboolean: 3.0.3
-      lodash.isinteger: 4.0.4
-      lodash.isnumber: 3.0.3
-      lodash.isplainobject: 4.0.6
-      lodash.isstring: 4.0.1
-      lodash.once: 4.1.1
-      ms: 2.1.3
-      semver: 5.7.2
-
   jsonwebtoken@9.0.3:
     dependencies:
       jws: 4.0.1
@@ -6862,7 +6957,6 @@ snapshots:
       lodash.once: 4.1.1
       ms: 2.1.3
       semver: 7.8.5
-    optional: true
 
   jsprim@1.4.2:
     dependencies:
@@ -6871,29 +6965,16 @@ snapshots:
       json-schema: 0.4.0
       verror: 1.10.0
 
-  jwa@1.4.2:
-    dependencies:
-      buffer-equal-constant-time: 1.0.1
-      ecdsa-sig-formatter: 1.0.11
-      safe-buffer: 5.2.1
-
   jwa@2.0.1:
     dependencies:
       buffer-equal-constant-time: 1.0.1
       ecdsa-sig-formatter: 1.0.11
-      safe-buffer: 5.2.1
-    optional: true
-
-  jws@3.2.3:
-    dependencies:
-      jwa: 1.4.2
       safe-buffer: 5.2.1
 
   jws@4.0.1:
     dependencies:
       jwa: 2.0.1
       safe-buffer: 5.2.1
-    optional: true
 
   jwt-decode@3.1.2: {}
 
@@ -7312,6 +7393,8 @@ snapshots:
 
   process-nextick-args@2.0.1: {}
 
+  proxy-from-env@1.1.0: {}
+
   psl@1.15.0:
     dependencies:
       punycode: 2.3.1
@@ -7571,8 +7654,6 @@ snapshots:
   seek-bzip@1.0.6:
     dependencies:
       commander: 2.20.3
-
-  semver@5.7.2: {}
 
   semver@6.3.1: {}
 
@@ -8272,7 +8353,7 @@ snapshots:
 
   xml-name-validator@5.0.0: {}
 
-  xml2js@0.5.0:
+  xml2js@0.6.2:
     dependencies:
       sax: 1.6.1
       xmlbuilder: 11.0.1

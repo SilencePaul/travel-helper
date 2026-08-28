@@ -17,11 +17,22 @@ function fakeCloudbase() {
 }
 
 describe("CloudBaseTripRepository", () => {
+  it("loads a trip through the authenticated trip-api function", async () => {
+    const cloud = fakeCloudbase();
+    const trip = makeTrip(2);
+    cloud.callFunction.mockResolvedValue({ result: { trip } });
+    const repository = new CloudBaseTripRepository({ database: cloud.db, functions: cloud });
+
+    await expect(repository.load(trip.id)).resolves.toEqual(trip);
+    expect(cloud.callFunction).toHaveBeenCalledWith({ name: "trip-api", data: { action: "getTrip", tripId: trip.id } });
+  });
+
   it("loads a trip and sends versioned saves with an idempotency key", async () => {
     const cloud = fakeCloudbase();
     const trip = makeTrip(2);
-    cloud.get.mockResolvedValue({ data: [trip] });
-    cloud.callFunction.mockResolvedValue({ result: { trip: makeTrip(3) } });
+    cloud.callFunction
+      .mockResolvedValueOnce({ result: { trip } })
+      .mockResolvedValueOnce({ result: { trip: makeTrip(3) } });
     const repository = new CloudBaseTripRepository({ database: cloud.db, functions: cloud });
 
     await expect(repository.load(trip.id)).resolves.toEqual(trip);
@@ -48,8 +59,16 @@ describe("CloudBaseTripRepository", () => {
 
   it("exposes authorization loss as a stable repository error", async () => {
     const cloud = fakeCloudbase();
-    cloud.get.mockRejectedValue(Object.assign(new Error("provider detail"), { code: "PERMISSION_DENIED" }));
+    cloud.callFunction.mockRejectedValue(Object.assign(new Error("provider detail"), { code: "PERMISSION_DENIED" }));
     const repository = new CloudBaseTripRepository({ database: cloud.db, functions: cloud });
+    await expect(repository.load(makeTrip(0).id)).rejects.toBeInstanceOf(UnauthorizedError);
+  });
+
+  it("maps the CloudBase lowercase unauthenticated error", async () => {
+    const cloud = fakeCloudbase();
+    cloud.callFunction.mockRejectedValue(Object.assign(new Error("provider detail"), { code: "unauthenticated" }));
+    const repository = new CloudBaseTripRepository({ database: cloud.db, functions: cloud });
+
     await expect(repository.load(makeTrip(0).id)).rejects.toBeInstanceOf(UnauthorizedError);
   });
 
@@ -74,7 +93,7 @@ describe("CloudBaseTripRepository", () => {
     const cloud = fakeCloudbase();
     let callbacks!: { onChange: (snapshot: unknown) => void; onError: (error: unknown) => void };
     cloud.watch.mockImplementation((options) => { callbacks = options; return { close: cloud.close }; });
-    cloud.get.mockResolvedValue({ data: [makeTrip(2)] });
+    cloud.callFunction.mockResolvedValue({ result: { trip: makeTrip(2) } });
     const repository = new CloudBaseTripRepository({ database: cloud.db, functions: cloud });
     const changes: Trip[] = [];
     repository.subscribe(makeTrip(0).id, (change) => changes.push(change.trip));

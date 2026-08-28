@@ -1,7 +1,24 @@
 const { createTripCommands } = require("./lib/commands.js");
 
-function actorUidFromEvent(event) {
-  return event?.userInfo?.uid;
+function uidFromIdentity(identity) {
+  if (!identity || typeof identity !== "object") return undefined;
+  if (typeof identity.customUserId === "string" && identity.customUserId) return identity.customUserId;
+  return undefined;
+}
+
+function createRuntimeGetUserInfo(env) {
+  if (!env.VITE_CLOUDBASE_ENV_ID) return undefined;
+  try {
+    const cloudbase = require("@cloudbase/node-sdk").init({
+      env: env.VITE_CLOUDBASE_ENV_ID,
+      secretId: env.CLOUDBASE_SERVER_SECRET_ID,
+      secretKey: env.CLOUDBASE_SERVER_SECRET_KEY,
+    });
+    const auth = cloudbase.auth();
+    return () => auth.getUserInfo();
+  } catch {
+    return undefined;
+  }
 }
 
 function payloadFromEvent(event) {
@@ -22,14 +39,18 @@ function createDatabase(env) {
 
 function safeError(error) {
   const code = typeof error?.code === "string" ? error.code : "TRIP_API_UNAVAILABLE";
-  const allowed = new Set(["AUTH_REQUIRED", "INVALID_REQUEST", "MEMBERSHIP_REQUIRED", "ADMIN_REQUIRED", "MEMBER_NOT_FOUND", "INVALID_MEMBER_STATE", "LAST_ADMIN", "FORBIDDEN", "TRIP_NOT_FOUND", "VERSION_CONFLICT", "INVALID_TRIP", "IDEMPOTENCY_KEY_REUSED", "SESSION_REVOKE_FAILED", "MEMBERSHIP_ASSOCIATIONS_UNAVAILABLE", "MEMBERSHIP_INDEX_UNAVAILABLE"]);
+  const allowed = new Set(["AUTH_REQUIRED", "INVALID_REQUEST", "MEMBERSHIP_REQUIRED", "ADMIN_REQUIRED", "MEMBER_NOT_FOUND", "INVALID_MEMBER_STATE", "MEMBER_LIMIT_REACHED", "LAST_ADMIN", "FORBIDDEN", "TRIP_NOT_FOUND", "VERSION_CONFLICT", "INVALID_TRIP", "IDEMPOTENCY_KEY_REUSED", "SESSION_REVOKE_FAILED", "MEMBERSHIP_ASSOCIATIONS_UNAVAILABLE", "MEMBERSHIP_INDEX_UNAVAILABLE"]);
   return allowed.has(code) ? code : "TRIP_API_UNAVAILABLE";
 }
 
-function createTripHandler({ db, commands, env = process.env } = {}) {
+function createTripHandler({ db, commands, env = process.env, getUserInfo } = {}) {
   let effectiveCommands = commands;
+  let effectiveGetUserInfo = getUserInfo;
   return async (event = {}) => {
-    const actorUid = actorUidFromEvent(event);
+    effectiveGetUserInfo ||= createRuntimeGetUserInfo(env);
+    let runtimeIdentity;
+    try { runtimeIdentity = effectiveGetUserInfo?.(); } catch { runtimeIdentity = undefined; }
+    const actorUid = uidFromIdentity(runtimeIdentity);
     if (!actorUid || typeof actorUid !== "string") return { error: "AUTH_REQUIRED" };
     try {
       if (!effectiveCommands) {

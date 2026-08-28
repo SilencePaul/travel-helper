@@ -21,8 +21,10 @@ Complete this checklist for each release. Values below are identifiers and opera
 - [ ] Database rules allow member reads only and deny browser writes to authoritative collections.
 - [ ] OPA policy and CloudBase rules agree: default deny, member read, server-only command write.
 - [ ] CloudBase safe origins contain only the production HTTPS origin and approved local origin.
+- [ ] The public auth gateway route enforces per-client QPS limiting; OAuth/auth records have bounded lifecycle cleanup.
 - [ ] Feishu redirect is exactly `<AUTH_SERVICE_URL>/api/auth/callback`; minimum identity permissions are enabled.
-- [ ] Exactly two approved Feishu Open IDs are configured; no ID or secret appears in logs.
+- [ ] Feishu application availability is limited to the intended tenant/users where possible; no identity or secret appears in logs.
+- [ ] Membership approval is the admission boundary: the traveler sends the waiting-page identity code to the admin through a separate trusted Feishu chat or in person, pending accounts cannot read trip data, and approving a third active member is rejected.
 - [ ] AMap JS/Web keys, security code, domain whitelist, mainland/Hong Kong route entitlements, quota, and QPS are verified.
 - [ ] QWeather host/project/credential/private-key configuration is present server-side; no future forecast is fabricated.
 
@@ -41,7 +43,9 @@ Complete this checklist for each release. Values below are identifiers and opera
 ## Production smoke test
 
 - [ ] Anonymous browser is redirected to Feishu login; callback returns to the production app.
-- [ ] Non-allowlisted account sees the denial state and no trip content.
+- [ ] A newly authenticated account sees only the pending-approval state and receives no trip content.
+- [ ] The intended second traveler can be approved by an admin, is atomically attached to the trip, and can load and save it after refresh.
+- [ ] Attempting to approve a third active traveler shows the capacity error and does not attach that account to the trip.
 - [ ] 一鸣 and 美垚 can sign in and read the shared trip.
 - [ ] A non-destructive note syncs once between two sessions; version conflict and audit history behave correctly.
 - [ ] Mainland and Hong Kong route results contain real provider paths (more than two points), with route text fallback available.

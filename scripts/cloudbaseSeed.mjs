@@ -1,5 +1,17 @@
 import { createHash } from "node:crypto";
 
+export const cloudBaseCollectionNames = [
+  "trips",
+  "membership_index",
+  "auth_bootstrap",
+  "auth_oauth_states",
+  "auth_sessions",
+  "auth_exchange_codes",
+  "members",
+  "trip_audits",
+  "trip_idempotency",
+];
+
 function one(result) {
   return Array.isArray(result?.data) ? result.data[0] : result?.data;
 }

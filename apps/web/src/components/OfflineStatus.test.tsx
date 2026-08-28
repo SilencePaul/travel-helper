@@ -21,3 +21,9 @@ it("returns to online status after connectivity is restored", () => {
 
   expect(screen.getByRole("status")).toHaveTextContent("在线");
 });
+
+it("surfaces quarantined legacy offline work without replaying it", () => {
+  render(<OfflineStatus unassignedCount={2} />);
+
+  expect(screen.getByRole("status")).toHaveTextContent("2 项旧版离线记录已安全隔离");
+});

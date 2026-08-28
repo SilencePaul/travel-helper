@@ -51,7 +51,6 @@ describe("ServerEnvironmentSchema", () => {
     FEISHU_REDIRECT_URI: "https://example.com/api/auth/feishu/callback",
     PUBLIC_APP_URL: "https://example.com",
     ADMIN_BOOTSTRAP_CODE: "bootstrap-code",
-    AUTH_SESSION_SECRET: "session-secret",
     CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64: credentialsBase64,
   };
 
@@ -83,7 +82,6 @@ describe("ServerEnvironmentSchema", () => {
     "FEISHU_REDIRECT_URI",
     "PUBLIC_APP_URL",
     "ADMIN_BOOTSTRAP_CODE",
-    "AUTH_SESSION_SECRET",
     "CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64",
   ] as const)("rejects blank required %s", (field) => {
     expect(() => ServerEnvironmentSchema.parse({ ...valid, [field]: "   " })).toThrow();

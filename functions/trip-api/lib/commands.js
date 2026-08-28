@@ -46,6 +46,8 @@ const TripSchema = z.object({
 });
 
 const ActionSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("getCurrentMember") }),
+  z.object({ action: z.literal("getTrip"), tripId: z.string().min(1) }),
   z.object({ action: z.literal("listMembers") }),
   z.object({ action: z.enum(["approveMember", "rejectMember", "removeMember"]), uid: z.string().min(4).max(32) }),
   z.object({ action: z.literal("saveTrip"), tripId: z.string().min(1).optional(), trip: TripSchema, expectedVersion: z.number().int().nonnegative(), idempotencyKey: z.string().min(8).max(128) }),
@@ -124,6 +126,19 @@ function createTripCommands({ db, now = () => new Date(), sessionRevoker = creat
     await transaction.collection("trip_audits").add({ actorUid: actor.uid, actorName: actor.displayName, action, ...(targetName ? { targetName } : {}), changedFields, createdAt: timestamp });
   }
 
+  async function assertActiveMemberCapacity(transaction, actorUid, targetUid) {
+    const index = readRecord(await transaction.collection("membership_index").doc("members").get());
+    const memberUids = associationIds(index?.memberUids, "MEMBERSHIP_INDEX_UNAVAILABLE");
+    if (!memberUids.includes(actorUid) || !memberUids.includes(targetUid)) throw codedError("MEMBERSHIP_INDEX_UNAVAILABLE");
+    let activeCount = 0;
+    for (const uid of memberUids) {
+      const member = readRecord(await transaction.collection("members").doc(uid).get());
+      if (!member) throw codedError("MEMBERSHIP_INDEX_UNAVAILABLE");
+      if (member.role === "admin" || member.role === "member") activeCount += 1;
+    }
+    if (activeCount >= 2) throw codedError("MEMBER_LIMIT_REACHED");
+  }
+
   async function changeMember(input, actorUid) {
     return db.runTransaction(async (transaction) => {
       const actor = await getActor(transaction, actorUid);
@@ -134,7 +149,7 @@ function createTripCommands({ db, now = () => new Date(), sessionRevoker = creat
       if (input.action === "approveMember" && target.role !== "pending") throw codedError("INVALID_MEMBER_STATE");
       if (input.action === "rejectMember" && target.role !== "pending") throw codedError("INVALID_MEMBER_STATE");
       if (input.action === "removeMember" && !["admin", "member"].includes(target.role)) throw codedError("INVALID_MEMBER_STATE");
-      const tripIds = input.action === "removeMember" ? associationIds(target.tripIds) : optionalAssociationIds(target.tripIds);
+      let tripIds = input.action === "removeMember" ? associationIds(target.tripIds) : optionalAssociationIds(target.tripIds);
       const sessionIds = input.action === "removeMember" ? associationIds(target.sessionIds) : optionalAssociationIds(target.sessionIds);
       let nextAdminIndex;
       if (input.action === "removeMember" && target.role === "admin") {
@@ -147,9 +162,25 @@ function createTripCommands({ db, now = () => new Date(), sessionRevoker = creat
       }
       const timestamp = now().toISOString();
       const role = input.action === "approveMember" ? "member" : "removed";
-      const next = { ...target, role, tripIds, sessionIds, version: (target.version || 0) + 1, ...(role === "member" ? { approvedAt: timestamp } : {}) };
       let tripUpdates = [];
-      if (input.action === "removeMember") {
+      if (input.action === "approveMember") {
+        await assertActiveMemberCapacity(transaction, actor.uid, target.uid);
+        const actorTripIds = associationIds(actor.tripIds);
+        if (actorTripIds.length === 0 || tripIds.some((tripId) => !actorTripIds.includes(tripId))) throw codedError("MEMBERSHIP_ASSOCIATIONS_UNAVAILABLE");
+        const trips = transaction.collection("trips");
+        for (const tripId of actorTripIds) {
+          const trip = readRecord(await trips.doc(tripId).get());
+          if (!trip || !Array.isArray(trip.memberUids) || !trip.memberUids.includes(actor.uid)) throw codedError("MEMBERSHIP_ASSOCIATIONS_UNAVAILABLE");
+          if (!trip.memberUids.includes(target.uid)) {
+            tripUpdates.push({ id: tripId, value: {
+              ...trip,
+              memberUids: [...trip.memberUids, target.uid],
+              version: Number.isInteger(trip.version) ? trip.version + 1 : 1,
+            } });
+          }
+        }
+        tripIds = actorTripIds;
+      } else if (input.action === "removeMember") {
         const trips = transaction.collection("trips");
         for (const tripId of tripIds) {
           const trip = readRecord(await trips.doc(tripId).get());
@@ -164,11 +195,12 @@ function createTripCommands({ db, now = () => new Date(), sessionRevoker = creat
           await sessionRevoker.prepareSessionsForUid(transaction, target.uid, sessionIds, timestamp);
         }
       }
+      const next = { ...target, role, tripIds, sessionIds, version: (target.version || 0) + 1, ...(role === "member" ? { approvedAt: timestamp } : {}) };
       await members.doc(target.uid).set(writableRecord(next));
       for (const update of tripUpdates) await transaction.collection("trips").doc(update.id).set(writableRecord(update.value));
       if (input.action === "removeMember") await sessionRevoker.revokeSessionsForUid(transaction, target.uid, timestamp, sessionIds);
       if (nextAdminIndex) await transaction.collection("membership_index").doc("admins").set(writableRecord(nextAdminIndex));
-      await audit(transaction, actor, input.action, target.displayName, ["role", "version", ...(role === "member" ? ["approvedAt"] : []), ...(input.action === "removeMember" ? ["memberUids", "sessions"] : [])]);
+      await audit(transaction, actor, input.action, target.displayName, ["role", "version", ...(role === "member" ? ["approvedAt", "tripIds", "memberUids"] : []), ...(input.action === "removeMember" ? ["memberUids", "sessions"] : [])]);
       return { member: safeMember(next) };
     });
   }
@@ -213,6 +245,26 @@ function createTripCommands({ db, now = () => new Date(), sessionRevoker = creat
     });
   }
 
+  async function getTrip(input, actorUid) {
+    return db.runTransaction(async (transaction) => {
+      await getActor(transaction, actorUid);
+      const current = one(await transaction.collection("trips").doc(input.tripId).get());
+      if (!current) throw codedError("TRIP_NOT_FOUND");
+      if (!Array.isArray(current.memberUids) || !current.memberUids.includes(actorUid)) throw codedError("FORBIDDEN");
+      const parsed = TripSchema.safeParse(current);
+      if (!parsed.success) throw codedError("INVALID_TRIP");
+      return { trip: writableRecord(parsed.data) };
+    });
+  }
+
+  async function getCurrentMember(actorUid) {
+    return db.runTransaction(async (transaction) => {
+      const member = one(await transaction.collection("members").doc(actorUid).get());
+      if (!member || member.role === "removed") throw codedError("MEMBERSHIP_REQUIRED");
+      return { member: safeMember(member) };
+    });
+  }
+
   return {
     async execute(event, actorUid) {
       if (!actorUid || typeof actorUid !== "string") throw codedError("AUTH_REQUIRED");
@@ -226,6 +278,8 @@ function createTripCommands({ db, now = () => new Date(), sessionRevoker = creat
         const result = await members.where({}).get();
         return { members: (result.data || []).map(safeMember) };
       }
+      if (input.action === "getCurrentMember") return getCurrentMember(actorUid);
+      if (input.action === "getTrip") return getTrip(input, actorUid);
       if (input.action === "saveTrip") return saveTrip(input, actorUid);
       return changeMember(input, actorUid);
     },

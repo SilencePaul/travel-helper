@@ -9,6 +9,8 @@
       "type": "Event",
       "handler": "index.main",
       "runtime": "Nodejs20.19",
+      "timeout": 30,
+      "aclRule": { "invoke": false },
       "installDependency": true,
       "envVariables": {
         "VITE_CLOUDBASE_ENV_ID": "{{env.VITE_CLOUDBASE_ENV_ID}}",
@@ -17,9 +19,9 @@
         "FEISHU_REDIRECT_URI": "{{env.FEISHU_REDIRECT_URI}}",
         "ADMIN_BOOTSTRAP_CODE": "{{env.ADMIN_BOOTSTRAP_CODE}}",
         "BOOTSTRAP_TRIP_ID": "trip-2026-gba",
-        "AUTH_SESSION_SECRET": "{{env.AUTH_SESSION_SECRET}}",
-        "CLOUDBASE_SERVER_SECRET_ID": "{{env.CLOUDBASE_SERVER_SECRET_ID}}",
-        "CLOUDBASE_SERVER_SECRET_KEY": "{{env.CLOUDBASE_SERVER_SECRET_KEY}}",
+        "CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64": "{{env.CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64}}",
+        "CLOUDBASE_SERVER_SECRET_ID": "{{env.TENCENTCLOUD_SECRET_ID}}",
+        "CLOUDBASE_SERVER_SECRET_KEY": "{{env.TENCENTCLOUD_SECRET_KEY}}",
         "PUBLIC_APP_URL": "{{env.PUBLIC_APP_URL}}"
       }
     },
@@ -28,12 +30,31 @@
       "type": "Event",
       "handler": "index.main",
       "runtime": "Nodejs20.19",
+      "timeout": 20,
+      "aclRule": { "invoke": "auth.loginType != 'ANONYMOUS' && auth != null" },
       "installDependency": true,
       "envVariables": {
         "VITE_CLOUDBASE_ENV_ID": "{{env.VITE_CLOUDBASE_ENV_ID}}",
-        "CLOUDBASE_SERVER_SECRET_ID": "{{env.CLOUDBASE_SERVER_SECRET_ID}}",
-        "CLOUDBASE_SERVER_SECRET_KEY": "{{env.CLOUDBASE_SERVER_SECRET_KEY}}"
+        "CLOUDBASE_SERVER_SECRET_ID": "{{env.TENCENTCLOUD_SECRET_ID}}",
+        "CLOUDBASE_SERVER_SECRET_KEY": "{{env.TENCENTCLOUD_SECRET_KEY}}"
       }
     }
-  ]
+  ],
+  "gateway": {
+    "routes": [
+      {
+        "path": "/api/auth",
+        "target": "function:auth-service",
+        "enableAuth": false,
+        "enablePathTransmission": false,
+        "qpsPolicy": {
+          "qpsTotal": 100,
+          "qpsPerClient": {
+            "limitBy": "ClientIP",
+            "limitValue": 3
+          }
+        }
+      }
+    ]
+  }
 }

@@ -1,4 +1,4 @@
-import type { BudgetCategory, Trip } from "@travel/contracts";
+import type { BudgetCategory, Member, Trip } from "@travel/contracts";
 import type { OrderStatus } from "@travel/contracts";
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import { DayStrip } from "./DayStrip";
@@ -19,6 +19,9 @@ export type OverviewPageProps = {
   onMoveDay: (activeDayId: string, overDayId: string) => void | Promise<unknown>;
   isSaving?: boolean;
   onOpenHotels?: () => void;
+  member?: Member;
+  onManageMembers?: () => void;
+  onLogout?: () => void | Promise<void>;
   onChangeDateRange?: (startDate: string, endDate: string, confirmed: boolean, reviewedOrderIds?: string[]) => Promise<{ affectedOrders: AffectedOrder[] }>;
   onOrderStatusChange?: (orderId: string, status: OrderStatus) => void | Promise<unknown>;
   onOrderPaymentChange?: (orderId: string, paid: number) => void | Promise<unknown>;
@@ -34,6 +37,9 @@ export function OverviewPage({
   onMoveDay,
   isSaving = false,
   onOpenHotels = () => undefined,
+  member,
+  onManageMembers,
+  onLogout,
   onChangeDateRange,
   onOrderStatusChange = () => undefined,
   onOrderPaymentChange,
@@ -46,6 +52,8 @@ export function OverviewPage({
   const [rangeWarning, setRangeWarning] = useState<{ startDate: string; endDate: string; orders: AffectedOrder[] }>();
   const [rangeError, setRangeError] = useState<string>();
   const [rangeSaving, setRangeSaving] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [accountError, setAccountError] = useState<string>();
   const deleteTriggerRef = useRef<HTMLButtonElement>(null);
   const confirmButtonRef = useRef<HTMLButtonElement>(null);
   const cancelButtonRef = useRef<HTMLButtonElement>(null);
@@ -181,6 +189,13 @@ export function OverviewPage({
     }
   }
 
+  async function signOut() {
+    if (!onLogout || signingOut) return;
+    setSigningOut(true);
+    setAccountError(undefined);
+    try { await onLogout(); } catch { setAccountError("退出失败，请重试"); } finally { setSigningOut(false); }
+  }
+
   return (
     <main className="overview">
       <header className="hero">
@@ -193,7 +208,13 @@ export function OverviewPage({
           <div><dt>预算</dt><dd>{(trip.orders ?? []).length ? "已汇总订单" : "暂无订单数据"}</dd></div>
           <div><dt>预订</dt><dd>{(trip.orders ?? []).length ? "可在下方更新状态" : "尚未录入订单"}</dd></div>
         </dl>
-        <button type="button" className="hotel-open" onClick={onOpenHotels}>酒店比较</button>
+        <div className="hero-actions">
+          {member ? <span className="signed-in-user">已登录：{member.displayName}</span> : null}
+          <button type="button" className="hotel-open" onClick={onOpenHotels}>酒店比较</button>
+          {onManageMembers ? <button type="button" onClick={onManageMembers}>成员管理</button> : null}
+          {onLogout ? <button type="button" onClick={() => void signOut()} disabled={signingOut}>{signingOut ? "正在退出" : "退出登录"}</button> : null}
+          {accountError ? <span role="alert">{accountError}</span> : null}
+        </div>
       </header>
 
       <section aria-labelledby="days-heading">

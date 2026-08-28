@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { seedCloudBase } from "./cloudbaseSeed.mjs";
+import { cloudBaseCollectionNames, seedCloudBase } from "./cloudbaseSeed.mjs";
 
 function createDb(initial = {}) {
   const data = new Map(Object.entries(initial).map(([name, values]) => [name, new Map(Object.entries(values))]));
@@ -28,4 +28,8 @@ test("seeds an unclaimed trip and bootstrap indexes exactly once", async () => {
   assert.deepEqual(db.data.get("membership_index").get("admins"), { adminUids: [] });
   assert.deepEqual(db.data.get("membership_index").get("members"), { memberUids: [] });
   assert.equal(db.data.get("auth_bootstrap").get("singleton").consumed, false);
+});
+
+test("declares every authentication exchange collection needed before bootstrap", () => {
+  assert.equal(cloudBaseCollectionNames.includes("auth_exchange_codes"), true);
 });

@@ -27,10 +27,21 @@ async function readProviderResponse(response, schema) {
   return parsed.data;
 }
 
-function createFeishuClient({ env, fetchImpl = globalThis.fetch }) {
+function createFeishuClient({ env, fetchImpl = globalThis.fetch, timeoutMs = 6_000 }) {
   if (typeof fetchImpl !== "function") throw new Error("AUTH_FETCH_UNAVAILABLE");
+  async function fetchProvider(url, options = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetchImpl(url, { ...options, signal: controller.signal });
+    } catch {
+      throw providerError();
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
   async function getTenantAccessToken() {
-    const response = await fetchImpl("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
+    const response = await fetchProvider("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ app_id: env.FEISHU_APP_ID, app_secret: env.FEISHU_APP_SECRET }),
@@ -40,7 +51,7 @@ function createFeishuClient({ env, fetchImpl = globalThis.fetch }) {
   async function exchangeAuthorizationCode(code) {
     if (typeof code !== "string" || code.length < 1 || code.length > 2048) throw providerError();
     const tenantToken = await getTenantAccessToken();
-    const response = await fetchImpl("https://open.feishu.cn/open-apis/authen/v1/oidc/access_token", {
+    const response = await fetchProvider("https://open.feishu.cn/open-apis/authen/v1/oidc/access_token", {
       method: "POST",
       headers: { "content-type": "application/json", Authorization: "Bearer " + tenantToken },
       body: JSON.stringify({ grant_type: "authorization_code", code }),
@@ -48,7 +59,7 @@ function createFeishuClient({ env, fetchImpl = globalThis.fetch }) {
     return (await readProviderResponse(response, UserTokenResponse)).data.access_token;
   }
   async function getUserInfo(userAccessToken) {
-    const response = await fetchImpl("https://open.feishu.cn/open-apis/authen/v1/user_info", {
+    const response = await fetchProvider("https://open.feishu.cn/open-apis/authen/v1/user_info", {
       headers: { Authorization: "Bearer " + userAccessToken },
     });
     const user = (await readProviderResponse(response, UserInfoResponse)).data;

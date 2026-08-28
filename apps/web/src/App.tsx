@@ -32,6 +32,7 @@ type AppProps = {
   routeService?: RouteService;
   member?: Member;
   onUnauthorized?: (error: unknown) => void;
+  onLogout?: () => void | Promise<void>;
 };
 
 function uniqueDayId(days: TravelDay[], requestedId: string) {
@@ -56,8 +57,8 @@ function withDayRange(trip: Trip, days: TravelDay[], unscheduledItemIds = trip.u
   };
 }
 
-function TripRoutes({ createDayId = () => "day-ui", routeService, member, onUnauthorized, enforceAdmin, showOfflineStatus }: Pick<AppProps, "createDayId" | "routeService" | "member" | "onUnauthorized"> & { enforceAdmin: boolean; showOfflineStatus: boolean }) {
-  const { trip, mutateTrip, syncState, pendingCommandCount, conflictPaused } = useTrip();
+function TripRoutes({ createDayId = () => "day-ui", routeService, member, onUnauthorized, onLogout, enforceAdmin, showOfflineStatus }: Pick<AppProps, "createDayId" | "routeService" | "member" | "onUnauthorized" | "onLogout"> & { enforceAdmin: boolean; showOfflineStatus: boolean }) {
+  const { trip, mutateTrip, syncState, pendingCommandCount, unassignedOfflineCount, conflictPaused } = useTrip();
   const navigate = useNavigate();
   const [requestedDayId, setRequestedDayId] = useState<string>();
   const selectedDayId = trip.days.some((day) => day.id === requestedDayId)
@@ -176,7 +177,7 @@ function TripRoutes({ createDayId = () => "day-ui", routeService, member, onUnau
   return (
     <div className="app-shell">
       <div className="sync-bar" role="status">{syncState}</div>
-      {showOfflineStatus ? <OfflineStatus pendingCount={pendingCommandCount} conflictPaused={conflictPaused} /> : null}
+      {showOfflineStatus ? <OfflineStatus pendingCount={pendingCommandCount} unassignedCount={unassignedOfflineCount} conflictPaused={conflictPaused} /> : null}
       <Routes>
         <Route
           path="/"
@@ -194,6 +195,9 @@ function TripRoutes({ createDayId = () => "day-ui", routeService, member, onUnau
               onMoveDay={reorderDays}
               isSaving={syncState === "正在保存"}
               onOpenHotels={() => navigate("/hotels")}
+              member={member}
+              onManageMembers={member?.role === "admin" ? () => navigate("/admin/members") : undefined}
+              onLogout={onLogout}
               onChangeDateRange={changeDateRange}
               onOrderStatusChange={changeOrderStatus}
               onOrderPaymentChange={changeOrderPayment}
@@ -201,7 +205,7 @@ function TripRoutes({ createDayId = () => "day-ui", routeService, member, onUnau
           }
         />
         <Route path="/hotels" element={<HotelComparePage trip={trip} routeService={routeService} onSelectHotel={selectHotel} onBack={() => navigate("/")} />} />
-        <Route path="/admin/members" element={enforceAdmin && member?.role !== "admin" ? <p role="alert">无权访问</p> : <MemberManagementPage onUnauthorized={onUnauthorized} />} />
+        <Route path="/admin/members" element={enforceAdmin && member?.role !== "admin" ? <p role="alert">无权访问</p> : <MemberManagementPage onUnauthorized={onUnauthorized} onBack={() => navigate("/", { replace: true })} />} />
         <Route
           path="/day/:dayId"
           element={
@@ -226,11 +230,11 @@ function DayRoute({ trip, onBack, routeService }: { trip: Trip; onBack: (dayId: 
   return <DayPage trip={trip} dayId={dayId} onBack={() => onBack(dayId)} routeService={routeService} />;
 }
 
-export function TripApp({ repository, createDayId, tripId, routeService, member, onUnauthorized }: AppProps) {
+export function TripApp({ repository, createDayId, tripId, routeService, member, onUnauthorized, onLogout }: AppProps) {
   const enforceAdmin = repository?.syncMode === "cloudbase" || !import.meta.env.DEV;
   return (
-    <TripProvider repository={repository} tripId={tripId} onUnauthorized={onUnauthorized}>
-      <TripRoutes createDayId={createDayId} routeService={routeService} member={member} onUnauthorized={onUnauthorized} enforceAdmin={enforceAdmin} showOfflineStatus={repository === undefined} />
+    <TripProvider repository={repository} tripId={tripId} actorUid={member?.uid} onUnauthorized={onUnauthorized}>
+      <TripRoutes createDayId={createDayId} routeService={routeService} member={member} onUnauthorized={onUnauthorized} onLogout={onLogout} enforceAdmin={enforceAdmin} showOfflineStatus={repository === undefined} />
     </TripProvider>
   );
 }

@@ -8,6 +8,7 @@ import { openOfflineDatabase } from "./offlineStore";
  * it was based on.
  */
 export const PendingSaveSchema = z.object({
+  actorUid: z.string().min(4).max(64),
   tripId: z.string().min(1),
   expectedVersion: z.number().int().nonnegative(),
   patch: TripSchema,
@@ -53,6 +54,15 @@ function validateCommand(value: unknown): PendingCommand {
   return structuredClone(result.data);
 }
 
+function commandStorageKey(command: Pick<PendingCommand, "actorUid" | "idempotencyKey">) {
+  return `${command.actorUid}:${command.idempotencyKey}`;
+}
+
+function isLegacyCommand(value: unknown) {
+  if (!value || typeof value !== "object" || Object.hasOwn(value, "actorUid") || containsSecretField(value)) return false;
+  return PendingSaveSchema.safeParse({ ...value, actorUid: "legacy-user" }).success;
+}
+
 function readProperty(value: unknown, property: string): unknown {
   if (!value || typeof value !== "object") return undefined;
   try {
@@ -85,19 +95,20 @@ function isAcknowledged(value: unknown): boolean {
 export async function enqueuePendingCommand(input: unknown): Promise<PendingCommand> {
   const command = validateCommand(input);
   const database = await openOfflineDatabase();
-  const existing = await database.get("pendingCommands", command.idempotencyKey);
+  const storageKey = commandStorageKey(command);
+  const existing = await database.get("pendingCommands", storageKey);
   if (existing !== undefined) {
     try {
       return validateCommand(existing);
     } catch {
-      await database.delete("pendingCommands", command.idempotencyKey);
+      await database.delete("pendingCommands", storageKey);
     }
   }
-  await database.put("pendingCommands", command, command.idempotencyKey);
+  await database.put("pendingCommands", command, storageKey);
   return structuredClone(command);
 }
 
-export async function listPendingCommands(tripId?: string): Promise<PendingCommand[]> {
+export async function listPendingCommands(actorUid: string, tripId?: string): Promise<PendingCommand[]> {
   const database = await openOfflineDatabase();
   const keys = await database.getAllKeys("pendingCommands");
   const commands: PendingCommand[] = [];
@@ -105,8 +116,14 @@ export async function listPendingCommands(tripId?: string): Promise<PendingComma
     const value = await database.get("pendingCommands", key);
     try {
       const command = validateCommand(value);
-      if (tripId === undefined || command.tripId === tripId) commands.push(command);
+      const storageKey = commandStorageKey(command);
+      if (key !== storageKey) {
+        if (await database.get("pendingCommands", storageKey) === undefined) await database.put("pendingCommands", command, storageKey);
+        await database.delete("pendingCommands", key);
+      }
+      if (command.actorUid === actorUid && (tripId === undefined || command.tripId === tripId)) commands.push(command);
     } catch {
+      if (isLegacyCommand(value)) await database.put("quarantinedCommands", value, `legacy:${String(key)}`);
       await database.delete("pendingCommands", key);
     }
   }
@@ -114,13 +131,13 @@ export async function listPendingCommands(tripId?: string): Promise<PendingComma
   return commands.map((command) => structuredClone(command));
 }
 
-export async function removePendingCommand(idempotencyKey: string): Promise<void> {
+export async function removePendingCommand(actorUid: string, idempotencyKey: string): Promise<void> {
   const database = await openOfflineDatabase();
-  await database.delete("pendingCommands", idempotencyKey);
+  await database.delete("pendingCommands", commandStorageKey({ actorUid, idempotencyKey }));
 }
 
-export async function replayPendingCommands(sender: PendingCommandSender, tripId?: string): Promise<ReplayResult> {
-  const commands = await listPendingCommands(tripId);
+export async function replayPendingCommands(sender: PendingCommandSender, actorUid: string, tripId?: string): Promise<ReplayResult> {
+  const commands = await listPendingCommands(actorUid, tripId);
   let replayed = 0;
   for (const command of commands) {
     try {
@@ -128,7 +145,7 @@ export async function replayPendingCommands(sender: PendingCommandSender, tripId
       if (!isAcknowledged(acknowledgement)) {
         return { status: "failed", replayed, pending: commands.length - replayed };
       }
-      await removePendingCommand(command.idempotencyKey);
+      await removePendingCommand(command.actorUid, command.idempotencyKey);
       replayed += 1;
     } catch (error) {
       return {

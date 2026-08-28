@@ -3,4 +3,6 @@ packages:
   - packages/*
   - functions/*
 allowBuilds:
-  core-js-pure: set this to true or false
+  core-js-pure: true
+overrides:
+  "axios@<0.33.0": 0.33.0

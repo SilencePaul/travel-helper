@@ -1,4 +1,5 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { Trip, TripChange, TripRepository } from "@travel/contracts";
 import { useEffect } from "react";
 import { expect, test, vi } from "vitest";
@@ -221,6 +222,7 @@ test("starts a fresh loading session when tripId changes", async () => {
 test("counts and replays a seeded queue once after an online load", async () => {
   await clearOfflineData();
   await enqueuePendingCommand({
+    actorUid: "local-browser",
     tripId: seed.id,
     expectedVersion: 0,
     patch: { ...structuredClone(seed), title: "queued save", version: 1 },
@@ -243,7 +245,7 @@ test("counts and replays a seeded queue once after an online load", async () => 
 
   window.dispatchEvent(new Event("online"));
   await act(async () => repository.saveRequests[0]!.result.resolve(versionedTrip(1, "queued save")));
-  await waitFor(async () => expect(await listPendingCommands(seed.id)).toEqual([]));
+  await waitFor(async () => expect(await listPendingCommands("local-browser", seed.id)).toEqual([]));
   expect(repository.saveRequests).toHaveLength(1);
   await clearOfflineData();
 });
@@ -257,7 +259,7 @@ test("clears a load error when a replacement repository starts loading", async (
     </TripProvider>,
   );
   await act(async () => failedRepository.loadResult.reject(new Error("offline")));
-  expect(await screen.findByRole("alert")).toHaveTextContent("旅行计划加载失败");
+  expect(await screen.findByRole("alert")).toHaveTextContent("旅行计划暂时无法加载");
 
   view.rerender(
     <TripProvider repository={healthyRepository} tripId={seed.id}>
@@ -267,6 +269,27 @@ test("clears a load error when a replacement repository starts loading", async (
   expect(screen.getByText("正在加载旅行计划")).toBeVisible();
   await act(async () => healthyRepository.loadResult.resolve(versionedTrip(0, "recovered")));
   expect(await screen.findByText("recovered")).toBeVisible();
+});
+
+test("lets the user retry a failed trip load without refreshing the browser", async () => {
+  const repository: TripRepository = {
+    load: vi.fn()
+      .mockRejectedValueOnce(new Error("temporary outage"))
+      .mockResolvedValueOnce(versionedTrip(1, "recovered by retry")),
+    save: vi.fn(),
+    subscribe: () => () => undefined,
+  };
+  render(
+    <TripProvider repository={repository} tripId={seed.id}>
+      <ProviderProbe />
+    </TripProvider>,
+  );
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("旅行计划暂时无法加载");
+  await userEvent.click(screen.getByRole("button", { name: "重新加载" }));
+
+  expect(await screen.findByText("recovered by retry")).toBeVisible();
+  expect(repository.load).toHaveBeenCalledTimes(2);
 });
 
 test("ignores a delayed save result from a replaced repository", async () => {

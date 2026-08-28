@@ -6,4 +6,8 @@ test("allows browser reads only for trip members", () => {
   const rules = collectionRules({ read: "auth != null && auth.uid in doc.memberUids", write: false });
   assert.deepEqual(rules[0], { name: "trips", rule: { read: "auth != null && auth.uid in doc.memberUids", write: false } });
   assert.equal(rules.slice(1).every(({ rule }) => rule.read === false && rule.write === false), true);
+  assert.deepEqual(rules.find(({ name }) => name === "auth_exchange_codes"), {
+    name: "auth_exchange_codes",
+    rule: { read: false, write: false },
+  });
 });

@@ -25,13 +25,13 @@ The production app and auth-service URLs must be HTTPS. Do not use a localhost, 
    ```
 
    Set the resulting value through the CloudBase secret/environment-variable UI or an approved secret manager. The browser must never receive this variable.
-4. Deploy and verify that the value is available to both `auth-service` and `trip-api`; function logs must not print it.
+4. Deploy and verify that the value is available to `auth-service`; function logs must not print it. `trip-api` uses the authenticated CloudBase runtime identity and does not receive this custom-login private credential.
 
 The declarative config passes these variables by reference only. It must not contain a credential, Feishu secret, token, map key, or private key.
 
 ## Database, storage, and OPA policy
 
-Create the collections used by the application (`trips`, `members`, `member_trip`, `auth_sessions`, `auth_exchange_codes`, `audit_logs`, and `suggestions`) before the first production bootstrap. Apply backups/point-in-time recovery according to the CloudBase plan.
+After taking the required backup, run `pnpm seed:cloudbase` before the first production bootstrap. The seed is idempotent: it creates only missing collections and absent bootstrap/index/trip records; it does not overwrite an existing trip. The exact collection set is `trips`, `membership_index`, `auth_bootstrap`, `auth_oauth_states`, `auth_sessions`, `auth_exchange_codes`, `members`, `trip_audits`, and `trip_idempotency`. Keep this list synchronized with `scripts/cloudbaseSeed.mjs` rather than creating collections from an older runbook.
 
 Use member-based reads and server-only authoritative writes:
 
@@ -65,16 +65,19 @@ allow if {
 }
 ```
 
-Test anonymous reads, a non-member read, and a direct client write; all must be denied. Test an allowlisted member read and a versioned `trip-api` command; both must be allowed.
+Test anonymous reads, a pending/non-member read, and a direct client write; all must be denied. Test an approved member read and a versioned `trip-api` command; both must be allowed.
 
 ## Function routes and environment variables
 
 `auth-service` is the only public HTTP function. Configure these routes:
 
+The `/api/auth` gateway route must use the checked-in per-client IP QPS policy. Do not remove this control when editing the route in the console.
+
 | Route | Purpose | Access |
 | --- | --- | --- |
 | `GET /api/auth/start` | Create OAuth state and redirect to Feishu | Public |
-| `GET /api/auth/callback` | Exchange Feishu identity and establish server session | Public callback |
+| `GET /api/auth/callback` | Exchange Feishu identity and redirect with a short-lived one-time exchange code | Public callback |
+| `POST /api/auth/exchange` | Consume the one-time code and issue a CloudBase custom-login ticket | Public; code-bound and single-use |
 | `POST /api/auth/bootstrap` | One-time administrator bootstrap | HTTPS, one-time code |
 | `POST /api/auth/ticket` | Issue a short-lived CloudBase custom-login ticket | Authenticated server session |
 | `POST /api/auth/logout` | Revoke the server session | Authenticated server session |
@@ -92,10 +95,8 @@ Set the following in the appropriate scope:
 | `FEISHU_APP_ID` | auth-service | Secret-managed deployment input |
 | `FEISHU_APP_SECRET` | auth-service | Secret; never log |
 | `FEISHU_REDIRECT_URI` | auth-service | Exact callback URL above |
-| `FEISHU_ALLOWED_OPEN_IDS` | auth-service | Exactly two approved Open IDs |
 | `ADMIN_BOOTSTRAP_CODE` | auth-service | One-time secret; rotate/consume after bootstrap |
-| `AUTH_SESSION_SECRET` | auth-service | Long random signing secret |
-| `CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64` | auth-service + trip-api | Base64 JSON private credential |
+| `CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64` | auth-service | Base64 JSON private credential |
 | `AMAP_WEB_SERVICE_KEY` | trip-api | Server-only Web Service key |
 | `QWEATHER_API_HOST` | trip-api | Approved QWeather host |
 | `QWEATHER_PROJECT_ID` | trip-api | Server-only project ID |
@@ -107,7 +108,9 @@ Browser build variables are limited to `VITE_AMAP_JS_KEY` and `VITE_AMAP_SECURIT
 
 ## Feishu and AMap console setup
 
-In the Feishu app, register exactly `FEISHU_REDIRECT_URI`, enable the minimum identity/OAuth permissions required for app access token, user access token, and user information, and verify that the two approved Open IDs are the intended users (`一鸣` and `美垚`). Do not put names or IDs in client logs.
+In the Feishu app, register exactly `FEISHU_REDIRECT_URI`, enable the minimum identity/OAuth permissions required for app access token, user access token, and user information, and restrict application availability to the intended tenant/users where possible. Do not put names or IDs in client logs.
+
+The production admission boundary is administrator approval, not an environment-variable Open ID list. A new Feishu identity is stored as `pending` and cannot read trip data. The traveler must send the identity verification code shown on their waiting page to the administrator through a separate trusted Feishu chat or in person; the approval control stays disabled until that code is entered. An administrator approval transaction both changes the role and attaches that identity to the administrator's trip; it rejects the operation once two active `admin`/`member` identities already exist. Pending identities do not consume an active seat.
 
 In AMap security settings:
 

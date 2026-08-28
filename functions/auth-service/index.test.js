@@ -1,8 +1,33 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { createAuthHandler } = require("./index.js");
+const { createAuthHandler, cloudbaseInitConfig } = require("./index.js");
 const { createMemoryAuthStore } = require("./lib/authStore.js");
+
+test("CloudBase initialization includes the custom login private credentials", () => {
+  const credentials = { env_id: "env", private_key_id: "key-id", private_key: "private-key" };
+  assert.deepEqual(cloudbaseInitConfig({
+    VITE_CLOUDBASE_ENV_ID: "env",
+    CLOUDBASE_SERVER_SECRET_ID: "secret-id",
+    CLOUDBASE_SERVER_SECRET_KEY: "secret-key",
+    CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS: JSON.stringify(credentials),
+  }), {
+    env: "env",
+    secretId: "secret-id",
+    secretKey: "secret-key",
+    credentials,
+  });
+});
+
+test("CloudBase initialization accepts base64-encoded custom login credentials", () => {
+  const credentials = { env_id: "env", private_key_id: "key-id", private_key: "private-key" };
+  assert.deepEqual(cloudbaseInitConfig({
+    VITE_CLOUDBASE_ENV_ID: "env",
+    CLOUDBASE_SERVER_SECRET_ID: "secret-id",
+    CLOUDBASE_SERVER_SECRET_KEY: "secret-key",
+    CLOUDBASE_CUSTOM_LOGIN_CREDENTIALS_BASE64: Buffer.from(JSON.stringify(credentials)).toString("base64"),
+  }).credentials, credentials);
+});
 
 function responseBody(response) {
   return JSON.parse(response.body);
@@ -17,8 +42,9 @@ function makeRequest(handler, method, path, body, headers = {}) {
   });
 }
 
-test("OAuth callback redirects the browser to the app auth route without issuing a custom ticket", async () => {
+test("OAuth callback redirects with a single-use ticket exchange code", async () => {
   const requests = [];
+  let ticketAttempts = 0;
   const handler = createAuthHandler({
     env: {
       FEISHU_APP_ID: "cli_test",
@@ -28,6 +54,11 @@ test("OAuth callback redirects the browser to the app auth route without issuing
       ADMIN_BOOTSTRAP_CODE: "correct",
       AUTH_SESSION_SECRET: "session-secret",
       VITE_CLOUDBASE_ENV_ID: "env",
+    },
+    createTicket: () => {
+      ticketAttempts += 1;
+      if (ticketAttempts === 1) throw new Error("temporary ticket failure");
+      return "pending-ticket";
     },
     fetchImpl: async (url, options) => {
       requests.push({ url, options });
@@ -56,6 +87,17 @@ test("OAuth callback redirects the browser to the app auth route without issuing
   assert.equal(callbackUrl.searchParams.get("auth_callback"), "1");
   assert.equal(callbackUrl.searchParams.get("status"), "bootstrap");
   assert.equal(callbackUrl.searchParams.get("state"), state);
+  const exchangeCode = callbackUrl.searchParams.get("exchange_code");
+  assert.equal(typeof exchangeCode, "string");
+  const failedExchange = await makeRequest(handler, "POST", "/api/auth/exchange", { code: exchangeCode });
+  assert.equal(failedExchange.statusCode, 503);
+  assert.deepEqual(responseBody(failedExchange), { error: "AUTH_SERVICE_UNAVAILABLE" });
+  const exchange = await makeRequest(handler, "POST", "/api/auth/exchange", { code: exchangeCode });
+  assert.equal(exchange.statusCode, 200);
+  assert.equal(responseBody(exchange).ticket, "pending-ticket");
+  assert.equal(responseBody(exchange).member.role, "pending");
+  const replayedExchange = await makeRequest(handler, "POST", "/api/auth/exchange", { code: exchangeCode });
+  assert.equal(replayedExchange.statusCode, 400);
   assert.equal(callback.headers["set-cookie"].startsWith("auth_session="), true);
   assert.equal(requests.length, 3);
   const ticket = await makeRequest(handler, "POST", "/api/auth/ticket", undefined, {
@@ -63,6 +105,48 @@ test("OAuth callback redirects the browser to the app auth route without issuing
   });
   assert.equal(ticket.statusCode, 403);
   assert.deepEqual(responseBody(ticket), { error: "PENDING_APPROVAL" });
+});
+
+test("an approved member callback does not create an unused server session", async () => {
+  let createSessionCalls = 0;
+  const member = {
+    uid: "fs_existing_admin",
+    displayName: "一鸣",
+    role: "admin",
+    version: 1,
+    createdAt: "2026-08-27T00:00:00.000Z",
+    approvedAt: "2026-08-27T00:00:00.000Z",
+  };
+  const handler = createAuthHandler({
+    env: {
+      FEISHU_APP_ID: "cli_test",
+      FEISHU_APP_SECRET: "secret",
+      FEISHU_REDIRECT_URI: "https://auth.example/callback",
+      PUBLIC_APP_URL: "https://trip.example",
+      VITE_CLOUDBASE_ENV_ID: "env",
+    },
+    memberStore: {
+      upsertPending: async () => member,
+      findByUid: async () => member,
+    },
+    authStore: {
+      consumeState: async () => true,
+      createSession: async () => { createSessionCalls += 1; return "unused-session"; },
+      createExchange: async () => "exchange-code",
+    },
+    fetchImpl: async (url) => String(url).includes("tenant_access_token")
+      ? new Response(JSON.stringify({ code: 0, tenant_access_token: "tenant" }))
+      : String(url).includes("access_token")
+        ? new Response(JSON.stringify({ code: 0, data: { access_token: "user-token" } }))
+        : new Response(JSON.stringify({ code: 0, data: { open_id: "ou_existing", name: "一鸣" } })),
+  });
+
+  const callback = await makeRequest(handler, "GET", "/api/auth/callback?code=code&state=state", undefined, { cookie: "oauth_state=state" });
+
+  assert.equal(callback.statusCode, 302);
+  assert.equal(new URL(callback.headers.location).searchParams.get("status"), "approved");
+  assert.equal(callback.headers["set-cookie"], undefined);
+  assert.equal(createSessionCalls, 0);
 });
 
 test("accepts paths after the CloudBase gateway strips its route prefix", async () => {
