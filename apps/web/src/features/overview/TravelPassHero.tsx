@@ -91,9 +91,9 @@ export function TravelPassHero({ trip, member }: TravelPassHeroProps) {
           <span>PRIVATE JOURNEY</span>
         </header>
         <div className="travel-pass-hero__leg">
-          <p>PEK 北京出发</p>
+          <p aria-label="PEK 北京出发"><strong className="travel-pass-hero__leg-code">PEK</strong><small className="travel-pass-hero__leg-caption">北京出发</small></p>
           <span aria-hidden="true">→</span>
-          <p>{destinationCode} 第一站·{day.city}</p>
+          <p aria-label={`${destinationCode} 第一站·${day.city}`}><strong className="travel-pass-hero__leg-code">{destinationCode}</strong><small className="travel-pass-hero__leg-caption">第一站·{day.city}</small></p>
         </div>
         <div className="travel-pass-hero__ticket-day" aria-label={`D1 ${formatDate(day.date)} 第一站 ${day.city}`}>
           <span>D1 · {formatDate(day.date)} · {day.city}</span>

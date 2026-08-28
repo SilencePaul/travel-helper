@@ -55,12 +55,14 @@ test("renders the editorial heading and continuous labelled southbound route", (
 });
 
 test("prints the first applicable day on the ticket with pass details and structural hooks", () => {
-  render(<TravelPassHero trip={trip} member={member} />);
+  const { container } = render(<TravelPassHero trip={trip} member={member} />);
 
   expect(screen.getByText("TRIP PASS")).toBeVisible();
   expect(screen.getByText("PRIVATE JOURNEY")).toBeVisible();
-  expect(screen.getByText("PEK 北京出发")).toBeVisible();
-  expect(screen.getByText("SZX 第一站·深圳")).toBeVisible();
+  expect(screen.getByLabelText("PEK 北京出发")).toBeVisible();
+  expect(screen.getByLabelText("SZX 第一站·深圳")).toBeVisible();
+  expect(container.querySelector(".travel-pass-hero__leg-code")).toHaveTextContent("PEK");
+  expect(container.querySelector(".travel-pass-hero__leg-caption")).toHaveTextContent("北京出发");
   expect(screen.getByText("D1 · 2026.10.03 · 深圳")).toBeVisible();
   expect(screen.getByText("一鸣 / 美垚")).toBeVisible();
   expect(screen.getByText(/PASS NO\. SOUTHB/)).toBeVisible();
@@ -74,7 +76,7 @@ test("uses the trip start date and first city fallback without creating a PEK-to
 
   render(<TravelPassHero trip={noDaysTrip} />);
 
-  expect(screen.getByText("SZX 第一站·深圳")).toBeVisible();
+  expect(screen.getByLabelText("SZX 第一站·深圳")).toBeVisible();
   expect(screen.getByText("D1 · 2026.10.03 · 深圳")).toBeVisible();
-  expect(screen.queryByText("PEK 第一站·北京")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("PEK 第一站·北京")).not.toBeInTheDocument();
 });

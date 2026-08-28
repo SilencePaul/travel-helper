@@ -558,7 +558,7 @@ h2 { margin: 0; font-size: 24px; }
 .travel-pass-hero__ticket-header { padding-bottom: 20px; border-bottom: 1px dashed #9d9d8e; }
 .travel-pass-hero__leg {
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   gap: 14px;
   align-items: center;
   padding: 23px 0;
@@ -566,14 +566,15 @@ h2 { margin: 0; font-size: 24px; }
 }
 .travel-pass-hero__leg p {
   display: grid;
-  gap: 4px;
+  min-width: 0;
+  gap: 2px;
   margin: 0;
   font-family: "Songti SC", "STSong", serif;
-  font-size: clamp(23px, 2.7vw, 32px);
   font-weight: 700;
-  letter-spacing: -.04em;
 }
 .travel-pass-hero__leg p:last-child { text-align: right; }
+.travel-pass-hero__leg-code { font-size: clamp(23px, 2.7vw, 32px); letter-spacing: -.04em; white-space: nowrap; }
+.travel-pass-hero__leg-caption { color: var(--pass-muted); font-family: "Avenir Next", "PingFang SC", sans-serif; font-size: 11px; font-weight: 700; letter-spacing: .04em; line-height: 1.25; white-space: nowrap; }
 .travel-pass-hero__leg > span { color: var(--pass-coral); font-size: 22px; }
 .travel-pass-hero__ticket-day {
   display: flex;
@@ -766,7 +767,8 @@ h2 { margin: 0; font-size: 24px; }
 
 @media (max-width: 480px) {
   .travel-pass-hero__leg { gap: 8px; }
-  .travel-pass-hero__leg p { font-size: 22px; }
+  .travel-pass-hero__leg-code { font-size: 22px; }
+  .travel-pass-hero__leg-caption { font-size: 10px; }
   .travel-pass-hero__ticket-day { align-items: start; flex-direction: column; }
   .overview .day-actions button { padding-inline: 10px; font-size: 12px; }
 }
