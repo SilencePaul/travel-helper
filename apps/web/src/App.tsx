@@ -185,10 +185,8 @@ function TripRoutes({ createDayId = () => "day-ui", routeService, member, onUnau
             <OverviewPage
               trip={trip}
               selectedDayId={selectedDayId}
-              onSelectDay={(dayId) => {
-                setRequestedDayId(dayId);
-                navigate(`/day/${encodeURIComponent(dayId)}`);
-              }}
+              onSelectDay={setRequestedDayId}
+              onOpenSelectedDay={(dayId) => navigate(`/day/${encodeURIComponent(dayId)}`)}
               onAddDay={addDay}
               onDuplicateDay={duplicateSelectedDay}
               onDeleteDay={deleteDay}

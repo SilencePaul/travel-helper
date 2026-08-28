@@ -14,6 +14,7 @@ export type OverviewPageProps = {
   trip: Trip;
   selectedDayId: string | undefined;
   onSelectDay: (dayId: string) => void;
+  onOpenSelectedDay?: (dayId: string) => void;
   onAddDay: () => void | Promise<unknown>;
   onDuplicateDay: () => void | Promise<unknown>;
   onDeleteDay: (dayId: string) => void | Promise<unknown>;
@@ -32,6 +33,7 @@ export function OverviewPage({
   trip,
   selectedDayId,
   onSelectDay,
+  onOpenSelectedDay,
   onAddDay,
   onDuplicateDay,
   onDeleteDay,
@@ -294,6 +296,7 @@ export function OverviewPage({
             <p className="eyebrow">当前选中</p>
             <h3>D{selectedIndex + 1} · {selectedDay.city || "待安排"}</h3>
             <p>{selectedDay.date} · 待预报</p>
+            {onOpenSelectedDay ? <button type="button" onClick={() => onOpenSelectedDay(selectedDay.id)}>查看当天详情</button> : null}
           </article>
         ) : (
           <p className="empty-state">请先新增一天</p>

@@ -164,6 +164,35 @@ test("synchronizes the travel pass ticket with the selected day", () => {
   expect(screen.getByText("D6 · 2026.10.08 · 珠海 / 北京")).toBeVisible();
 });
 
+test("keeps day selection on the travel pass and opens details separately", async () => {
+  const user = userEvent.setup();
+  const trip: Trip = {
+    ...eightDayTrip,
+    id: "trip-day-selection",
+    endDate: "2026-10-08",
+    days: eightDayTrip.days.slice(0, 6).map((day, index) => index === 5
+      ? { ...day, city: "珠海 / 北京" }
+      : day),
+  };
+  const repository = new LocalTripRepository(trip);
+  window.history.replaceState({}, "", "/");
+  try {
+    render(<App repository={repository} tripId={trip.id} />);
+
+    await user.click(await screen.findByRole("tab", { name: /D6/ }));
+
+    expect(window.location.pathname).toBe("/");
+    expect(screen.getByText("D6 · 2026.10.08 · 珠海 / 北京")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "查看当天详情" }));
+
+    expect(window.location.pathname).toBe("/day/day-6");
+    expect(await screen.findByRole("heading", { name: "珠海 / 北京" })).toBeVisible();
+  } finally {
+    window.history.replaceState({}, "", "/");
+  }
+});
+
 test("exposes the travel actions in text navigation and calls their original callbacks", async () => {
   const user = userEvent.setup();
   const onOpenHotels = vi.fn();
@@ -317,7 +346,6 @@ test("appends after the last calendar date without shifting dates across a delet
   );
 
   await user.click(await screen.findByRole("tab", { name: /D2/ }));
-  await user.click(await screen.findByRole("button", { name: /返回行程总览/ }));
   await user.click(await screen.findByRole("button", { name: "删除当天" }));
   await user.click(screen.getByRole("button", { name: "确认删除" }));
 
