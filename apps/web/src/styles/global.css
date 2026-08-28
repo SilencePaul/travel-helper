@@ -629,7 +629,11 @@ h2 { margin: 0; font-size: 24px; }
   color: inherit;
   background: transparent;
 }
-.text-navigation button:first-of-type { border-color: var(--pass-coral); color: var(--pass-green); }
+.text-navigation__current {
+  padding: 3px 0 7px;
+  border-bottom: 2px solid var(--pass-coral);
+  color: var(--pass-green);
+}
 .text-navigation button:hover:not(:disabled) { color: var(--pass-green); }
 .text-navigation button:focus-visible,
 .day-actions button:focus-visible,
@@ -697,6 +701,7 @@ h2 { margin: 0; font-size: 24px; }
   line-height: 1;
 }
 .overview .day-tab[aria-selected="true"] { outline: 0; background: #e1ece5; }
+.overview .day-tab:focus-visible { outline: 3px solid var(--pass-coral); outline-offset: -3px; }
 .overview .day-tab strong { font-family: "Songti SC", "STSong", serif; font-size: 23px; line-height: 1; }
 .overview .day-tab span, .overview .day-tab small { color: var(--pass-muted); font-size: 12px; }
 .overview .day-tab small { color: #a97528; }
