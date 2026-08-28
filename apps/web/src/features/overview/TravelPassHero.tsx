@@ -3,6 +3,7 @@ import type { Member, Trip } from "@travel/contracts";
 export type TravelPassHeroProps = {
   trip: Trip;
   member?: Member;
+  selectedDayId?: string;
 };
 
 const cityCodes: Record<string, string> = {
@@ -10,14 +11,33 @@ const cityCodes: Record<string, string> = {
   香港: "HKG",
   澳门: "MFM",
   珠海: "ZUH",
+  北京: "PEK",
 };
 const fallbackStop = { code: "SZX", city: "深圳" };
 
-function firstTravelDay(trip: Trip) {
-  const day = trip.days.find((candidate) => candidate.city !== "北京") ?? trip.days[0];
+function routeStops(city: string) {
+  return city.split("/").map((stop) => stop.trim()).filter(Boolean);
+}
+
+function selectedRouteLeg(trip: Trip, selectedDayId?: string) {
+  const requestedIndex = trip.days.findIndex((day) => day.id === selectedDayId);
+  const dayIndex = requestedIndex >= 0 ? requestedIndex : trip.days.findIndex((day) => day.city !== "北京");
+  const index = dayIndex >= 0 ? dayIndex : 0;
+  const day = trip.days[index];
+  const departure = index === 0
+    ? "北京"
+    : routeStops(trip.days[index - 1]?.city ?? "").at(-1) ?? "北京";
+  const arrival = trip.days
+    .slice(index)
+    .flatMap((candidate) => routeStops(candidate.city))
+    .find((stop) => stop !== departure) ?? fallbackStop.city;
+
   return {
     date: day?.date ?? trip.startDate,
-    city: day?.city && day.city !== "北京" ? day.city : fallbackStop.city,
+    city: day?.city ?? fallbackStop.city,
+    departure,
+    arrival,
+    dayNumber: index + 1,
   };
 }
 
@@ -25,9 +45,14 @@ function formatDate(date: string) {
   return date.replaceAll("-", ".");
 }
 
-export function TravelPassHero({ trip, member }: TravelPassHeroProps) {
-  const day = firstTravelDay(trip);
-  const destinationCode = cityCodes[day.city] ?? fallbackStop.code;
+export function TravelPassHero({ trip, member, selectedDayId }: TravelPassHeroProps) {
+  const day = selectedRouteLeg(trip, selectedDayId);
+  const departureCode = cityCodes[day.departure] ?? "PEK";
+  const destinationCode = cityCodes[day.arrival] ?? fallbackStop.code;
+  const departureCaption = `${day.departure}出发`;
+  const destinationCaption = day.dayNumber === 1
+    ? `第一站·${day.arrival}`
+    : day.arrival === "北京" ? "返回·北京" : `下一站·${day.arrival}`;
   const travelerNames = trip.travelers.map((traveler) => traveler.name);
   const names = travelerNames.length > 0 ? travelerNames.join(" / ") : member?.displayName ?? "旅行者";
   const serial = trip.id.slice(0, 6).toUpperCase() || "SOUTH";
@@ -91,12 +116,12 @@ export function TravelPassHero({ trip, member }: TravelPassHeroProps) {
           <span>PRIVATE JOURNEY</span>
         </header>
         <div className="travel-pass-hero__leg">
-          <p aria-label="PEK 北京出发"><strong className="travel-pass-hero__leg-code">PEK</strong><small className="travel-pass-hero__leg-caption">北京出发</small></p>
+          <p aria-label={`${departureCode} ${departureCaption}`}><strong className="travel-pass-hero__leg-code">{departureCode}</strong><small className="travel-pass-hero__leg-caption">{departureCaption}</small></p>
           <span aria-hidden="true">→</span>
-          <p aria-label={`${destinationCode} 第一站·${day.city}`}><strong className="travel-pass-hero__leg-code">{destinationCode}</strong><small className="travel-pass-hero__leg-caption">第一站·{day.city}</small></p>
+          <p aria-label={`${destinationCode} ${destinationCaption}`}><strong className="travel-pass-hero__leg-code">{destinationCode}</strong><small className="travel-pass-hero__leg-caption">{destinationCaption}</small></p>
         </div>
-        <div className="travel-pass-hero__ticket-day" aria-label={`D1 ${formatDate(day.date)} 第一站 ${day.city}`}>
-          <span>D1 · {formatDate(day.date)} · {day.city}</span>
+        <div className="travel-pass-hero__ticket-day" aria-label={`D${day.dayNumber} ${formatDate(day.date)} ${day.departure} 至 ${day.arrival}`}>
+          <span>D{day.dayNumber} · {formatDate(day.date)} · {day.city}</span>
           <span>行程待启程</span>
         </div>
         <div className="travel-pass-hero__perforation" data-testid="travel-pass-perforation" aria-hidden="true" />
@@ -105,8 +130,8 @@ export function TravelPassHero({ trip, member }: TravelPassHeroProps) {
           <div><dt>PASS NO.</dt><dd>{serial}</dd></div>
         </dl>
         <p className="travel-pass-hero__serial">PASS NO. {serial}</p>
-        <div className="travel-pass-hero__stamp" data-testid="travel-pass-stamp" aria-label="第一天日期章">
-          <span>D1</span>
+        <div className="travel-pass-hero__stamp" data-testid="travel-pass-stamp" aria-label={`第${day.dayNumber}天日期章`}>
+          <span>D{day.dayNumber}</span>
           <small>{formatDate(day.date)}</small>
         </div>
       </article>

@@ -134,6 +134,36 @@ test("renders every dynamic travel day and traveler", async () => {
   expect(onSelectDay).toHaveBeenCalledWith("day-3");
 });
 
+test("synchronizes the travel pass ticket with the selected day", () => {
+  const returnTrip: Trip = {
+    ...eightDayTrip,
+    days: [
+      { id: "day-1", date: "2026-10-03", city: "深圳", itemIds: [] },
+      { id: "day-2", date: "2026-10-04", city: "香港", itemIds: [] },
+      { id: "day-3", date: "2026-10-05", city: "香港", itemIds: [] },
+      { id: "day-4", date: "2026-10-06", city: "澳门", itemIds: [] },
+      { id: "day-5", date: "2026-10-07", city: "澳门 / 珠海", itemIds: [] },
+      { id: "day-6", date: "2026-10-08", city: "珠海 / 北京", itemIds: [] },
+    ],
+  };
+  const props = {
+    trip: returnTrip,
+    onSelectDay: () => undefined,
+    onAddDay: () => undefined,
+    onDuplicateDay: () => undefined,
+    onDeleteDay: () => undefined,
+    onMoveDay: () => undefined,
+  };
+  const view = render(<OverviewPage {...props} selectedDayId="day-1" />);
+
+  expect(screen.getByLabelText("SZX 第一站·深圳")).toBeVisible();
+
+  view.rerender(<OverviewPage {...props} selectedDayId="day-6" />);
+  expect(screen.getByLabelText("ZUH 珠海出发")).toBeVisible();
+  expect(screen.getByLabelText("PEK 返回·北京")).toBeVisible();
+  expect(screen.getByText("D6 · 2026.10.08 · 珠海 / 北京")).toBeVisible();
+});
+
 test("exposes the travel actions in text navigation and calls their original callbacks", async () => {
   const user = userEvent.setup();
   const onOpenHotels = vi.fn();

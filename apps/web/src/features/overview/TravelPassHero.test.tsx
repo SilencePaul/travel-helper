@@ -80,3 +80,25 @@ test("uses the trip start date and first city fallback without creating a PEK-to
   expect(screen.getByText("D1 · 2026.10.03 · 深圳")).toBeVisible();
   expect(screen.queryByLabelText("PEK 第一站·北京")).not.toBeInTheDocument();
 });
+
+test("uses the selected final day to print the ZUH-to-PEK return leg and date", () => {
+  const returnTrip: Trip = {
+    ...trip,
+    endDate: "2026-10-08",
+    days: [
+      { id: "day-1", date: "2026-10-03", city: "深圳", itemIds: [] },
+      { id: "day-2", date: "2026-10-04", city: "香港", itemIds: [] },
+      { id: "day-3", date: "2026-10-05", city: "香港", itemIds: [] },
+      { id: "day-4", date: "2026-10-06", city: "澳门", itemIds: [] },
+      { id: "day-5", date: "2026-10-07", city: "澳门 / 珠海", itemIds: [] },
+      { id: "day-6", date: "2026-10-08", city: "珠海 / 北京", itemIds: [] },
+    ],
+  };
+
+  render(<TravelPassHero trip={returnTrip} selectedDayId="day-6" />);
+
+  expect(screen.getByLabelText("ZUH 珠海出发")).toBeVisible();
+  expect(screen.getByLabelText("PEK 返回·北京")).toBeVisible();
+  expect(screen.getByText("D6 · 2026.10.08 · 珠海 / 北京")).toBeVisible();
+  expect(screen.getByTestId("travel-pass-stamp")).toHaveTextContent("D6");
+});

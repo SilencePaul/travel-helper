@@ -199,7 +199,7 @@ export function OverviewPage({
 
   return (
     <main className="overview">
-      <TravelPassHero trip={trip} member={member} />
+      <TravelPassHero trip={trip} member={member} selectedDayId={selectedDay?.id} />
       <nav className="text-navigation" aria-label="行程操作">
         <span className="text-navigation__current" aria-current="page">行程</span>
         {member ? <span className="signed-in-user">已登录：{member.displayName}</span> : null}
