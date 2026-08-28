@@ -50,6 +50,10 @@ const ActionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("getTrip"), tripId: z.string().min(1) }),
   z.object({ action: z.literal("getDecisionWorkspace"), tripId: z.string().min(1) }),
   z.object({ action: z.literal("upsertPreference"), tripId: z.string().min(1), expectedRevision: z.number().int().nonnegative(), idempotencyKey: z.string().min(8).max(128), answers: z.record(z.string(), z.union([z.string(), z.array(z.string()), z.number(), z.boolean(), z.null()])), freeText: z.object({ mustHave: z.string().optional(), mustAvoid: z.string().optional(), note: z.string().optional() }).optional() }),
+  z.object({ action: z.enum(["completePreference", "skipPreference"]), tripId: z.string().min(1), expectedRevision: z.number().int().nonnegative(), idempotencyKey: z.string().min(8).max(128) }),
+  z.object({ action: z.literal("recordFeedback"), tripId: z.string().min(1), candidateId: z.string().min(1), kind: z.enum(["like", "dislike", "comment"]), reason: z.string().optional(), idempotencyKey: z.string().min(8).max(128) }),
+  z.object({ action: z.literal("placeTentative"), tripId: z.string().min(1), candidateId: z.string().min(1), expectedRevision: z.number().int().nonnegative(), placement: z.object({ tripDayId: z.string().min(1), date: z.string().date(), sortKey: z.string().min(1) }), idempotencyKey: z.string().min(8).max(128) }),
+  z.object({ action: z.literal("setConfirmationReceipt"), tripId: z.string().min(1), candidateId: z.string().min(1), expectedRevision: z.number().int().nonnegative(), active: z.boolean(), reason: z.string().optional(), idempotencyKey: z.string().min(8).max(128) }),
   z.object({ action: z.literal("listMembers") }),
   z.object({ action: z.enum(["approveMember", "rejectMember", "removeMember"]), uid: z.string().min(4).max(32) }),
   z.object({ action: z.literal("saveTrip"), tripId: z.string().min(1).optional(), trip: TripSchema, expectedVersion: z.number().int().nonnegative(), idempotencyKey: z.string().min(8).max(128) }),
@@ -304,6 +308,28 @@ function createTripCommands({ db, now = () => new Date(), sessionRevoker = creat
     });
   }
 
+  async function preferenceState(input, actorUid) {
+    return db.runTransaction(async (transaction) => {
+      await assertTripMember(transaction, input.tripId, actorUid);
+      const store = transaction.collection("trip_preferences"); const id = `${input.tripId}:${actorUid}`;
+      const current = one(await store.doc(id).get());
+      if (!current || current.revision !== input.expectedRevision) throw codedError("VERSION_CONFLICT", { currentVersion: current?.revision || 0, latest: current && writableRecord(current) });
+      const next = { ...current, status: input.action === "completePreference" ? "completed" : "skipped", revision: current.revision + 1, updatedAt: now().toISOString(), updatedBy: actorUid };
+      await store.doc(id).set(next); await audit(transaction, await getActor(transaction, actorUid), input.action, id, ["status", "revision"]); return { preference: next };
+    });
+  }
+
+  async function appendResource(input, actorUid) {
+    return db.runTransaction(async (transaction) => {
+      await assertTripMember(transaction, input.tripId, actorUid); const timestamp = now().toISOString();
+      if (input.action === "recordFeedback") { const value = { id: `${input.tripId}:${input.candidateId}:${actorUid}:${input.idempotencyKey}`, tripId: input.tripId, candidateId: input.candidateId, actorUid, kind: input.kind, ...(input.reason ? { reason: input.reason } : {}), revision: 1, createdAt: timestamp }; await transaction.collection("trip_candidate_feedback").doc(value.id).set(value); return { feedback: value }; }
+      const candidates = transaction.collection("trip_candidates"); const candidate = one(await candidates.doc(input.candidateId).get());
+      if (!candidate || candidate.tripId !== input.tripId) throw codedError("FORBIDDEN"); if (candidate.revision !== input.expectedRevision) throw codedError("VERSION_CONFLICT", { currentVersion: candidate.revision, latest: writableRecord(candidate) });
+      if (input.action === "placeTentative") { const placement = { id: `${input.tripId}:${input.candidateId}`, tripId: input.tripId, candidateId: input.candidateId, ...input.placement, status: "planned", revision: 1, updatedAt: timestamp }; await transaction.collection("trip_tentative_placements").doc(placement.id).set(placement); const next = { ...candidate, decisionState: "tentative", revision: candidate.revision + 1, updatedAt: timestamp }; await candidates.doc(candidate.id).set(next); return { placement, candidate: next }; }
+      if (input.active && candidate.decisionState !== "tentative") throw codedError("INVALID_CONFIRMATION_STATE"); const receipt = { id: `${input.tripId}:${input.candidateId}:${actorUid}`, tripId: input.tripId, candidateId: input.candidateId, memberUid: actorUid, active: input.active, revision: 1, actedAt: timestamp }; await transaction.collection("trip_confirmation_receipts").doc(receipt.id).set(receipt); return { receipt, candidate };
+    });
+  }
+
   async function getCurrentMember(actorUid) {
     return db.runTransaction(async (transaction) => {
       const member = one(await transaction.collection("members").doc(actorUid).get());
@@ -329,6 +355,8 @@ function createTripCommands({ db, now = () => new Date(), sessionRevoker = creat
       if (input.action === "getTrip") return getTrip(input, actorUid);
       if (input.action === "getDecisionWorkspace") return getDecisionWorkspace(input, actorUid);
       if (input.action === "upsertPreference") return upsertPreference(input, actorUid);
+      if (input.action === "completePreference" || input.action === "skipPreference") return preferenceState(input, actorUid);
+      if (["recordFeedback", "placeTentative", "setConfirmationReceipt"].includes(input.action)) return appendResource(input, actorUid);
       if (input.action === "saveTrip") return saveTrip(input, actorUid);
       return changeMember(input, actorUid);
     },
