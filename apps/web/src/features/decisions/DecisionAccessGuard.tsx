@@ -7,7 +7,7 @@ type Props = {
 export function DecisionAccessGuard({ onBack }: Props) {
   return <main className="decision-page decision-access-page" aria-labelledby="decision-access-title">
     <nav className="decision-access-nav" aria-label="共同决定页面操作">
-      <button type="button" onClick={onBack}><span aria-hidden="true">← </span>返回行程</button>
+      <button className="control-button control-button--text" type="button" onClick={onBack}><span aria-hidden="true">← </span>返回行程</button>
       <span>PRIVATE JOURNEY · 仅同行者可见</span>
     </nav>
 

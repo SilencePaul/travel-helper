@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { MemberManagementPage } from "./MemberManagementPage";
@@ -87,9 +87,121 @@ describe("MemberManagementPage", () => {
     ]} />);
 
     await userEvent.click(screen.getByRole("button", { name: "移除" }));
+    await userEvent.click(screen.getByRole("button", { name: "确认移除已被撤销" }));
 
     expect(onUnauthorized).toHaveBeenCalledWith(unauthorized);
     expect(screen.queryByText("已被撤销")).not.toBeInTheDocument();
     expect(screen.queryByText("操作失败，请稍后重试")).not.toBeInTheDocument();
+  });
+
+  it("confirms a named destructive action and focuses the next equivalent action after removal", async () => {
+    const user = userEvent.setup();
+    const command = vi.fn().mockResolvedValue({});
+    render(<MemberManagementPage command={command} initialMembers={[
+      { uid: "member-one", displayName: "同行甲", role: "member", version: 1, createdAt: "2026-08-27T00:00:00.000Z" },
+      { uid: "member-two", displayName: "同行乙", role: "member", version: 1, createdAt: "2026-08-27T00:00:00.000Z" },
+    ]} />);
+
+    await user.click(screen.getAllByRole("button", { name: "移除" })[0]!);
+    const dialog = screen.getByRole("alertdialog", { name: "确认移除同行甲" });
+    expect(dialog).toBeVisible();
+    expect(screen.getByRole("button", { name: "取消" })).toHaveFocus();
+    expect(command).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "确认移除同行甲" }));
+    expect(command).toHaveBeenCalledWith({ action: "removeMember", uid: "member-one" });
+    expect(await screen.findByText("已移除同行甲")).toBeVisible();
+    await waitFor(() => expect(screen.getByRole("button", { name: "移除" })).toHaveFocus());
+  });
+
+  it("cancels a rejection without mutating membership", async () => {
+    const user = userEvent.setup();
+    const command = vi.fn();
+    render(<MemberManagementPage command={command} initialMembers={[
+      { uid: "pending", displayName: "待审批同行", role: "pending", version: 0, createdAt: "2026-08-27T00:00:00.000Z" },
+    ]} />);
+
+    const trigger = screen.getByRole("button", { name: "拒绝" });
+    await user.click(trigger);
+    expect(screen.getByRole("alertdialog", { name: "确认拒绝待审批同行" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "取消" })).toHaveFocus();
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(trigger).toHaveFocus());
+    expect(command).not.toHaveBeenCalled();
+  });
+
+  it("announces a successful approval and focuses the active-members heading", async () => {
+    const pendingUid = "approval-focus";
+    const command = vi.fn().mockResolvedValue({
+      member: { uid: pendingUid, displayName: "待审批同行", role: "member", version: 1, createdAt: "2026-08-27T00:00:00.000Z" },
+    });
+    const user = userEvent.setup();
+    render(<MemberManagementPage command={command} initialMembers={[
+      { uid: pendingUid, displayName: "待审批同行", role: "pending", version: 0, createdAt: "2026-08-27T00:00:00.000Z" },
+    ]} />);
+
+    await user.type(screen.getByRole("textbox", { name: "输入待审批同行的身份校验码" }), memberVerificationCode(pendingUid));
+    await user.click(screen.getByRole("button", { name: "核对后批准" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("已批准待审批同行");
+    await waitFor(() => expect(screen.getByRole("heading", { name: "已加入" })).toHaveFocus());
+  });
+
+  it("focuses the dialog container while a destructive request disables its actions", async () => {
+    let finish!: (value: {}) => void;
+    const command = vi.fn().mockReturnValue(new Promise<{}>((resolve) => { finish = resolve; }));
+    const user = userEvent.setup();
+    render(<MemberManagementPage command={command} initialMembers={[
+      { uid: "member", displayName: "同行", role: "member", version: 1, createdAt: "2026-08-27T00:00:00.000Z" },
+    ]} />);
+
+    await user.click(screen.getByRole("button", { name: "移除" }));
+    const dialog = screen.getByRole("alertdialog", { name: "确认移除同行" });
+    await user.click(screen.getByRole("button", { name: "确认移除同行" }));
+
+    expect(dialog).toHaveAttribute("tabindex", "-1");
+    expect(dialog).toHaveFocus();
+    expect(screen.getByRole("button", { name: "取消" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "正在处理" })).toBeDisabled();
+
+    finish({});
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+  });
+
+  it("clears a stale action error before opening a new confirmation", async () => {
+    const command = vi.fn().mockRejectedValueOnce(new Error("first failure")).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<MemberManagementPage command={command} initialMembers={[
+      { uid: "member-one", displayName: "同行甲", role: "member", version: 1, createdAt: "2026-08-27T00:00:00.000Z" },
+      { uid: "member-two", displayName: "同行乙", role: "member", version: 1, createdAt: "2026-08-27T00:00:00.000Z" },
+    ]} />);
+
+    await user.click(screen.getAllByRole("button", { name: "移除" })[0]!);
+    await user.click(screen.getByRole("button", { name: "确认移除同行甲" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("操作失败");
+    await user.keyboard("{Escape}");
+    await user.click(screen.getAllByRole("button", { name: "移除" })[1]!);
+
+    expect(screen.getByRole("alertdialog", { name: "确认移除同行乙" })).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("falls back to the matching section heading after the last destructive action", async () => {
+    const command = vi.fn().mockResolvedValue({});
+    const user = userEvent.setup();
+    render(<MemberManagementPage command={command} initialMembers={[
+      { uid: "pending", displayName: "最后待审批", role: "pending", version: 0, createdAt: "2026-08-27T00:00:00.000Z" },
+      { uid: "member", displayName: "最后已加入", role: "member", version: 1, createdAt: "2026-08-27T00:00:00.000Z" },
+    ]} />);
+
+    await user.click(screen.getByRole("button", { name: "拒绝" }));
+    await user.click(screen.getByRole("button", { name: "确认拒绝最后待审批" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "待批准" })).toHaveFocus());
+
+    await user.click(screen.getByRole("button", { name: "移除" }));
+    await user.click(screen.getByRole("button", { name: "确认移除最后已加入" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "已加入" })).toHaveFocus());
   });
 });

@@ -26,9 +26,9 @@
   font-family: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 .decision-access-nav { align-items: center; display: flex; justify-content: space-between; gap: 1rem; margin-bottom: clamp(3rem, 8vh, 6rem); }
-.decision-access-nav button { padding: 0.35rem 0 0.45rem; border: 0; border-bottom: 1px solid currentColor; color: var(--decision-access-green); background: transparent; font: inherit; font-size: 0.78rem; font-weight: 700; }
+.decision-access-nav button { color: var(--decision-access-green); font-size: 0.78rem; font-weight: 700; }
 .decision-access-nav button:hover { color: var(--decision-access-coral); }
-.decision-access-nav button:focus-visible { outline: 3px solid var(--decision-access-coral); outline-offset: 4px; }
+.decision-access-nav button:focus-visible { outline: 3px solid var(--accent-semantic); outline-offset: 4px; }
 .decision-access-nav > span { color: var(--decision-access-muted); font-size: 0.65rem; font-weight: 700; letter-spacing: 0.14em; text-align: right; }
 .decision-access-layout { align-items: center; display: grid; gap: clamp(3rem, 8vw, 7.5rem); grid-template-columns: minmax(0, 1.08fr) minmax(20rem, 0.72fr); margin: 0 auto; max-width: 72rem; }
 .decision-access-story { max-width: 42rem; }
@@ -59,9 +59,6 @@
 .decision-access-stamp small { font-size: 0.48rem; font-weight: 800; letter-spacing: 0.08em; }
 @keyframes decision-access-arrive { from { opacity: 0; transform: translateY(0.8rem) rotate(1deg); } to { opacity: 1; transform: translateY(0) rotate(1deg); } }
 .decision-page-nav { align-items: center; display: flex; justify-content: space-between; margin-bottom: 1rem; }
-.decision-page-nav button,
-.decision-preference-form button,
-.decision-action-row button { background: transparent; border: 1px solid var(--decision-green, #104c40); color: var(--decision-green, #104c40); cursor: pointer; font: inherit; padding: 0.55rem 0.75rem; }
 .decision-page-nav button:disabled,
 .decision-preference-form button:disabled,
 .decision-action-row button:disabled { cursor: not-allowed; opacity: 0.45; }
@@ -72,7 +69,7 @@
 .decision-preference-form label { display: grid; font-size: 0.78rem; font-weight: 700; gap: 0.35rem; }
 .decision-preference-form input,
 .decision-preference-form select,
-.decision-preference-form textarea { background: #fffdf7; border: 1px solid #c9bfac; color: #224e48; font: inherit; padding: 0.65rem; }
+.decision-preference-form textarea { width: 100%; }
 .decision-preference-form textarea { min-height: 4rem; resize: vertical; }
 .decision-form-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; grid-column: 1 / -1; }
 .decision-page-message { background: #fff3d9; border-left: 3px solid #dc6038; padding: 0.7rem 0.9rem; }

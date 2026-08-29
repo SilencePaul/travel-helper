@@ -35,6 +35,7 @@ function getMobileViewportSnapshot() {
 export function PlaceDrawer({ place, triggerRef, onClose, mobile = false, rainAlternative }: PlaceDrawerProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const titleId = useId();
+  const contentId = useId();
   const [open, setOpen] = useState(true);
   const [mobileState, setMobileState] = useState<"partial" | "full">("partial");
   const [copyMessage, setCopyMessage] = useState<string>();
@@ -90,7 +91,7 @@ export function PlaceDrawer({ place, triggerRef, onClose, mobile = false, rainAl
 
   if (!open || !portalRoot) return null;
   const communitySource = place.sources.find((source) => source.kind === "community");
-  const focusableSelector = "button:not([disabled]), a[href]";
+  const focusableSelector = "button:not([disabled]), a[href], input:not([disabled])";
 
   return createPortal(
     <dialog
@@ -128,24 +129,24 @@ export function PlaceDrawer({ place, triggerRef, onClose, mobile = false, rainAl
           <p className="eyebrow">{place.type === "restaurant" ? "餐饮" : "景点"}</p>
           <h2 id={titleId}>{place.name}</h2>
         </div>
-        <button type="button" className="drawer-close" onClick={close} aria-label="关闭详情">×</button>
+        <button type="button" className="drawer-close control-button control-button--icon" onClick={close} aria-label="关闭详情">×</button>
       </header>
-      {isMobile ? <button type="button" className="drawer-expand" onClick={() => setMobileState((state) => state === "partial" ? "full" : "partial")} aria-label={mobileState === "partial" ? "展开详情" : "收起详情"}>{mobileState === "partial" ? "展开详情" : "收起详情"}</button> : null}
-      <div className="place-drawer-content">
+      {isMobile ? <button type="button" className="drawer-expand control-button control-button--secondary" aria-expanded={mobileState === "full"} aria-controls={contentId} onClick={() => setMobileState((state) => state === "partial" ? "full" : "partial")} aria-label={mobileState === "partial" ? "展开详情" : "收起详情"}>{mobileState === "partial" ? "展开详情" : "收起详情"}</button> : null}
+      <div id={contentId} className="place-drawer-content">
         <img className="place-image" src={place.images[0]!.url} alt={place.images[0]!.alt} />
         <p className="place-image-credit">图片：{place.images[0]!.licenseOrOwner}</p>
         <p className="place-summary">{place.summary}</p>
         {place.type === "restaurant" ? <RestaurantDetails place={place} /> : <AttractionDetails place={place} rainAlternative={rainAlternative} />}
         <div className="place-links">
-          <a className="place-action primary" href={navigationUrl} target="_blank" rel="noreferrer">开始导航</a>
-          <button type="button" className="place-action" onClick={() => void copyAddress()}>复制地址</button>
-          {communitySource ? <a className="place-action" href={communitySource.url} target="_blank" rel="noreferrer">小红书搜索</a> : null}
+          <a className="place-action primary control-button control-button--primary" aria-label="开始导航（新窗口）" href={navigationUrl} target="_blank" rel="noreferrer">开始导航</a>
+          <button type="button" className="place-action control-button control-button--secondary" onClick={() => void copyAddress()}>复制地址</button>
+          {communitySource ? <a className="place-action control-button control-button--text" aria-label="小红书搜索（新窗口）" href={communitySource.url} target="_blank" rel="noreferrer">小红书搜索</a> : null}
         </div>
-        {copyMessage ? <div className="copy-address-state" role="status"><p>{copyMessage}</p>{copyMessage.startsWith("无法") ? <input aria-label="可手动复制的地址" readOnly value={place.address} onFocus={(event) => event.currentTarget.select()} /> : null}</div> : null}
+        {copyMessage ? <div className="copy-address-state" role="status"><p>{copyMessage}</p>{copyMessage.startsWith("无法") ? <input className="control-field" aria-label="可手动复制的地址" readOnly value={place.address} onFocus={(event) => event.currentTarget.select()} /> : null}</div> : null}
         <section className="place-detail-section" aria-labelledby="place-sources">
           <h3 id="place-sources">资料来源</h3>
           <ul className="place-sources">
-            {place.sources.map((source) => <li key={source.url}><a href={source.url} target="_blank" rel="noreferrer">{source.label} · {formatCheckedAt(source.checkedAt)}</a></li>)}
+            {place.sources.map((source) => <li key={source.url}><a className="control-button control-button--text" aria-label={`${source.label} · ${formatCheckedAt(source.checkedAt)}（新窗口）`} href={source.url} target="_blank" rel="noreferrer">{source.label} · {formatCheckedAt(source.checkedAt)}</a></li>)}
           </ul>
         </section>
       </div>

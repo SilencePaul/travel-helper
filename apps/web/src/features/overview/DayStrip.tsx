@@ -88,7 +88,7 @@ function SortableDay({
       <button
         ref={handleRef}
         type="button"
-        className="drag-handle"
+        className="drag-handle control-button control-button--icon"
         aria-label={`拖动 D${dayNumber}`}
         {...attributes}
         {...(disabled ? {} : listeners)}

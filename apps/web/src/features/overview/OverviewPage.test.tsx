@@ -226,6 +226,9 @@ test("exposes the travel actions in text navigation and calls their original cal
   expect(screen.getByRole("button", { name: "新增一天" })).toBeVisible();
   expect(screen.getByRole("button", { name: "复制当天" })).toBeVisible();
   expect(screen.getByRole("button", { name: "删除当天" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "酒店比较" })).toHaveClass("control-button", "control-button--text");
+  expect(screen.getByRole("button", { name: "新增一天" })).toHaveClass("control-button", "control-button--secondary");
+  expect(screen.getByRole("button", { name: "删除当天" })).toHaveClass("control-button", "control-button--danger");
 
   await user.click(screen.getByRole("button", { name: "酒店比较" }));
   await user.click(screen.getByRole("button", { name: "共同决定" }));
@@ -236,6 +239,22 @@ test("exposes the travel actions in text navigation and calls their original cal
   expect(onOpenDecisions).toHaveBeenCalledOnce();
   expect(onManageMembers).toHaveBeenCalledOnce();
   expect(onLogout).toHaveBeenCalledOnce();
+});
+
+test("moves focus to the destination main after route navigation", async () => {
+  const user = userEvent.setup();
+  const repository = new LocalTripRepository(threeDayTrip);
+  window.history.replaceState({}, "", "/");
+  try {
+    render(<App repository={repository} tripId={threeDayTrip.id} />);
+    await user.click(await screen.findByRole("button", { name: "查看当天详情" }));
+
+    const destination = await screen.findByRole("main");
+    await waitFor(() => expect(destination).toHaveFocus());
+    expect(destination).toHaveAttribute("tabindex", "-1");
+  } finally {
+    window.history.replaceState({}, "", "/");
+  }
 });
 
 test("warns about removed hotel and ticket orders before a date reduction, then keeps the orders", async () => {
@@ -254,7 +273,25 @@ test("warns about removed hotel and ticket orders before a date reduction, then 
   fireEvent.change(screen.getByLabelText("结束日期"), { target: { value: "2026-10-04" } });
   await user.click(screen.getByRole("button", { name: "更新日期" }));
 
-  expect(await screen.findByRole("dialog", { name: "这些订单关联的旅行日将被移除" })).toBeVisible();
+  const warningDialog = await screen.findByRole("dialog", { name: "这些订单关联的旅行日将被移除" });
+  const keepDateButton = screen.getByRole("button", { name: "保留当前日期" });
+  const confirmDateButton = screen.getByRole("button", { name: "仍然调整日期" });
+  expect(warningDialog).toBeVisible();
+  expect(warningDialog).toHaveAccessibleDescription("订单不会自动删除或改写。确认后只调整日期与行程日，请随后核对订单。");
+  expect(keepDateButton).toHaveFocus();
+  await user.keyboard("{Tab}");
+  expect(confirmDateButton).toHaveFocus();
+  await user.keyboard("{Shift>}{Tab}{/Shift}");
+  expect(keepDateButton).toHaveFocus();
+  let dialogWasOpenWhenTriggerFocused: boolean | undefined;
+  const updateDateButton = screen.getByRole("button", { name: "更新日期" });
+  updateDateButton.addEventListener("focus", () => { dialogWasOpenWhenTriggerFocused = warningDialog.hasAttribute("open"); }, { once: true });
+  await user.keyboard("{Escape}");
+  expect(screen.queryByRole("dialog", { name: "这些订单关联的旅行日将被移除" })).not.toBeInTheDocument();
+  await waitFor(() => expect(updateDateButton).toHaveFocus());
+  expect(dialogWasOpenWhenTriggerFocused).toBe(false);
+  await user.click(updateDateButton);
+  await screen.findByRole("dialog", { name: "这些订单关联的旅行日将被移除" });
   expect(screen.getByText("酒店 · 香港酒店")).toBeVisible();
   expect(screen.getByText("门票 · 山顶缆车")).toBeVisible();
   await expect(repository.load(tripWithOrders.id)).resolves.toMatchObject({ version: 0, days: [{ id: "day-1" }, { id: "day-2" }, { id: "day-3" }] });
@@ -287,17 +324,60 @@ test("confirms the captured reviewed date range and keeps the warning retryable 
   // A background field change must not let confirmation apply an unreviewed range.
   await user.clear(screen.getByLabelText("结束日期"));
   await user.type(screen.getByLabelText("结束日期"), "2026-10-03");
-  await user.click(screen.getByRole("button", { name: "仍然调整日期" }));
+  const confirmDateButton = screen.getByRole("button", { name: "仍然调整日期" });
+  await user.click(confirmDateButton);
   await waitFor(() => expect(repository.saveRequests).toHaveLength(1));
   expect(repository.saveRequests[0]!.next.endDate).toBe("2026-10-04");
+  expect(screen.getByRole("dialog", { name: "这些订单关联的旅行日将被移除" })).toHaveFocus();
+  expect(confirmDateButton).toBeDisabled();
 
   await act(async () => repository.saveRequests[0]!.reject(new Error("offline")));
   const warningDialog = screen.getByRole("dialog", { name: "这些订单关联的旅行日将被移除" });
   expect(screen.getAllByRole("alert").at(-1)).toHaveTextContent("日期修改失败");
-  expect(screen.getByLabelText("结束日期")).toHaveAccessibleDescription("日期修改失败，请重试");
+  expect(screen.getByLabelText("开始日期")).not.toHaveAttribute("aria-invalid");
+  expect(screen.getByLabelText("结束日期")).not.toHaveAttribute("aria-invalid");
+  expect(screen.getByLabelText("结束日期")).not.toHaveAccessibleDescription();
   expect(warningDialog).toBeVisible();
   await user.click(screen.getByRole("button", { name: "仍然调整日期" }));
   await waitFor(() => expect(repository.saveRequests).toHaveLength(2));
+});
+
+test("revalidates date input errors as either boundary changes", async () => {
+  const onChangeDateRange = vi.fn(async () => ({ affectedOrders: [] }));
+  const user = userEvent.setup();
+  render(
+    <OverviewPage
+      trip={threeDayTrip}
+      selectedDayId="day-1"
+      onSelectDay={() => undefined}
+      onAddDay={() => undefined}
+      onDuplicateDay={() => undefined}
+      onDeleteDay={() => undefined}
+      onMoveDay={() => undefined}
+      onChangeDateRange={onChangeDateRange}
+    />,
+  );
+  const start = screen.getByLabelText("开始日期");
+  const end = screen.getByLabelText("结束日期");
+
+  fireEvent.change(end, { target: { value: "2026-10-02" } });
+  await user.click(screen.getByRole("button", { name: "更新日期" }));
+  expect(end).toHaveAttribute("aria-invalid", "true");
+  expect(screen.getByRole("alert")).toHaveTextContent("结束日期不能早于开始日期");
+
+  fireEvent.change(start, { target: { value: "2026-10-01" } });
+  expect(start).not.toHaveAttribute("aria-invalid");
+  expect(end).not.toHaveAttribute("aria-invalid");
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+  fireEvent.change(start, { target: { value: "2026-10-06" } });
+  await user.click(screen.getByRole("button", { name: "更新日期" }));
+  expect(start).toHaveAttribute("aria-invalid", "true");
+  fireEvent.change(end, { target: { value: "2026-10-07" } });
+  expect(start).not.toHaveAttribute("aria-invalid");
+  expect(end).not.toHaveAttribute("aria-invalid");
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(onChangeDateRange).not.toHaveBeenCalled();
 });
 
 test("persists day controls and keeps removed items available to arrange", async () => {

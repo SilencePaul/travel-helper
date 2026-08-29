@@ -1,13 +1,18 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TripSchema, type TripRepository } from "@travel/contracts";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useNavigate } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import seed from "../../../../content/trip.seed.json";
 import { TripApp } from "../App";
 import { browserDataMode, ProductionAuthGate } from "./BrowserRoot";
 
 const seededTrip = TripSchema.parse(seed);
+
+function SearchNavigation() {
+  const navigate = useNavigate();
+  return <button type="button" onClick={() => navigate({ pathname: "/", search: "?panel=orders" })}>切换查询视图</button>;
+}
 
 describe("browserDataMode", () => {
   it("fails closed instead of using local seed data in a misconfigured production build", () => {
@@ -76,6 +81,20 @@ describe("ProductionAuthGate", () => {
     expect(await screen.findByRole("heading", { name: "完成管理员初始化" })).toBeInTheDocument();
   });
 
+  it("focuses replaced auth content when only the hosting search marker changes", async () => {
+    render(<ProductionAuthGate />);
+    const login = await screen.findByRole("button", { name: "使用飞书继续" });
+    login.focus();
+
+    await act(async () => {
+      window.history.pushState({}, "", "/?auth_callback=1&status=bootstrap&state=test-state&exchange_code=one-time");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+
+    await screen.findByRole("heading", { name: "完成管理员初始化" });
+    await waitFor(() => expect(screen.getByRole("main")).toHaveFocus());
+  });
+
   it("does not mount the member-management route for an authenticated non-admin", async () => {
     const repository: TripRepository = {
       syncMode: "cloudbase",
@@ -102,10 +121,33 @@ describe("ProductionAuthGate", () => {
     render(<ProductionAuthGate />);
 
     expect(await screen.findByRole("alert")).toHaveTextContent("暂时无法确认登录状态");
+    await waitFor(() => expect(screen.getByRole("main")).toHaveFocus());
     await userEvent.click(screen.getByRole("button", { name: "重新检查登录状态" }));
     expect(await screen.findByRole("heading", { name: /两个人，\s*一条向南的路线。/ })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("main")).toHaveFocus());
     expect(recoverAuthenticatedMember.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(screen.queryByRole("button", { name: "使用飞书继续" })).not.toBeInTheDocument();
+  });
+
+  it("moves route focus when a trip URL changes only by search", async () => {
+    const repository: TripRepository = {
+      load: async () => structuredClone(seededTrip),
+      save: async (trip) => trip,
+      subscribe: () => () => undefined,
+    };
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/"]}>
+        <TripApp repository={repository} />
+        <SearchNavigation />
+      </MemoryRouter>,
+    );
+
+    const trigger = screen.getByRole("button", { name: "切换查询视图" });
+    await screen.findByRole("heading", { name: /两个人，\s*一条向南的路线。/ });
+    await user.click(trigger);
+
+    await waitFor(() => expect(screen.getByRole("main")).toHaveFocus());
   });
 
   it("gives an administrator visible member management, back, and logout controls", async () => {

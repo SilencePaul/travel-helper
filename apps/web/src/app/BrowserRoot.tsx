@@ -1,5 +1,5 @@
 import type { Member, TripRepository } from "@travel/contracts";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { BrowserRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import seed from "../../../../content/trip.seed.json";
 import { TripApp } from "../App";
@@ -28,12 +28,19 @@ function createBrowserTestRepository(): TripRepository | undefined {
   const params = new URLSearchParams(window.location.search);
   const delayMs = Number(params.get("__testSaveDelayMs"));
   const hotelRouteFixture = params.get("__testRouteMap") === "1";
-  if ((!Number.isFinite(delayMs) || delayMs <= 0) && !hotelRouteFixture) return undefined;
+  const dateWarningFixture = params.get("__testDateWarning") === "1";
+  if ((!Number.isFinite(delayMs) || delayMs <= 0) && !hotelRouteFixture && !dateWarningFixture) return undefined;
 
-  const fixture = hotelRouteFixture ? {
+  let fixture = hotelRouteFixture ? {
     ...seed,
     days: seed.days.map((day) => day.city === "香港" ? { ...day, itemIds: ["peak", "star-ferry"] } : day),
   } : seed;
+  if (dateWarningFixture) {
+    fixture = {
+      ...fixture,
+      orders: fixture.orders.map((order) => order.category === "hotel" ? { ...order, dayId: fixture.days.at(-1)?.id } : order),
+    };
+  }
   const localRepository = new LocalTripRepository(fixture);
   return {
     load: (tripId) => localRepository.load(tripId),
@@ -173,6 +180,20 @@ export function ProductionAuthGate() {
 function ProductionRoutes({ authState, setAuthState, acceptMember, onRetryAuth }: { authState: ProductionAuthState; setAuthState: (state: ProductionAuthState) => void; acceptMember: (member: Member) => void; onRetryAuth: () => Promise<void> }) {
   const navigate = useNavigate();
   const location = useLocation();
+  const mounted = useRef(false);
+  useEffect(() => {
+    if (!mounted.current) {
+      mounted.current = true;
+      return;
+    }
+    const frame = requestAnimationFrame(() => {
+      const destination = document.querySelector<HTMLElement>("main");
+      if (!destination) return;
+      destination.tabIndex = -1;
+      destination.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [authState.status, location.pathname, location.search]);
   const handleUnauthorized = useCallback((error: unknown) => {
     const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
     setAuthState({ status: code === "PENDING_APPROVAL" ? "pending" : "login" });
@@ -187,7 +208,7 @@ function ProductionRoutes({ authState, setAuthState, acceptMember, onRetryAuth }
   const home = authState.status === "checking"
     ? <AuthShell step="身份检查" title="正在寻找你的旅行通行证" description="如果已经登录，我们会直接带你回到行程。"><div className="auth-progress" role="status"><span aria-hidden="true" /><span aria-hidden="true" /><span aria-hidden="true" /><b>正在恢复登录状态…</b></div></AuthShell>
     : authState.status === "error"
-      ? <AuthShell step="连接检查" title="暂时无法确认登录状态" description="登录信息仍保留在这台设备上，请在网络恢复后重试。"><p className="auth-error" role="alert">暂时无法确认登录状态，请检查网络。</p><button className="auth-secondary" type="button" onClick={() => { setAuthState({ status: "checking" }); void onRetryAuth(); }}>重新检查登录状态</button></AuthShell>
+      ? <AuthShell step="连接检查" title="暂时无法确认登录状态" description="登录信息仍保留在这台设备上，请在网络恢复后重试。"><p className="auth-error" role="alert">暂时无法确认登录状态，请检查网络。</p><button className="auth-secondary control-button control-button--secondary" type="button" onClick={() => { setAuthState({ status: "checking" }); void onRetryAuth(); }}>重新检查登录状态</button></AuthShell>
     : authState.status === "pending"
       ? <PendingApprovalPage onAuthenticated={acceptMember} onLogout={handleLogout} />
       : authState.status === "authenticated"

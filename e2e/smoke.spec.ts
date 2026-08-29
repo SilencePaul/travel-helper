@@ -6,6 +6,60 @@ test("renders the travel app shell", async ({ page }) => {
   await expect(page.getByText("正在使用本地计划")).toBeVisible();
 });
 
+test("keeps representative shared controls and feedback layout persistent", async ({ page }) => {
+  await page.goto("/");
+  const primary = page.getByRole("button", { name: "更新日期" });
+  const text = page.getByRole("button", { name: "酒店比较" });
+  const danger = page.getByRole("button", { name: "删除当天" });
+  const field = page.getByLabel("北京 → 深圳、珠海 → 北京机票（两人）已付金额");
+
+  await expect.poll(() => primary.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { minHeight: style.minHeight, height: element.getBoundingClientRect().height, background: style.backgroundColor, radius: style.borderRadius };
+  })).toMatchObject({ minHeight: "44px", height: 44, background: "rgb(32, 77, 63)", radius: "4px" });
+  await expect.poll(() => text.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { minHeight: style.minHeight, height: element.getBoundingClientRect().height, background: style.backgroundColor, decoration: style.textDecorationLine };
+  })).toMatchObject({ minHeight: "44px", height: 44, background: "rgba(0, 0, 0, 0)", decoration: "underline" });
+  await expect.poll(() => danger.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { minHeight: style.minHeight, height: element.getBoundingClientRect().height, color: style.color };
+  })).toMatchObject({ minHeight: "44px", height: 44, color: "rgb(132, 51, 37)" });
+  await expect.poll(() => field.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { minHeight: style.minHeight, height: element.getBoundingClientRect().height, fontSize: style.fontSize, radius: style.borderRadius };
+  })).toMatchObject({ minHeight: "44px", height: 44, fontSize: "16px", radius: "4px" });
+
+  await text.focus();
+  await expect.poll(() => text.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { width: style.outlineWidth, style: style.outlineStyle, color: style.outlineColor };
+  })).toEqual({ width: "3px", style: "solid", color: "rgb(168, 65, 42)" });
+
+  await field.fill("80");
+  const orderRow = field.locator("xpath=ancestor::li");
+  const dirtyStatus = orderRow.locator(".order-row-status").filter({ hasText: "金额尚未保存" });
+  await expect(dirtyStatus).toBeVisible();
+  await expect.poll(() => orderRow.evaluate((row) => {
+    const status = row.querySelector<HTMLElement>(".order-row-status")!;
+    const controls = [...row.querySelectorAll<HTMLElement>("input, button, select")];
+    return status.getBoundingClientRect().top >= Math.max(...controls.map((control) => control.getBoundingClientRect().bottom)) - 1;
+  })).toBe(true);
+});
+
+test("bounds the date warning and wraps its actions", async ({ page }) => {
+  await page.goto("/?__testDateWarning=1");
+  await page.getByLabel("结束日期").fill("2026-10-04");
+  await page.getByRole("button", { name: "更新日期" }).click();
+  const warning = page.getByRole("dialog", { name: "这些订单关联的旅行日将被移除" });
+  await expect(warning).toBeVisible();
+  await expect.poll(() => warning.evaluate((dialog) => {
+    const style = getComputedStyle(dialog);
+    const actions = getComputedStyle(dialog.lastElementChild!);
+    return { bounded: Number.parseFloat(style.maxHeight) <= window.innerHeight - 32, overflowY: style.overflowY, actionWrap: actions.flexWrap };
+  })).toEqual({ bounded: true, overflowY: "auto", actionWrap: "wrap" });
+});
+
 test("opens a day from the dynamic overview", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("tab", { name: /D3/ }).click();
@@ -138,9 +192,9 @@ test("restaurant drawer shows sourced details and restores focus on desktop", as
   const drawerBox = await drawer.boundingBox();
   expect(drawerBox?.x + drawerBox!.width).toBeCloseTo(page.viewportSize()!.width, 0);
   await expect(drawer.getByText(/HK\$45–60/)).toBeVisible();
-  await expect(drawer.getByRole("link", { name: "小红书搜索" })).toBeVisible();
-  await expect(drawer.getByRole("link", { name: "开始导航" })).toHaveAttribute("href", /uri\.amap\.com\/navigation/);
-  await expect(drawer.getByRole("link", { name: "开始导航" })).toHaveAttribute("href", /callnative=1/);
+  await expect(drawer.getByRole("link", { name: "小红书搜索（新窗口）" })).toBeVisible();
+  await expect(drawer.getByRole("link", { name: "开始导航（新窗口）" })).toHaveAttribute("href", /uri\.amap\.com\/navigation/);
+  await expect(drawer.getByRole("link", { name: "开始导航（新窗口）" })).toHaveAttribute("href", /callnative=1/);
   await expect(page.locator("#root")).toHaveAttribute("inert", "");
   await expect(page.locator("body")).toHaveCSS("overflow", "hidden");
   await expect(page.locator(".back-button").click({ timeout: 300 })).rejects.toThrow();
@@ -160,7 +214,7 @@ test("shows seeded order totals and direct AMap launch fallback", async ({ page 
   await page.getByRole("button", { name: "查看当天详情" }).click();
   await page.locator("#timeline-place-peak button").click();
   const drawer = page.getByRole("dialog", { name: "太平山顶" });
-  await expect(drawer.getByRole("link", { name: "开始导航" })).toHaveAttribute("href", /mode=walk/);
+  await expect(drawer.getByRole("link", { name: "开始导航（新窗口）" })).toHaveAttribute("href", /mode=walk/);
   await expect(drawer.getByRole("button", { name: "复制地址" })).toBeVisible();
 });
 
@@ -175,7 +229,7 @@ test("attraction drawer uses partial then full mobile states", async ({ page }, 
   await expect(drawer).toHaveAttribute("data-drawer-state", "full");
   const fullBox = await drawer.boundingBox();
   expect(fullBox).toMatchObject({ x: 0, y: 0, width: page.viewportSize()!.width, height: page.viewportSize()!.height });
-  await drawer.getByRole("link", { name: "官方订票" }).click({ modifiers: ["Meta"] });
+  await drawer.getByRole("link", { name: "官方订票（新窗口）" }).click({ modifiers: ["Meta"] });
 });
 
 test("uses the mobile drawer treatment below 800px", async ({ page }, testInfo) => {
@@ -187,7 +241,7 @@ test("uses the mobile drawer treatment below 800px", async ({ page }, testInfo) 
   await expect(drawer).toHaveAttribute("data-drawer-state", "partial");
   await expect(drawer).toHaveCSS("bottom", "0px");
   await expect(drawer.getByRole("button", { name: "展开详情" })).toBeVisible();
-  await expect(drawer.getByRole("link", { name: "雨天备选：凌霄阁室内区域" })).toBeVisible();
+  await expect(drawer.getByRole("link", { name: "雨天备选：凌霄阁室内区域（新窗口）" })).toBeVisible();
 });
 
 test("updates an open drawer when crossing the 800px breakpoint", async ({ page }, testInfo) => {
@@ -216,6 +270,12 @@ test("selects a map-linked hotel and recalculates its stay after extending Hong 
   await expect(page.getByTestId("hotel-nights")).toHaveText("2 晚");
   await expect(page.getByTestId("hotel-commute")).toHaveText("52 分钟");
   await page.getByRole("button", { name: "选择此酒店" }).last().click();
+  const selectedHotel = page.getByRole("button", { name: "已选此酒店" });
+  await selectedHotel.hover();
+  await expect.poll(() => selectedHotel.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { color: style.color, background: style.backgroundColor };
+  })).toEqual({ color: "rgb(255, 250, 242)", background: "rgb(24, 50, 41)" });
   await expect(page.getByRole("button", { name: "在地图中定位 香港百乐酒店" })).toHaveAttribute("aria-current", "location");
   await expect(page.getByTestId("hotel-total")).toHaveText("CNY 2266.09");
   await expect(page.getByTestId("hotel-commute")).toHaveText("88 分钟");

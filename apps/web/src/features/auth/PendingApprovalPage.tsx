@@ -48,8 +48,8 @@ export function PendingApprovalPage({ onAuthenticated, onLogout }: { onAuthentic
       <p className="auth-status" role="status">{message}</p>
       {memberUid ? <p className="auth-verification">把身份校验码 <code>{memberVerificationCode(memberUid)}</code> 通过飞书私聊或当面告诉管理员；不要转发给其他人。</p> : null}
       <div className="auth-actions">
-        <button className="auth-secondary" type="button" disabled={isLeaving} onClick={() => void refresh()}>重新检查状态</button>
-        {onLogout ? <button className="auth-secondary" type="button" disabled={isLeaving} onClick={() => void leave()}>{isLeaving ? "正在退出…" : "退出登录"}</button> : null}
+        <button className="auth-secondary control-button control-button--secondary" type="button" disabled={isLeaving} onClick={() => void refresh()}>重新检查状态</button>
+        {onLogout ? <button className="control-button control-button--text" type="button" aria-busy={isLeaving} disabled={isLeaving} onClick={() => void leave()}>{isLeaving ? "正在退出…" : "退出登录"}</button> : null}
       </div>
     </AuthShell>
   );

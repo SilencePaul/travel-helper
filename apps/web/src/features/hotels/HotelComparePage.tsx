@@ -62,7 +62,7 @@ export function HotelComparePage({ trip, onSelectHotel, onBack, routeService }: 
 
   return (
     <main className="hotel-compare narrow-page">
-      <button type="button" className="back-button" onClick={onBack}>← 返回行程总览</button>
+      <button type="button" className="back-button control-button control-button--text" onClick={onBack}>← 返回行程总览</button>
       <header>
         <p className="eyebrow">香港 · D3 住宿比较</p>
         <h1>住得近，玩得松</h1>

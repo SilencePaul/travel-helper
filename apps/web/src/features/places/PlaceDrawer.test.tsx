@@ -38,8 +38,8 @@ test("restaurant drawer shows sourced food details and navigation", async () => 
   expect(screen.getByText("两杯咖啡预算 HK$90–120")).toBeVisible();
   expect(screen.getByText("Caffè Latte")).toBeVisible();
   expect(screen.getByRole("link", { name: /官方资料.*2026年8月26日/ })).toBeVisible();
-  expect(screen.getByRole("link", { name: "小红书搜索" })).toBeVisible();
-  const navigation = screen.getByRole("link", { name: "开始导航" });
+  expect(screen.getByRole("link", { name: "小红书搜索（新窗口）" })).toBeVisible();
+  const navigation = screen.getByRole("link", { name: "开始导航（新窗口）" });
   expect(navigation).toHaveAttribute("href", expect.stringContaining("uri.amap.com/navigation"));
   expect(navigation).toHaveAttribute("href", expect.stringContaining("callnative=1"));
   await user.click(navigation);
@@ -51,8 +51,8 @@ test("attraction drawer shows visit details and official booking", () => {
   expect(screen.getByText("预计停留 120 分钟")).toBeVisible();
   expect(screen.getByText("日落前抵达，衔接夜景")).toBeVisible();
   expect(screen.getByText("卢吉道观景位")).toBeVisible();
-  expect(screen.getByRole("link", { name: "雨天备选：凌霄阁室内区域" })).toHaveAttribute("href", "https://example.com/official");
-  expect(screen.getByRole("link", { name: "官方订票" })).toHaveAttribute("href", attraction.bookingUrl);
+  expect(screen.getByRole("link", { name: "雨天备选：凌霄阁室内区域（新窗口）" })).toHaveAttribute("href", "https://example.com/official");
+  expect(screen.getByRole("link", { name: "官方订票（新窗口）" })).toHaveAttribute("href", attraction.bookingUrl);
 });
 
 test("modal drawer isolates the app and locks document scroll until close", () => {
@@ -88,8 +88,13 @@ test("mobile drawer exposes partial and full states", async () => {
   render(<PlaceDrawer place={restaurant} triggerRef={{ current: null }} onClose={() => undefined} mobile />);
   const dialog = screen.getByRole("dialog");
   expect(dialog).toHaveAttribute("data-drawer-state", "partial");
-  await user.click(screen.getByRole("button", { name: "展开详情" }));
+  const expand = screen.getByRole("button", { name: "展开详情" });
+  const controlledRegion = document.getElementById(expand.getAttribute("aria-controls") ?? "");
+  expect(expand).toHaveAttribute("aria-expanded", "false");
+  expect(controlledRegion).toBeInTheDocument();
+  await user.click(expand);
   expect(dialog).toHaveAttribute("data-drawer-state", "full");
+  expect(screen.getByRole("button", { name: "收起详情" })).toHaveAttribute("aria-expanded", "true");
   await user.click(screen.getByRole("button", { name: "关闭详情" }));
   expect(dialog).not.toBeInTheDocument();
 });

@@ -1,5 +1,5 @@
-import { BrowserRouter, Route, Routes, useNavigate, useParams } from "react-router-dom";
-import { useState } from "react";
+import { BrowserRouter, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
+import { useLayoutEffect, useRef, useState } from "react";
 import {
   appendDay,
   duplicateDay,
@@ -60,6 +60,25 @@ function withDayRange(trip: Trip, days: TravelDay[], unscheduledItemIds = trip.u
     endDate: days.at(-1)?.date ?? trip.startDate,
     unscheduledItemIds,
   };
+}
+
+function RouteFocus() {
+  const { pathname, search } = useLocation();
+  const mounted = useRef(false);
+  useLayoutEffect(() => {
+    if (!mounted.current) {
+      mounted.current = true;
+      return;
+    }
+    const frame = requestAnimationFrame(() => {
+      const destination = document.querySelector<HTMLElement>(".app-shell main");
+      if (!destination) return;
+      destination.tabIndex = -1;
+      destination.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [pathname, search]);
+  return null;
 }
 
 function TripRoutes({ createDayId = () => "day-ui", routeService, member, onUnauthorized, onLogout, decisionRepository, enforceAdmin, showOfflineStatus }: Pick<AppProps, "createDayId" | "routeService" | "member" | "onUnauthorized" | "onLogout" | "decisionRepository"> & { enforceAdmin: boolean; showOfflineStatus: boolean }) {
@@ -183,6 +202,7 @@ function TripRoutes({ createDayId = () => "day-ui", routeService, member, onUnau
     <div className="app-shell">
       <div className="sync-bar" role="status">{syncState}</div>
       {showOfflineStatus ? <OfflineStatus pendingCount={pendingCommandCount} unassignedCount={unassignedOfflineCount} conflictPaused={conflictPaused} /> : null}
+      <RouteFocus />
       <Routes>
         <Route
           path="/"

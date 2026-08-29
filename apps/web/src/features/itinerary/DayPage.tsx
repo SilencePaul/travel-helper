@@ -80,14 +80,14 @@ export function DayPage({ trip, dayId, onBack, mapAdapter = browserMapAdapter, r
       <main className="day-page narrow-page">
         <p className="eyebrow">行程未找到</p>
         <h1>这一天不在当前旅行计划中</h1>
-        <button type="button" onClick={onBack}>返回行程总览</button>
+        <button className="control-button control-button--text" type="button" onClick={onBack}>返回行程总览</button>
       </main>
     );
   }
 
   return (
     <main className="day-page narrow-page">
-      <button type="button" className="back-button" onClick={onBack}>
+      <button type="button" className="back-button control-button control-button--text" onClick={onBack}>
         ← 返回行程总览
       </button>
       <header>

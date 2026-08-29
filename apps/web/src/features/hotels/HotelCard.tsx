@@ -29,10 +29,10 @@ export function HotelCard({ hotel, nights, selected, onSelect }: HotelCardProps)
       </dl>
       <p className="hotel-caveat">{hotel.nightlyPrice.scope}</p>
       <p className="hotel-source">原始分数：价格 {hotel.priceScore.toFixed(3)} · 通勤 {hotel.commuteComplete ? hotel.commuteScore?.toFixed(3) : "待全部高德路线确认"}；通勤 {hotel.commuteComplete ? `${hotel.totalCommuteMinutes} 分钟（高德已确认）` : "待高德路线确认"}</p>
-      <p className="hotel-source">平台：<a href={hotel.nightlyPrice.source.url} target="_blank" rel="noreferrer">{hotel.nightlyPrice.source.platform} · {hotel.nightlyPrice.source.label}</a> · 核查于 {new Date(hotel.nightlyPrice.source.checkedAt).toLocaleDateString("zh-CN")}</p>
+      <p className="hotel-source">平台：<a className="control-button control-button--text" aria-label={`${hotel.nightlyPrice.source.platform} · ${hotel.nightlyPrice.source.label}（新窗口）`} href={hotel.nightlyPrice.source.url} target="_blank" rel="noreferrer">{hotel.nightlyPrice.source.platform} · {hotel.nightlyPrice.source.label}</a> · 核查于 {new Date(hotel.nightlyPrice.source.checkedAt).toLocaleDateString("zh-CN")}</p>
       <p className="hotel-strength">适合：{hotel.strengths.join("；")}</p>
       <p className="hotel-drawback">留意：{hotel.drawbacks.join("；")}</p>
-      <button type="button" className="hotel-select" aria-pressed={selected} onClick={onSelect}>
+      <button type="button" className="hotel-select control-button control-button--primary" aria-pressed={selected} onClick={onSelect}>
         {selected ? "已选此酒店" : "选择此酒店"}
       </button>
     </article>

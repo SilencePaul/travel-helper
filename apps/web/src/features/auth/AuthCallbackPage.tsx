@@ -50,7 +50,7 @@ export function AuthCallbackPage({ onAuthenticated }: { onAuthenticated?: (membe
   }, [completeLogin]);
   return (
     <AuthShell step="02 · 身份确认" title="正在核对旅行通行证" description="飞书授权已经完成，我们正在同步这趟旅行的成员身份。">
-      {failed ? <><p className="auth-error" role="alert">{message}</p><div className="auth-actions"><button className="auth-secondary" type="button" onClick={() => void completeLogin()}>重试完成登录</button><button className="auth-secondary" type="button" onClick={() => startLogin()}>重新使用飞书登录</button></div></> : <div className="auth-progress" role="status"><span aria-hidden="true" /><span aria-hidden="true" /><span aria-hidden="true" /><b>{message}</b></div>}
+      {failed ? <><p className="auth-error" role="alert">{message}</p><div className="auth-actions"><button className="auth-secondary control-button control-button--secondary" type="button" onClick={() => void completeLogin()}>重试完成登录</button><button className="auth-secondary control-button control-button--secondary" type="button" onClick={() => startLogin()}>重新使用飞书登录</button></div></> : <div className="auth-progress" role="status"><span aria-hidden="true" /><span aria-hidden="true" /><span aria-hidden="true" /><b>{message}</b></div>}
     </AuthShell>
   );
 }

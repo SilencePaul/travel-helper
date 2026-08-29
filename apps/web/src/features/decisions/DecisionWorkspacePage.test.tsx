@@ -1,6 +1,6 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { DecisionWorkspace, DecisionWorkspaceRepository, Member, Trip } from "@travel/contracts";
+import type { DecisionCommandResult, DecisionWorkspace, DecisionWorkspaceRepository, Member, Trip } from "@travel/contracts";
 import { expect, test, vi } from "vitest";
 import { DecisionWorkspacePage } from "./DecisionWorkspacePage";
 
@@ -50,4 +50,46 @@ test("loads the decision workspace and saves the current member preference", asy
     },
     freeText: { mustHave: "有窗", mustAvoid: "", note: "" },
   });
+});
+
+test("disables preference fields while saving and exposes saving and success as statuses", async () => {
+  let finishCommand!: (result: DecisionCommandResult) => void;
+  const command = vi.fn(() => new Promise<DecisionCommandResult>((resolve) => { finishCommand = resolve; }));
+  const repository = { load: vi.fn().mockResolvedValue(workspace), command, events: vi.fn(), subscribe: vi.fn(() => () => undefined) } satisfies DecisionWorkspaceRepository;
+  const user = userEvent.setup();
+  render(<DecisionWorkspacePage repository={repository} trip={trip} member={member} onBack={() => undefined} newIdempotencyKey={() => "request-001"} />);
+
+  await screen.findByRole("heading", { name: "两个人的偏好，正在汇成一张路线" });
+  await user.click(screen.getByRole("button", { name: "保存我的偏好" }));
+
+  expect(screen.getByRole("status")).toHaveTextContent("正在保存共同决定");
+  for (const field of [...screen.getAllByRole("combobox"), ...screen.getAllByRole("textbox")]) {
+    expect(field).toBeDisabled();
+  }
+
+  await act(async () => finishCommand({ ok: true, action: "upsertPreference", data: workspace.preferences[0]! }));
+  await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("已保存并同步给同行者"));
+  expect(screen.getByLabelText("旅行节奏")).toBeEnabled();
+});
+
+test("announces a workspace load failure as an alert", async () => {
+  const repository = { load: vi.fn().mockRejectedValue(new Error("offline")), command: vi.fn(), events: vi.fn(), subscribe: vi.fn(() => () => undefined) } satisfies DecisionWorkspaceRepository;
+  render(<DecisionWorkspacePage repository={repository} trip={trip} member={member} onBack={() => undefined} />);
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("共同决定暂时无法加载");
+});
+
+test.each([
+  [{ ok: false as const, error: "INVALID_REQUEST" as const }, "保存失败：INVALID_REQUEST"],
+  [{ ok: false as const, error: "VERSION_CONFLICT" as const }, "内容已被同行者更新"],
+])("announces command failure %s as an alert", async (result, expectedMessage) => {
+  const repository = { load: vi.fn().mockResolvedValue(workspace), command: vi.fn().mockResolvedValue(result), events: vi.fn(), subscribe: vi.fn(() => () => undefined) } satisfies DecisionWorkspaceRepository;
+  const user = userEvent.setup();
+  render(<DecisionWorkspacePage repository={repository} trip={trip} member={member} onBack={() => undefined} />);
+
+  await screen.findByRole("heading", { name: "两个人的偏好，正在汇成一张路线" });
+  await user.click(screen.getByRole("button", { name: "保存我的偏好" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(expectedMessage);
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
 });
