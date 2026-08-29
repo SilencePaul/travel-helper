@@ -12,6 +12,52 @@
 }
 
 .decision-page { margin: 0 auto; max-width: 88rem; padding: 1rem clamp(0.75rem, 2vw, 2rem) 4rem; }
+.decision-access-page {
+  --decision-access-green: #183e34;
+  --decision-access-ink: #183229;
+  --decision-access-muted: #627168;
+  --decision-access-paper: #fffaf0;
+  --decision-access-field: #e8e0cd;
+  --decision-access-line: #aaa494;
+  --decision-access-coral: #c84f31;
+  box-sizing: border-box;
+  min-height: calc(100dvh - 2rem);
+  color: var(--decision-access-ink);
+  font-family: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+.decision-access-nav { align-items: center; display: flex; justify-content: space-between; gap: 1rem; margin-bottom: clamp(3rem, 8vh, 6rem); }
+.decision-access-nav button { padding: 0.35rem 0 0.45rem; border: 0; border-bottom: 1px solid currentColor; color: var(--decision-access-green); background: transparent; font: inherit; font-size: 0.78rem; font-weight: 700; }
+.decision-access-nav button:hover { color: var(--decision-access-coral); }
+.decision-access-nav button:focus-visible { outline: 3px solid var(--decision-access-coral); outline-offset: 4px; }
+.decision-access-nav > span { color: var(--decision-access-muted); font-size: 0.65rem; font-weight: 700; letter-spacing: 0.14em; text-align: right; }
+.decision-access-layout { align-items: center; display: grid; gap: clamp(3rem, 8vw, 7.5rem); grid-template-columns: minmax(0, 1.08fr) minmax(20rem, 0.72fr); margin: 0 auto; max-width: 72rem; }
+.decision-access-story { max-width: 42rem; }
+.decision-access-kicker { margin: 0 0 1.5rem; color: var(--decision-access-muted); font-size: 0.7rem; font-weight: 800; letter-spacing: 0.16em; }
+.decision-access-story h1 { margin: 0; color: var(--decision-access-green); font-family: "Songti SC", "STSong", "Noto Serif CJK SC", serif; font-size: clamp(3rem, 6vw, 5.75rem); line-height: 1.03; letter-spacing: -0.065em; }
+.decision-access-story h1 em { display: block; color: var(--decision-access-coral); font-style: normal; }
+.decision-access-status { max-width: 32rem; margin: 2rem 0 0; color: var(--decision-access-green); font-size: 1rem; font-weight: 700; line-height: 1.7; }
+.decision-access-note { max-width: 34rem; margin: 0.75rem 0 0; color: var(--decision-access-muted); font-size: 0.88rem; line-height: 1.8; }
+.decision-access-ticket { position: relative; min-width: 0; padding: clamp(1.5rem, 3vw, 2.35rem); border: 1px solid rgb(24 50 41 / 26%); border-radius: 1.5rem; background: var(--decision-access-paper); box-shadow: 0 1.75rem 4.5rem rgb(47 54 42 / 14%); transform: rotate(1deg); animation: decision-access-arrive 480ms cubic-bezier(.2, .8, .2, 1) both; }
+.decision-access-notch { position: absolute; top: 47%; width: 1.5rem; height: 1.5rem; border: 1px solid rgb(24 50 41 / 14%); border-radius: 50%; background: var(--decision-access-field); }
+.decision-access-notch:first-child { left: -0.82rem; }
+.decision-access-notch:nth-child(2) { right: -0.82rem; }
+.decision-access-ticket-header { display: flex; justify-content: space-between; gap: 1rem; padding-bottom: 1.3rem; border-bottom: 1px dashed var(--decision-access-line); color: var(--decision-access-muted); font-size: 0.61rem; font-weight: 800; letter-spacing: 0.15em; }
+.decision-access-travelers { align-items: center; display: grid; grid-template-columns: 1fr auto 1fr; gap: 0.75rem; padding: 1.55rem 0; border-bottom: 1px dashed #b7b2a4; }
+.decision-access-travelers div { display: grid; gap: 0.2rem; }
+.decision-access-travelers div:last-child { text-align: right; }
+.decision-access-travelers small { color: var(--decision-access-muted); font-size: 0.55rem; font-weight: 800; letter-spacing: 0.12em; }
+.decision-access-travelers strong { color: var(--decision-access-green); font-family: "Songti SC", "STSong", serif; font-size: clamp(1.45rem, 3vw, 2rem); }
+.decision-access-travelers span { color: var(--decision-access-muted); font-size: 0.7rem; }
+.decision-access-travelers b { color: var(--decision-access-coral); font-size: 1rem; letter-spacing: 0.06em; }
+.decision-access-requirements { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 0; padding: 1.45rem 0 0; }
+.decision-access-requirements div:last-child { text-align: right; }
+.decision-access-requirements dt { color: var(--decision-access-muted); font-size: 0.58rem; font-weight: 800; letter-spacing: 0.13em; text-transform: uppercase; }
+.decision-access-requirements dd { margin: 0.35rem 0 0; color: var(--decision-access-green); font-size: 0.75rem; font-weight: 700; }
+.decision-access-stamp { position: absolute; right: clamp(1.25rem, 3vw, 2rem); bottom: -2.8rem; display: grid; width: 5.8rem; height: 5.8rem; place-content: center; gap: 0.2rem; border: 2px solid rgb(200 79 49 / 76%); border-radius: 50%; color: #b4452d; text-align: center; transform: rotate(-9deg); }
+.decision-access-stamp::after { position: absolute; inset: 0.32rem; border: 1px dashed rgb(200 79 49 / 68%); border-radius: inherit; content: ""; }
+.decision-access-stamp span { font-family: "Songti SC", "STSong", serif; font-size: 1rem; font-weight: 700; }
+.decision-access-stamp small { font-size: 0.48rem; font-weight: 800; letter-spacing: 0.08em; }
+@keyframes decision-access-arrive { from { opacity: 0; transform: translateY(0.8rem) rotate(1deg); } to { opacity: 1; transform: translateY(0) rotate(1deg); } }
 .decision-page-nav { align-items: center; display: flex; justify-content: space-between; margin-bottom: 1rem; }
 .decision-page-nav button,
 .decision-preference-form button,
@@ -89,6 +135,14 @@
 .decision-confirmation--tentative { color: #9a6832; }
 
 @media (max-width: 700px) {
+  .decision-access-page { min-height: calc(100dvh - 1rem); padding-bottom: 5rem; }
+  .decision-access-nav { align-items: flex-start; margin-bottom: 3rem; }
+  .decision-access-nav > span { max-width: 10rem; }
+  .decision-access-layout { gap: 2.75rem; grid-template-columns: 1fr; }
+  .decision-access-story h1 { font-size: clamp(2.75rem, 14vw, 4rem); }
+  .decision-access-story h1 em { font-size: 0.84em; white-space: nowrap; }
+  .decision-access-ticket { width: min(25rem, calc(100% - 0.9rem)); justify-self: center; padding: 1.4rem; transform: rotate(0.35deg); }
+  .decision-access-requirements { gap: 0.5rem; }
   .decision-preference-form { grid-template-columns: 1fr; }
   .decision-workspace { margin-inline: -0.25rem; padding: 1.1rem; }
   .decision-preference-grid,
@@ -98,5 +152,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .decision-access-ticket { animation: none; transform: none; }
   .decision-candidate-rail { scroll-behavior: auto; }
 }

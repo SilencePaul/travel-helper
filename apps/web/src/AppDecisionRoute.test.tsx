@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import type { DecisionWorkspaceRepository, Member } from "@travel/contracts";
 import { expect, test, vi } from "vitest";
@@ -15,4 +15,14 @@ test("the trip navigation exposes the authenticated decision workspace route", a
 
   expect(await screen.findByRole("heading", { name: "两个人的偏好，正在汇成一张路线" })).toBeVisible();
   expect(decisionRepository.load).toHaveBeenCalledWith(seed.id);
+});
+
+test("the decision route stays protected until a shared trip member is available", async () => {
+  render(<MemoryRouter initialEntries={["/decisions"]}><TripApp repository={new LocalTripRepository(seed)} /></MemoryRouter>);
+
+  expect(await screen.findByRole("heading", { name: "共同决定，需要两张同行票" })).toBeVisible();
+
+  fireEvent.click(screen.getByRole("button", { name: "返回行程" }));
+
+  expect(await screen.findByRole("heading", { name: "两个人，一条向南的路线。" })).toBeVisible();
 });

@@ -26,6 +26,7 @@ import "./styles/global.css";
 import { MemberManagementPage } from "./features/members/MemberManagementPage";
 import { OfflineStatus } from "./components/OfflineStatus";
 import { CloudBaseDecisionWorkspaceRepository } from "./infrastructure/cloudbaseDecisionWorkspaceRepository";
+import { DecisionAccessGuard } from "./features/decisions/DecisionAccessGuard";
 import { DecisionWorkspacePage } from "./features/decisions/DecisionWorkspacePage";
 
 type AppProps = {
@@ -210,7 +211,7 @@ function TripRoutes({ createDayId = () => "day-ui", routeService, member, onUnau
         <Route path="/hotels" element={<HotelComparePage trip={trip} routeService={routeService} onSelectHotel={selectHotel} onBack={() => navigate("/")} />} />
         <Route path="/decisions" element={decisionRepository && member
           ? <DecisionWorkspacePage repository={decisionRepository} trip={trip} member={member} onBack={() => navigate("/")} />
-          : <main className="decision-page"><button type="button" onClick={() => navigate("/")}>返回行程</button><p role="status">共同决定仅在两位成员登录共享行程后启用。</p></main>} />
+          : <DecisionAccessGuard onBack={() => navigate("/")} />} />
         <Route path="/admin/members" element={enforceAdmin && member?.role !== "admin" ? <p role="alert">无权访问</p> : <MemberManagementPage onUnauthorized={onUnauthorized} onBack={() => navigate("/", { replace: true })} />} />
         <Route
           path="/day/:dayId"
