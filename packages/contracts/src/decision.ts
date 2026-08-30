@@ -297,6 +297,7 @@ export type AgentCommandResult =
 
 export interface DecisionWorkspaceRepository {
   load(tripId: string): Promise<DecisionWorkspace>;
+  refresh(tripId: string): Promise<DecisionWorkspace>;
   command(input: DecisionCommand): Promise<DecisionCommandResult>;
   events(tripId: string, afterCursor: number): Promise<{ events: DecisionEvent[]; cursor: number }>;
   subscribe(tripId: string, onChange: (workspace: DecisionWorkspace) => void): () => void;
