@@ -761,6 +761,24 @@ test("a trip member creates and revokes a scoped expiring agent run", async () =
   assert.deepEqual(created, { agentRunId: "agent-run-1", expiresAt: "2026-08-28T07:15:00.000Z" });
   assert.equal(db.data.trip_agent_runs.get("agent-run-1").status, "pending_claim");
   assert.equal(db.data.trip_agent_runs.get("agent-run-1").lastSequence, 0);
+  const pendingStatus = await commands.execute({
+    action: "getAgentRunStatus",
+    tripId: "trip-2026-autumn",
+    agentRunId: "agent-run-1",
+  }, "fs_member");
+  assert.deepEqual(pendingStatus, {
+    agentRunId: "agent-run-1",
+    tripId: "trip-2026-autumn",
+    status: "pending_claim",
+    scope: ["submitProposalBatch", "appendEvidenceSnapshot"],
+    revision: 1,
+    nextSequence: 1,
+    createdAt: "2026-08-28T07:00:00.000Z",
+    expiresAt: "2026-08-28T07:15:00.000Z",
+  });
+  assert.equal("publicKeyJwk" in pendingStatus, false);
+  assert.equal("pairingCodeHash" in pendingStatus, false);
+  assert.equal("clientNonce" in pendingStatus, false);
 
   const revoked = await commands.execute({
     action: "revokeAgentRun",
@@ -772,9 +790,67 @@ test("a trip member creates and revokes a scoped expiring agent run", async () =
   assert.deepEqual(revoked, { agentRunId: "agent-run-1", revokedAt: "2026-08-28T07:00:00.000Z" });
   assert.equal(db.data.trip_agent_runs.get("agent-run-1").status, "revoked");
   assert.equal(db.data.trip_agent_runs.get("agent-run-1").revision, 2);
+  assert.equal((await commands.execute({ action: "getAgentRunStatus", tripId: "trip-2026-autumn", agentRunId: "agent-run-1" }, "fs_member")).status, "revoked");
   assert.deepEqual(db.data.decisionAudits.map(({ command }) => command), ["createAgentRun", "revokeAgentRun"]);
   assert.equal(JSON.stringify(db.data.decisionAudits).includes("pairingCodeHash"), false);
   assert.equal(JSON.stringify(db.data.decisionAudits).includes("publicKeyJwk"), false);
+});
+
+test("a member cannot query a different trip's AgentRun through their own trip", async () => {
+  const tripA = { ...trip(), id: "trip-a", memberUids: ["fs_member"] };
+  const tripB = { ...trip(), id: "trip-b", memberUids: ["fs_other"] };
+  const db = createDb({ members: [member("fs_member", "member"), member("fs_other", "member")], trips: [tripA, tripB] });
+  db.data.trip_agent_runs.set("agent-run-b", {
+    id: "agent-run-b",
+    tripId: "trip-b",
+    creatorUid: "fs_other",
+    publicKeyJwk: { kty: "EC", crv: "P-256", x: "x", y: "y" },
+    scope: ["submitProposalBatch"],
+    status: "claimed",
+    lastSequence: 0,
+    revision: 2,
+    createdAt: "2026-08-28T07:00:00.000Z",
+    expiresAt: "2099-08-28T07:15:00.000Z",
+  });
+  const commands = createTripCommands({ db });
+
+  await assert.rejects(
+    () => commands.execute({ action: "getAgentRunStatus", tripId: "trip-a", agentRunId: "agent-run-b" }, "fs_member"),
+    { code: "FORBIDDEN" },
+  );
+});
+
+test("agent run revoke conflicts include only the latest safe projection", async () => {
+  const db = createDb({
+    members: [member("fs_member", "member")],
+    trips: [{ ...trip(), memberUids: ["fs_member"] }],
+  });
+  db.data.trip_agent_runs.set("agent-run-1", {
+    id: "agent-run-1",
+    tripId: "trip-2026-autumn",
+    creatorUid: "fs_member",
+    publicKeyJwk: { kty: "EC", crv: "P-256", x: "x", y: "y" },
+    pairingCodeHash: "secret-hash",
+    scope: ["submitProposalBatch"],
+    status: "pending_claim",
+    lastSequence: 0,
+    revision: 2,
+    createdAt: "2026-08-28T07:00:00.000Z",
+    expiresAt: "2026-08-28T07:15:00.000Z",
+  });
+  const commands = createTripCommands({ db, now: () => new Date("2026-08-28T07:05:00.000Z") });
+
+  await assert.rejects(
+    () => commands.execute({ action: "revokeAgentRun", tripId: "trip-2026-autumn", agentRunId: "agent-run-1", expectedRevision: 1, idempotencyKey: "revoke-conflict-001" }, "fs_member"),
+    (error) => {
+      assert.equal(error.code, "VERSION_CONFLICT");
+      assert.equal(error.latest.revision, 2);
+      assert.equal(error.latest.status, "pending_claim");
+      assert.equal("publicKeyJwk" in error.latest, false);
+      assert.equal("pairingCodeHash" in error.latest, false);
+      return true;
+    },
+  );
 });
 
 test("a claimed scoped agent submits an atomic two-candidate proposal batch", async () => {
@@ -822,16 +898,61 @@ test("a claimed scoped agent submits an atomic two-candidate proposal batch", as
     payload: { round: 1, candidates: [proposal("餐厅 A"), proposal("餐厅 B")] },
   };
   const result = await commands.executeAgent({ ...signed, signature: agentSignature(privateKey, signed) });
+  const eventCountAfterFirstSubmit = db.data.trip_decision_events.size;
+  const auditCountAfterFirstSubmit = db.data.decisionAudits.length;
+  const replay = await commands.executeAgent({ ...signed, signature: agentSignature(privateKey, signed) });
 
   assert.equal(result.candidates.length, 2);
+  assert.equal(result.replayed, false);
+  assert.equal(replay.replayed, true);
+  assert.deepEqual(replay.candidates.map(({ id }) => id), result.candidates.map(({ id }) => id));
   assert.equal(result.candidates[0].verificationState, "candidate");
   assert.equal(result.candidates[0].decisionState, "none");
   assert.equal(db.data.trip_candidates.size, 2);
   assert.equal(db.data.trip_evidence_snapshots.size, 2);
+  assert.equal(db.data.trip_decision_events.size, eventCountAfterFirstSubmit);
+  assert.equal(db.data.decisionAudits.length, auditCountAfterFirstSubmit);
   assert.equal(db.data.trip_agent_runs.get("agent-run-1").lastSequence, 1);
   const workspace = await commands.execute({ action: "getDecisionWorkspace", tripId: "trip-2026-autumn" }, "fs_member");
   assert.equal(workspace.candidates.length, 2);
   assert.equal(workspace.evidence.length, 2);
+
+  const contextCommand = {
+    agentRunId: "agent-run-1",
+    sequence: 2,
+    idempotencyKey: "decision-context-001",
+    action: "getDecisionContext",
+    payload: {},
+  };
+  const context = await commands.executeAgent({ ...contextCommand, signature: agentSignature(privateKey, contextCommand) });
+  assert.equal(context.context.tripId, "trip-2026-autumn");
+  assert.equal(context.context.candidates.length, 2);
+  assert.equal(JSON.stringify(context.context).includes("publicKeyJwk"), false);
+  assert.equal(JSON.stringify(context.context).includes("pairingCodeHash"), false);
+
+  const activeStatus = await commands.execute({
+    action: "getAgentRunStatus",
+    tripId: "trip-2026-autumn",
+    agentRunId: "agent-run-1",
+  }, "fs_member");
+  await commands.execute({
+    action: "revokeAgentRun",
+    tripId: "trip-2026-autumn",
+    agentRunId: "agent-run-1",
+    expectedRevision: activeStatus.revision,
+    idempotencyKey: "revoke-active-agent-001",
+  }, "fs_member");
+  const afterRevoke = {
+    agentRunId: "agent-run-1",
+    sequence: 3,
+    idempotencyKey: "context-after-revoke-001",
+    action: "getDecisionContext",
+    payload: {},
+  };
+  await assert.rejects(
+    () => commands.executeAgent({ ...afterRevoke, signature: agentSignature(privateKey, afterRevoke) }),
+    { code: "INVALID_AGENT_CLAIM" },
+  );
 });
 
 test("agent web evidence is server-verified, changed evidence becomes stale, and blockage is explicit", async () => {
@@ -859,7 +980,7 @@ test("agent web evidence is server-verified, changed evidence becomes stale, and
     revision: 2,
     expiresAt: "2026-08-28T08:00:00.000Z",
   });
-  const evidenceIds = ["evidence-web-1", "evidence-stale-1"];
+  const evidenceIds = ["evidence-web-1", "evidence-stale-1", "evidence-recovered-1"];
   const commands = createTripCommands({ db, now: () => new Date("2026-08-28T07:10:00.000Z"), randomId: () => evidenceIds.shift() });
   const evidenceCommand = {
     agentRunId: "agent-run-1",
@@ -944,8 +1065,24 @@ test("agent web evidence is server-verified, changed evidence becomes stale, and
   };
   const blocked = await commands.executeAgent({ ...blockedCommand, signature: agentSignature(privateKey, blockedCommand) });
   assert.equal(blocked.candidate.verificationState, "needs_takeover");
-  assert.equal(blocked.candidate.changeReason, "captcha");
+  assert.equal(blocked.candidate.verificationBlockReason, "captcha");
+  assert.equal(blocked.candidate.changeReason, undefined);
   assert.equal(blocked.candidate.revision, 5);
+
+  const recoveredCommand = {
+    agentRunId: "agent-run-1",
+    sequence: 4,
+    idempotencyKey: "web-recovered-001",
+    action: "appendEvidenceSnapshot",
+    payload: {
+      candidateId: "candidate-1",
+      expectedCandidateRevision: 5,
+      evidence: { ...evidenceCommand.payload.evidence, capturedAt: "2026-08-28T07:09:00.000Z" },
+    },
+  };
+  const recovered = await commands.executeAgent({ ...recoveredCommand, signature: agentSignature(privateKey, recoveredCommand) });
+  assert.equal(recovered.candidate.verificationState, "web_verified");
+  assert.equal(recovered.candidate.verificationBlockReason, undefined);
 });
 
 test("a scoped agent generates a summary only for the supplied current revisions", async () => {

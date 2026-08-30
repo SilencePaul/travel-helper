@@ -671,3 +671,13 @@ test("keeps the disabled confirmation secondary until a candidate is placed", as
   expect(confirm).toHaveClass("control-button--secondary");
   expect(confirm).not.toHaveClass("control-button--primary");
 });
+
+test("mounts the injected Desktop Bridge control without coupling it to workspace loading", async () => {
+  const repository = { load: vi.fn().mockResolvedValue(workspace), refresh: vi.fn().mockResolvedValue(workspace), command: vi.fn(), events: vi.fn(), subscribe: vi.fn(() => () => undefined) } satisfies DecisionWorkspaceRepository;
+  const agentBridge = { prepare: vi.fn(), claim: vi.fn() };
+
+  render(<DecisionWorkspacePage repository={repository} trip={trip} member={member} agentBridge={agentBridge} onBack={() => undefined} />);
+
+  expect(await screen.findByRole("button", { name: "准备本机 Agent" })).toBeVisible();
+  expect(screen.getByRole("heading", { name: "Agent 尚未启动" })).toBeVisible();
+});

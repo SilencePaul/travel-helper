@@ -87,3 +87,89 @@ test("a tampered command signature and an ungranted scope are rejected", async (
     { code: "AGENT_SCOPE_FORBIDDEN" },
   );
 });
+
+test("an exact claim retry returns the original result after expiry or revocation without storing the pairing code", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const state = createTransaction(pendingRun(publicKey.export({ format: "jwk" })));
+  let clock = new Date("2026-08-28T00:05:00.000Z");
+  const bridge = createDecisionAgentBridge({ now: () => clock });
+  const claim = { agentRunId: "agent-run-1", pairingCode: "pairing-code", clientNonce: "nonce-001" };
+  const input = { ...claim, signature: signature(privateKey, claim) };
+
+  const first = await bridge.claim(state.transaction, input);
+  state.runs.get("agent-run-1").status = "revoked";
+  clock = new Date("2026-08-28T00:20:00.000Z");
+  const replay = await bridge.claim(state.transaction, input);
+
+  assert.deepEqual(replay, first);
+  assert.equal(JSON.stringify(state.runs.get("agent-run-1")).includes("pairing-code"), false);
+  const changed = { ...claim, clientNonce: "nonce-002" };
+  await assert.rejects(
+    () => bridge.claim(state.transaction, { ...changed, signature: signature(privateKey, changed) }),
+    { code: "INVALID_AGENT_CLAIM" },
+  );
+});
+
+test("a claim retry accepts a fresh valid ECDSA signature but still verifies every replay", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const state = createTransaction(pendingRun(publicKey.export({ format: "jwk" })));
+  const bridge = createDecisionAgentBridge({ now: () => new Date("2026-08-28T00:05:00.000Z") });
+  const claim = { agentRunId: "agent-run-1", pairingCode: "pairing-code", clientNonce: "nonce-001" };
+  const firstSignature = signature(privateKey, claim);
+  let retrySignature = signature(privateKey, claim);
+  while (retrySignature === firstSignature) retrySignature = signature(privateKey, claim);
+
+  const first = await bridge.claim(state.transaction, { ...claim, signature: firstSignature });
+  const replay = await bridge.claim(state.transaction, { ...claim, signature: retrySignature });
+
+  assert.deepEqual(replay, first);
+  await assert.rejects(
+    () => bridge.claim(state.transaction, { ...claim, signature: "not-a-valid-signature" }),
+    { code: "INVALID_AGENT_CLAIM" },
+  );
+});
+
+test("an unknown agent run is rejected with a stable domain error", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const state = createTransaction(pendingRun(publicKey.export({ format: "jwk" })));
+  const bridge = createDecisionAgentBridge({ now: () => new Date("2026-08-28T00:05:00.000Z") });
+  const command = { agentRunId: "missing-run", sequence: 1, idempotencyKey: "proposal-001", action: "submitProposalBatch", payload: { round: 1 } };
+
+  await assert.rejects(
+    () => bridge.run(state.transaction, { ...command, signature: signature(privateKey, command) }, async () => ({})),
+    { code: "INVALID_AGENT_CLAIM" },
+  );
+});
+
+test("an exact command retry returns the original result after expiry or revocation while new writes stay rejected", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const state = createTransaction(pendingRun(publicKey.export({ format: "jwk" }), { status: "claimed", pairingCodeHash: undefined }));
+  let clock = new Date("2026-08-28T00:05:00.000Z");
+  const bridge = createDecisionAgentBridge({ now: () => clock });
+  const command = { agentRunId: "agent-run-1", sequence: 1, idempotencyKey: "proposal-001", action: "submitProposalBatch", payload: { round: 1 } };
+  const input = { ...command, signature: signature(privateKey, command) };
+  let calls = 0;
+
+  const first = await bridge.run(state.transaction, input, async () => { calls += 1; return { candidates: ["candidate-1"] }; });
+  state.runs.get("agent-run-1").status = "revoked";
+  const revokedNext = { ...command, sequence: 2, idempotencyKey: "proposal-revoked-002" };
+  await assert.rejects(
+    () => bridge.run(state.transaction, { ...revokedNext, signature: signature(privateKey, revokedNext) }, async () => ({})),
+    { code: "INVALID_AGENT_CLAIM" },
+  );
+  clock = new Date("2026-08-28T00:20:00.000Z");
+  const replay = await bridge.run(state.transaction, input, async () => { calls += 1; return { candidates: ["candidate-2"] }; });
+
+  assert.deepEqual(replay, { result: first.result, replayed: true });
+  assert.equal(calls, 1);
+  const changed = { ...command, payload: { round: 2 } };
+  await assert.rejects(
+    () => bridge.run(state.transaction, { ...changed, signature: signature(privateKey, changed) }, async () => ({})),
+    { code: "IDEMPOTENCY_KEY_REUSED" },
+  );
+  const next = { ...command, sequence: 2, idempotencyKey: "proposal-002" };
+  await assert.rejects(
+    () => bridge.run(state.transaction, { ...next, signature: signature(privateKey, next) }, async () => ({})),
+    { code: "AGENT_RUN_EXPIRED" },
+  );
+});

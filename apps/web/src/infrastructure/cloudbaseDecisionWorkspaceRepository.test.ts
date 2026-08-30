@@ -108,6 +108,25 @@ describe("CloudBaseDecisionWorkspaceRepository", () => {
     expect(callFunction).toHaveBeenCalledWith({ name: "trip-api", data: command });
   });
 
+  it("loads a safe AgentRun status through the member-authenticated trip API", async () => {
+    const status = {
+      agentRunId: "agent-run-1",
+      tripId: "trip-1",
+      status: "claimed",
+      scope: ["submitProposalBatch"],
+      revision: 2,
+      nextSequence: 1,
+      createdAt: "2026-08-28T00:00:00.000Z",
+      claimedAt: "2026-08-28T00:01:00.000Z",
+      expiresAt: "2026-08-28T00:15:00.000Z",
+    };
+    const callFunction = vi.fn().mockResolvedValue({ result: status });
+    const repository = new CloudBaseDecisionWorkspaceRepository({ callFunction, storage: memoryStorage() });
+
+    await expect(repository.getAgentRunStatus("trip-1", "agent-run-1")).resolves.toEqual(status);
+    expect(callFunction).toHaveBeenCalledWith({ name: "trip-api", data: { action: "getAgentRunStatus", tripId: "trip-1", agentRunId: "agent-run-1" } });
+  });
+
   it("reads strictly newer decision events from the supplied cursor", async () => {
     const response = { events: [], cursor: 7 };
     const callFunction = vi.fn().mockResolvedValue({ result: response });

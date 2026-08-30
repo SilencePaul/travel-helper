@@ -53,6 +53,8 @@ const workspace = {
       applicability: "10 月 5 日 · 午餐 · 2 人",
       recommendation: "把中环步行路线收在一顿不需要预订的午餐里。",
       verificationState: "needs_takeover" as const,
+      verificationBlockReason: "网页要求验证码",
+      takeoverGuidance: "请在本机浏览器完成验证后，让 Agent 重试网页核验。",
       decisionState: "none" as const,
       evidence: { source: "Google Maps", capturedAt: "2026-08-28T09:34:00.000Z", snapshot: "营业信息待网页核验" },
       feedback: [],
@@ -87,6 +89,8 @@ test("renders shared preferences and the travel-pass proposal evidence", () => {
   expect(screen.getAllByText(/最后核验 · 2026年8月28日/)).toHaveLength(2);
   expect(screen.getByText("网页已核验")).toBeVisible();
   expect(screen.getByText("需要你接管网页核验")).toBeVisible();
+  expect(screen.getByText("网页要求验证码")).toBeVisible();
+  expect(screen.getByText("请在本机浏览器完成验证后，让 Agent 重试网页核验。")).toBeVisible();
   expect(screen.getByText("快照已过期")).toBeVisible();
 });
 

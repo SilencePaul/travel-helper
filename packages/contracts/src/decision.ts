@@ -7,6 +7,8 @@ export const VerificationStateSchema = z.enum(["candidate", "web_verified", "nee
 export const DecisionStateSchema = z.enum(["none", "tentative", "confirmed"]);
 export const FeedbackKindSchema = z.enum(["like", "dislike", "comment"]);
 export const EvidenceSourceKindSchema = z.enum(["flyai", "amap", "web", "official", "manual"]);
+export const VerificationBlockReasonSchema = z.enum(["login", "captcha", "risk_control", "load_failed", "field_missing"]);
+export const AgentScopeSchema = z.enum(["submitProposalBatch", "appendEvidenceSnapshot", "reportVerificationBlocked", "generatePreferenceSummary"]);
 
 export const RevisionSchema = z.object({
   id: z.string().min(1),
@@ -43,7 +45,7 @@ export const SharedPreferenceSummarySchema = RevisionSchema.extend({
 
 const DateRangeSchema = z.object({ start: z.string().date(), end: z.string().date() });
 
-export const CandidateSchema = RevisionSchema.extend({
+const CandidateObjectSchema = RevisionSchema.extend({
   category: CandidateCategorySchema,
   entity: z.object({
     name: z.string().min(1),
@@ -64,6 +66,17 @@ export const CandidateSchema = RevisionSchema.extend({
   verificationState: VerificationStateSchema,
   decisionState: DecisionStateSchema,
   currentEvidenceId: z.string().min(1).optional(),
+  verificationBlockReason: VerificationBlockReasonSchema.optional(),
+});
+
+export const CandidateSchema = CandidateObjectSchema.superRefine((candidate, context) => {
+  if (candidate.verificationState !== "needs_takeover" && candidate.verificationBlockReason !== undefined) {
+    context.addIssue({
+      code: "custom",
+      path: ["verificationBlockReason"],
+      message: "verificationBlockReason is only valid for needs_takeover candidates",
+    });
+  }
 });
 
 export const HotelEvidenceFactsSchema = z.object({
@@ -182,6 +195,20 @@ export const DecisionWorkspaceSchema = z.object({
   fetchedAt: z.string().datetime(),
 });
 
+export const AgentRunSchema = z.object({
+  agentRunId: z.string().min(1),
+  tripId: z.string().min(1),
+  status: z.enum(["pending_claim", "claimed", "revoked", "expired"]),
+  scope: z.array(AgentScopeSchema).min(1).max(4),
+  revision: z.number().int().positive(),
+  nextSequence: z.number().int().positive(),
+  createdAt: z.string().datetime(),
+  expiresAt: z.string().datetime(),
+  claimedAt: z.string().datetime().optional(),
+  revokedAt: z.string().datetime().optional(),
+  lastUsedAt: z.string().datetime().optional(),
+}).strict();
+
 const CommandBase = {
   tripId: z.string().min(1),
   idempotencyKey: z.string().min(8).max(128),
@@ -196,7 +223,7 @@ export const DecisionCommandSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("detachTentativeFromLegacyTrip"), ...CommandBase, placementId: z.string().min(1), expectedPlacementRevision: z.number().int().nonnegative(), expectedTripVersion: z.number().int().nonnegative() }),
   z.object({ action: z.literal("recordFeedback"), ...CommandBase, candidateId: z.string().min(1), kind: FeedbackKindSchema, reason: z.string().max(2000).optional() }),
   z.object({ action: z.literal("setConfirmationReceipt"), ...CommandBase, candidateId: z.string().min(1), expectedCandidateRevision: z.number().int().nonnegative(), active: z.boolean(), reason: z.string().max(2000).optional() }),
-  z.object({ action: z.literal("createAgentRun"), ...CommandBase, publicKeyJwk: z.object({ kty: z.literal("EC"), crv: z.literal("P-256"), x: z.string().min(1), y: z.string().min(1) }), pairingCodeHash: z.string().length(43), scope: z.array(z.enum(["submitProposalBatch", "appendEvidenceSnapshot", "reportVerificationBlocked", "generatePreferenceSummary"])).min(1).max(4) }),
+  z.object({ action: z.literal("createAgentRun"), ...CommandBase, publicKeyJwk: z.object({ kty: z.literal("EC"), crv: z.literal("P-256"), x: z.string().min(1), y: z.string().min(1) }), pairingCodeHash: z.string().length(43), scope: z.array(AgentScopeSchema).min(1).max(4) }),
   z.object({ action: z.literal("revokeAgentRun"), ...CommandBase, agentRunId: z.string().min(1), expectedRevision: z.number().int().nonnegative() }),
 ]);
 
@@ -210,7 +237,7 @@ export const AgentEvidenceInputSchema = EvidenceSnapshotSchema.omit({
   fieldCompleteness: true,
 });
 
-export const AgentProposalCandidateInputSchema = CandidateSchema.omit({
+export const AgentProposalCandidateInputSchema = CandidateObjectSchema.omit({
   id: true,
   tripId: true,
   revision: true,
@@ -218,6 +245,7 @@ export const AgentProposalCandidateInputSchema = CandidateSchema.omit({
   verificationState: true,
   decisionState: true,
   currentEvidenceId: true,
+  verificationBlockReason: true,
 }).extend({ evidence: z.array(AgentEvidenceInputSchema).min(1) });
 
 const AgentEnvelope = {
@@ -230,8 +258,9 @@ const AgentEnvelope = {
 export const AgentCommandSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("submitProposalBatch"), ...AgentEnvelope, payload: z.object({ round: z.number().int().positive(), candidates: z.array(AgentProposalCandidateInputSchema).min(2).max(4) }) }),
   z.object({ action: z.literal("appendEvidenceSnapshot"), ...AgentEnvelope, payload: z.object({ candidateId: z.string().min(1), expectedCandidateRevision: z.number().int().nonnegative(), evidence: AgentEvidenceInputSchema }) }),
-  z.object({ action: z.literal("reportVerificationBlocked"), ...AgentEnvelope, payload: z.object({ candidateId: z.string().min(1), expectedCandidateRevision: z.number().int().nonnegative(), reason: z.enum(["login", "captcha", "risk_control", "load_failed", "field_missing"]) }) }),
+  z.object({ action: z.literal("reportVerificationBlocked"), ...AgentEnvelope, payload: z.object({ candidateId: z.string().min(1), expectedCandidateRevision: z.number().int().nonnegative(), reason: VerificationBlockReasonSchema }) }),
   z.object({ action: z.literal("generatePreferenceSummary"), ...AgentEnvelope, payload: z.object({ sourcePreferenceRevisions: z.record(z.string(), z.number().int().nonnegative()) }) }),
+  z.object({ action: z.literal("getDecisionContext"), ...AgentEnvelope, payload: z.object({}) }),
 ]);
 
 export const AgentClaimSchema = z.object({
@@ -248,6 +277,8 @@ export type VerificationState = z.infer<typeof VerificationStateSchema>;
 export type DecisionState = z.infer<typeof DecisionStateSchema>;
 export type FeedbackKind = z.infer<typeof FeedbackKindSchema>;
 export type EvidenceSourceKind = z.infer<typeof EvidenceSourceKindSchema>;
+export type VerificationBlockReason = z.infer<typeof VerificationBlockReasonSchema>;
+export type AgentScope = z.infer<typeof AgentScopeSchema>;
 export type PreferenceProfile = z.infer<typeof PreferenceProfileSchema>;
 export type SharedPreferenceSummary = z.infer<typeof SharedPreferenceSummarySchema>;
 export type Candidate = z.infer<typeof CandidateSchema>;
@@ -260,6 +291,7 @@ export type DecisionResource = z.infer<typeof DecisionResourceSchema>;
 export type DecisionResourceType = z.infer<typeof DecisionResourceTypeSchema>;
 export type DecisionEvent = z.infer<typeof DecisionEventSchema>;
 export type DecisionWorkspace = z.infer<typeof DecisionWorkspaceSchema>;
+export type AgentRun = z.infer<typeof AgentRunSchema>;
 export type DecisionCommand = z.infer<typeof DecisionCommandSchema>;
 export type AgentEvidenceInput = z.infer<typeof AgentEvidenceInputSchema>;
 export type AgentProposalCandidateInput = z.infer<typeof AgentProposalCandidateInputSchema>;
@@ -282,7 +314,7 @@ export type DecisionCommandFailure = {
     | "AGENT_RUN_EXPIRED" | "AGENT_SCOPE_FORBIDDEN" | "INVALID_AGENT_CLAIM"
     | "INVALID_CONFIRMATION_STATE" | "INVALID_PLACEMENT" | "INVALID_PLACEMENT_STATE"
     | "VERIFICATION_INCOMPLETE" | "CURSOR_EXPIRED";
-  latest?: DecisionResource | { tripVersion: number; trip: Trip };
+  latest?: DecisionResource | AgentRun | { tripVersion: number; trip: Trip };
 };
 
 export type DecisionCommandResult = DecisionCommandSuccess | DecisionCommandFailure;
@@ -292,13 +324,18 @@ export type AgentClaimResult =
   | DecisionCommandFailure;
 
 export type AgentCommandResult =
-  | { ok: true; action: AgentCommand["action"]; data: Candidate[] | Candidate | SharedPreferenceSummary; replayed?: boolean }
+  | { ok: true; action: "submitProposalBatch"; data: Candidate[]; replayed?: boolean }
+  | { ok: true; action: "appendEvidenceSnapshot"; data: Candidate; warning?: "VERIFICATION_INCOMPLETE"; replayed?: boolean }
+  | { ok: true; action: "reportVerificationBlocked"; data: Candidate; replayed?: boolean }
+  | { ok: true; action: "generatePreferenceSummary"; data: SharedPreferenceSummary; replayed?: boolean }
+  | { ok: true; action: "getDecisionContext"; data: DecisionWorkspace; replayed?: boolean }
   | DecisionCommandFailure;
 
 export interface DecisionWorkspaceRepository {
   load(tripId: string): Promise<DecisionWorkspace>;
   refresh(tripId: string): Promise<DecisionWorkspace>;
   command(input: DecisionCommand): Promise<DecisionCommandResult>;
+  getAgentRunStatus?(tripId: string, agentRunId: string): Promise<AgentRun>;
   events(tripId: string, afterCursor: number): Promise<{ events: DecisionEvent[]; cursor: number }>;
   subscribe(tripId: string, onChange: (workspace: DecisionWorkspace) => void): () => void;
 }

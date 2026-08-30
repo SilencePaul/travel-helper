@@ -52,6 +52,7 @@ const ActionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("getTrip"), tripId: z.string().min(1) }),
   z.object({ action: z.literal("getDecisionWorkspace"), tripId: z.string().min(1) }),
   z.object({ action: z.literal("getDecisionEvents"), tripId: z.string().min(1), afterCursor: z.number().int().nonnegative() }),
+  z.object({ action: z.literal("getAgentRunStatus"), tripId: z.string().min(1), agentRunId: z.string().min(1) }),
   z.object({ action: z.literal("upsertPreference"), tripId: z.string().min(1), expectedRevision: z.number().int().nonnegative(), idempotencyKey: z.string().min(8).max(128), answers: z.record(z.string(), z.union([z.string(), z.array(z.string()), z.number(), z.boolean(), z.null()])), freeText: z.object({ mustHave: z.string().optional(), mustAvoid: z.string().optional(), note: z.string().optional() }).optional() }),
   z.object({ action: z.enum(["completePreference", "skipPreference"]), tripId: z.string().min(1), expectedRevision: z.number().int().nonnegative(), idempotencyKey: z.string().min(8).max(128) }),
   z.object({ action: z.literal("generatePreferenceSummary"), tripId: z.string().min(1), sourcePreferenceRevisions: z.record(z.string(), z.number().int().nonnegative()), idempotencyKey: z.string().min(8).max(128) }),
@@ -98,6 +99,7 @@ const AgentApiSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("appendEvidenceSnapshot"), agentRunId: z.string().min(1), sequence: z.number().int().positive(), idempotencyKey: z.string().min(8).max(128), signature: z.string().min(1), payload: z.object({ candidateId: z.string().min(1), expectedCandidateRevision: z.number().int().nonnegative(), evidence: AgentEvidenceInputSchema }) }),
   z.object({ action: z.literal("reportVerificationBlocked"), agentRunId: z.string().min(1), sequence: z.number().int().positive(), idempotencyKey: z.string().min(8).max(128), signature: z.string().min(1), payload: z.object({ candidateId: z.string().min(1), expectedCandidateRevision: z.number().int().nonnegative(), reason: z.enum(["login", "captcha", "risk_control", "load_failed", "field_missing"]) }) }),
   z.object({ action: z.literal("generatePreferenceSummary"), agentRunId: z.string().min(1), sequence: z.number().int().positive(), idempotencyKey: z.string().min(8).max(128), signature: z.string().min(1), payload: z.object({ sourcePreferenceRevisions: z.record(z.string(), z.number().int().nonnegative()) }) }),
+  z.object({ action: z.literal("getDecisionContext"), agentRunId: z.string().min(1), sequence: z.number().int().positive(), idempotencyKey: z.string().min(8).max(128), signature: z.string().min(1), payload: z.object({}) }),
 ]);
 
 function codedError(code, details = {}) { const error = new Error(code); error.code = code; Object.assign(error, details); return error; }
@@ -345,38 +347,42 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
     return current;
   }
 
+  async function readDecisionWorkspace(transaction, trip) {
+    const preferences = transaction.collection("trip_preferences");
+    const records = [];
+    for (const uid of trip.memberUids) {
+      const record = one(await preferences.doc(`${trip.id}:${uid}`).get());
+      if (record) records.push(record);
+    }
+    const index = one(await transaction.collection("trip_decision_indexes").doc(trip.id).get()) || {};
+    async function loadIndexed(collectionName, ids = []) {
+      const values = [];
+      for (const id of ids) {
+        const value = one(await transaction.collection(collectionName).doc(id).get());
+        if (value && !value.deletedAt) values.push(writableRecord(value));
+      }
+      return values;
+    }
+    const summary = one(await transaction.collection("trip_preference_summaries").doc(trip.id).get());
+    const meta = one(await transaction.collection("trip_decision_meta").doc(trip.id).get());
+    return {
+      tripId: trip.id,
+      preferences: records.map(writableRecord),
+      ...(summary && !summary.deletedAt ? { summary: writableRecord(summary) } : {}),
+      candidates: await loadIndexed("trip_candidates", index.candidateIds),
+      evidence: await loadIndexed("trip_evidence_snapshots", index.evidenceIds),
+      feedback: await loadIndexed("trip_candidate_feedback", index.feedbackIds),
+      placements: await loadIndexed("trip_tentative_placements", index.placementIds),
+      confirmations: await loadIndexed("trip_confirmation_receipts", index.confirmationIds),
+      workspaceCursor: String((meta?.nextSequence || 1) - 1),
+      fetchedAt: now().toISOString(),
+    };
+  }
+
   async function getDecisionWorkspace(input, actorUid) {
     return db.runTransaction(async (transaction) => {
       const trip = await assertTripMember(transaction, input.tripId, actorUid);
-      const preferences = transaction.collection("trip_preferences");
-      const records = [];
-      for (const uid of trip.memberUids) {
-        const record = one(await preferences.doc(`${input.tripId}:${uid}`).get());
-        if (record) records.push(record);
-      }
-      const index = one(await transaction.collection("trip_decision_indexes").doc(input.tripId).get()) || {};
-      async function loadIndexed(collectionName, ids = []) {
-        const values = [];
-        for (const id of ids) {
-          const value = one(await transaction.collection(collectionName).doc(id).get());
-          if (value && !value.deletedAt) values.push(writableRecord(value));
-        }
-        return values;
-      }
-      const summary = one(await transaction.collection("trip_preference_summaries").doc(input.tripId).get());
-      const meta = one(await transaction.collection("trip_decision_meta").doc(input.tripId).get());
-      return {
-        tripId: input.tripId,
-        preferences: records.map(writableRecord),
-        ...(summary && !summary.deletedAt ? { summary: writableRecord(summary) } : {}),
-        candidates: await loadIndexed("trip_candidates", index.candidateIds),
-        evidence: await loadIndexed("trip_evidence_snapshots", index.evidenceIds),
-        feedback: await loadIndexed("trip_candidate_feedback", index.feedbackIds),
-        placements: await loadIndexed("trip_tentative_placements", index.placementIds),
-        confirmations: await loadIndexed("trip_confirmation_receipts", index.confirmationIds),
-        workspaceCursor: String((meta?.nextSequence || 1) - 1),
-        fetchedAt: now().toISOString(),
-      };
+      return readDecisionWorkspace(transaction, trip);
     });
   }
 
@@ -753,6 +759,32 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
     });
   }
 
+  function safeAgentRun(run) {
+    const expired = run.status !== "revoked" && new Date(run.expiresAt).getTime() <= now().getTime();
+    return {
+      agentRunId: run.id,
+      tripId: run.tripId,
+      status: expired ? "expired" : run.status,
+      scope: [...run.scope],
+      revision: run.revision,
+      nextSequence: run.lastSequence + 1,
+      createdAt: run.createdAt,
+      expiresAt: run.expiresAt,
+      ...(run.claimedAt ? { claimedAt: run.claimedAt } : {}),
+      ...(run.revokedAt ? { revokedAt: run.revokedAt } : {}),
+      ...(run.lastUsedAt ? { lastUsedAt: run.lastUsedAt } : {}),
+    };
+  }
+
+  async function getAgentRunStatus(input, actorUid) {
+    return db.runTransaction(async (transaction) => {
+      await assertTripMember(transaction, input.tripId, actorUid);
+      const run = one(await transaction.collection("trip_agent_runs").doc(input.agentRunId).get());
+      if (!run || run.tripId !== input.tripId) throw codedError("FORBIDDEN");
+      return safeAgentRun(run);
+    });
+  }
+
   async function changeAgentRun(input, actorUid) {
     return db.runTransaction(async (transaction) => {
       await assertTripMember(transaction, input.tripId, actorUid);
@@ -782,7 +814,7 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
         }
         const run = one(await runs.doc(input.agentRunId).get());
         if (!run || run.tripId !== input.tripId) throw codedError("FORBIDDEN");
-        if (run.revision !== input.expectedRevision) throw codedError("VERSION_CONFLICT", { currentVersion: run.revision });
+        if (run.revision !== input.expectedRevision) throw codedError("VERSION_CONFLICT", { currentVersion: run.revision, latest: safeAgentRun(run) });
         if (run.status === "revoked") throw codedError("INVALID_AGENT_CLAIM");
         const revokedAt = timestamp.toISOString();
         await runs.doc(run.id).set({ ...run, status: "revoked", revokedAt, revision: run.revision + 1 });
@@ -910,8 +942,10 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
       revision: 1,
       updatedAt: timestamp,
     };
+    const currentWithoutBlockReason = { ...current };
+    delete currentWithoutBlockReason.verificationBlockReason;
     const candidate = {
-      ...current,
+      ...currentWithoutBlockReason,
       currentEvidenceId: evidence.id,
       verificationState,
       revision: current.revision + 1,
@@ -937,7 +971,7 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
     const candidate = {
       ...current,
       verificationState: "needs_takeover",
-      changeReason: input.payload.reason,
+      verificationBlockReason: input.payload.reason,
       revision: current.revision + 1,
       updatedAt: timestamp,
     };
@@ -952,6 +986,11 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
     const summary = await buildSharedPreferenceSummary(transaction, trip, input.payload.sourcePreferenceRevisions);
     await decisionAudit(transaction, { tripId: run.tripId, targetType: "summary", targetId: summary.id, command: input.action, actorType: "agent", agentRunId: run.id, beforeRevision: summary.revision - 1, afterRevision: summary.revision, changedFields: ["summary", "revision"] });
     return { summary };
+  }
+
+  async function getAgentDecisionContext(transaction, run) {
+    const trip = await assertTripMember(transaction, run.tripId, run.creatorUid);
+    return { context: await readDecisionWorkspace(transaction, trip) };
   }
 
   async function getCurrentMember(actorUid) {
@@ -980,7 +1019,8 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
           if (input.action === "submitProposalBatch") return submitProposalBatch(transaction, input, run);
           if (input.action === "appendEvidenceSnapshot") return appendAgentEvidence(transaction, input, run);
           if (input.action === "reportVerificationBlocked") return reportAgentVerificationBlocked(transaction, input, run);
-          return generateAgentPreferenceSummary(transaction, input, run);
+          if (input.action === "generatePreferenceSummary") return generateAgentPreferenceSummary(transaction, input, run);
+          return getAgentDecisionContext(transaction, run);
         },
       ));
       return { ...outcome.result, replayed: outcome.replayed };
@@ -1001,6 +1041,7 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
       if (input.action === "getTrip") return getTrip(input, actorUid);
       if (input.action === "getDecisionWorkspace") return getDecisionWorkspace(input, actorUid);
       if (input.action === "getDecisionEvents") return getDecisionEvents(input, actorUid);
+      if (input.action === "getAgentRunStatus") return getAgentRunStatus(input, actorUid);
       if (input.action === "upsertPreference") return upsertPreference(input, actorUid);
       if (input.action === "completePreference" || input.action === "skipPreference") return setPreferenceStatus(input, actorUid);
       if (input.action === "generatePreferenceSummary") return generateMemberPreferenceSummary(input, actorUid);

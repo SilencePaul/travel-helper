@@ -1,7 +1,9 @@
 import {
+  AgentRunSchema,
   DecisionCommandSchema,
   DecisionEventSchema,
   DecisionWorkspaceSchema,
+  type AgentRun,
   type DecisionCommand,
   type DecisionCommandResult,
   type DecisionEvent,
@@ -137,6 +139,28 @@ export class CloudBaseDecisionWorkspaceRepository implements DecisionWorkspaceRe
       const code = serviceErrorCode(error);
       if (isMembershipError(code)) {
         this.clearSnapshot(command.tripId);
+        throw new ForbiddenError();
+      }
+      throw new RepositoryUnavailableError();
+    }
+  }
+
+  async getAgentRunStatus(tripId: string, agentRunId: string): Promise<AgentRun> {
+    try {
+      const response = await this.callFunction({ name: "trip-api", data: { action: "getAgentRunStatus", tripId, agentRunId } });
+      const code = serviceErrorCode(response.result);
+      if (isMembershipError(code)) {
+        this.clearSnapshot(tripId);
+        throw new ForbiddenError();
+      }
+      const parsed = AgentRunSchema.safeParse(response.result);
+      if (!parsed.success || parsed.data.tripId !== tripId || parsed.data.agentRunId !== agentRunId) throw new RepositoryUnavailableError();
+      return parsed.data;
+    } catch (error) {
+      if (error instanceof ForbiddenError || error instanceof RepositoryUnavailableError) throw error;
+      const code = serviceErrorCode(error);
+      if (isMembershipError(code)) {
+        this.clearSnapshot(tripId);
         throw new ForbiddenError();
       }
       throw new RepositoryUnavailableError();

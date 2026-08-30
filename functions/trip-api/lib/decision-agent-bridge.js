@@ -53,11 +53,16 @@ function createDecisionAgentBridge({ now = () => new Date() } = {}) {
     async claim(transaction, input) {
       const runs = transaction.collection("trip_agent_runs");
       const run = one(await runs.doc(input.agentRunId).get());
-      assertUsableRun(run);
       const signed = { agentRunId: input.agentRunId, pairingCode: input.pairingCode, clientNonce: input.clientNonce };
+      if (!run || !verifySignedValue(run.publicKeyJwk, signed, input.signature)) throw codedError("INVALID_AGENT_CLAIM");
+      const claimRequestFingerprint = sha256Base64Url(canonicalJson(signed));
+      if (run?.claimRequestFingerprint) {
+        if (sameSecret(run.claimRequestFingerprint, claimRequestFingerprint) && run.claimResult) return run.claimResult;
+        throw codedError("INVALID_AGENT_CLAIM");
+      }
+      assertUsableRun(run);
       if (run.status !== "pending_claim"
-        || !sameSecret(run.pairingCodeHash, sha256Base64Url(input.pairingCode))
-        || !verifySignedValue(run.publicKeyJwk, signed, input.signature)) {
+        || !sameSecret(run.pairingCodeHash, sha256Base64Url(input.pairingCode))) {
         throw codedError("INVALID_AGENT_CLAIM");
       }
       const { pairingCodeHash: _consumedPairingCodeHash, ...withoutPairingCode } = run;
@@ -69,15 +74,14 @@ function createDecisionAgentBridge({ now = () => new Date() } = {}) {
         claimedAt,
         revision: run.revision + 1,
       };
-      await runs.doc(run.id).set(claimed);
-      return { agentRunId: run.id, claimedAt, nextSequence: run.lastSequence + 1 };
+      const claimResult = { agentRunId: run.id, claimedAt, nextSequence: run.lastSequence + 1 };
+      await runs.doc(run.id).set({ ...claimed, claimRequestFingerprint, claimResult });
+      return claimResult;
     },
 
     async run(transaction, input, operation) {
       const runs = transaction.collection("trip_agent_runs");
       const run = one(await runs.doc(input.agentRunId).get());
-      assertUsableRun(run);
-      if (run.status !== "claimed") throw codedError("INVALID_AGENT_CLAIM");
       const signed = {
         agentRunId: input.agentRunId,
         sequence: input.sequence,
@@ -85,8 +89,8 @@ function createDecisionAgentBridge({ now = () => new Date() } = {}) {
         action: input.action,
         payload: input.payload,
       };
+      if (!run) throw codedError("INVALID_AGENT_CLAIM");
       if (!verifySignedValue(run.publicKeyJwk, signed, input.signature)) throw codedError("INVALID_AGENT_CLAIM");
-      if (!run.scope.includes(input.action)) throw codedError("AGENT_SCOPE_FORBIDDEN");
 
       const idempotency = transaction.collection("trip_agent_idempotency");
       const id = `${input.agentRunId}:${input.action}:${input.idempotencyKey}`;
@@ -96,6 +100,9 @@ function createDecisionAgentBridge({ now = () => new Date() } = {}) {
         if (prior.sequence !== input.sequence || prior.request !== request) throw codedError("IDEMPOTENCY_KEY_REUSED");
         return { result: prior.result, replayed: true };
       }
+      assertUsableRun(run);
+      if (run.status !== "claimed") throw codedError("INVALID_AGENT_CLAIM");
+      if (input.action !== "getDecisionContext" && !run.scope.includes(input.action)) throw codedError("AGENT_SCOPE_FORBIDDEN");
       if (input.sequence !== run.lastSequence + 1) throw codedError("INVALID_AGENT_CLAIM");
 
       const result = await operation(run);

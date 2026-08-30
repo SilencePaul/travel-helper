@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import type { DecisionCommand, DecisionWorkspace, DecisionWorkspaceRepository, Member, PreferenceProfile, Trip } from "@travel/contracts";
+import type { LocalAgentBridge } from "../../infrastructure/localAgentBridgeClient";
+import { DecisionAgentPanel } from "./DecisionAgentPanel";
 import { DecisionWorkspaceShowcase } from "./DecisionWorkspaceShowcase";
 import { toDecisionWorkspaceViewModel } from "./decisionWorkspaceAdapter";
 
@@ -7,6 +9,7 @@ type Props = {
   repository: DecisionWorkspaceRepository;
   trip: Trip;
   member: Member;
+  agentBridge?: LocalAgentBridge;
   onBack: () => void;
   newIdempotencyKey?: () => string;
 };
@@ -62,7 +65,7 @@ function decimalCursor(cursor: string): bigint | undefined {
   return /^\d+$/.test(cursor) ? BigInt(cursor) : undefined;
 }
 
-export function DecisionWorkspacePage({ repository, trip, member, onBack, newIdempotencyKey = defaultIdempotencyKey }: Props) {
+export function DecisionWorkspacePage({ repository, trip, member, agentBridge, onBack, newIdempotencyKey = defaultIdempotencyKey }: Props) {
   const [workspace, setWorkspace] = useState<DecisionWorkspace>();
   const [draft, setDraft] = useState<PreferenceDraft>();
   const [message, setMessage] = useState<MessageState>({ text: "正在读取共同决定…", role: "status", source: "load" });
@@ -362,6 +365,8 @@ export function DecisionWorkspacePage({ repository, trip, member, onBack, newIde
       <button className="control-button control-button--text" type="button" onClick={onBack}>返回行程</button>
       <span>{member.displayName} · 共同决定</span>
     </nav>
+
+    <DecisionAgentPanel repository={repository} bridge={agentBridge} tripId={trip.id} newIdempotencyKey={newIdempotencyKey} />
 
     <form ref={preferenceFormRef} className="decision-preference-form" aria-busy={interactionBusy} onSubmit={savePreference}>
       <div><p>MY PREFERENCE PASS</p><h2>我的五分钟偏好</h2></div>

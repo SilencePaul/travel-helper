@@ -1,6 +1,14 @@
 import type { DecisionWorkspace, EvidenceSnapshot, Member, Trip } from "@travel/contracts";
 import type { DecisionWorkspaceViewModel } from "./decisionWorkspaceViewModel";
 
+const verificationBlockCopy = {
+  login: "网页需要登录",
+  captcha: "网页要求验证码",
+  risk_control: "网页触发风险控制",
+  load_failed: "网页加载失败",
+  field_missing: "网页缺少必要字段",
+} as const;
+
 function displayValue(value: string | string[] | number | boolean | null) {
   if (Array.isArray(value)) return value.join("、");
   if (value === null) return "未填写";
@@ -62,6 +70,10 @@ export function toDecisionWorkspaceViewModel(workspace: DecisionWorkspace, trip:
         applicability: applicability || "适用条件待补充",
         recommendation: candidate.recommendation.reason,
         verificationState: candidate.verificationState,
+        ...(candidate.verificationBlockReason ? {
+          verificationBlockReason: verificationBlockCopy[candidate.verificationBlockReason],
+          takeoverGuidance: "请在本机浏览器完成验证后，让 Agent 重试网页核验。",
+        } : {}),
         decisionState: candidate.decisionState,
         evidence: {
           source: evidence?.sourceName ?? "来源待补充",

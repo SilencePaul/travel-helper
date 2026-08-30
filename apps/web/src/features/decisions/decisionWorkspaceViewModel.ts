@@ -45,6 +45,8 @@ export type DecisionCandidateViewModel = {
   applicability: string;
   recommendation: string;
   verificationState: VerificationPresentationState;
+  verificationBlockReason?: string;
+  takeoverGuidance?: string;
   decisionState: DecisionPresentationState;
   evidence: CandidateEvidenceViewModel;
   feedback: CandidateFeedbackViewModel[];

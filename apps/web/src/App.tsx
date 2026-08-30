@@ -28,10 +28,12 @@ import { OfflineStatus } from "./components/OfflineStatus";
 import { CloudBaseDecisionWorkspaceRepository } from "./infrastructure/cloudbaseDecisionWorkspaceRepository";
 import { DecisionAccessGuard } from "./features/decisions/DecisionAccessGuard";
 import { DecisionWorkspacePage } from "./features/decisions/DecisionWorkspacePage";
+import type { LocalAgentBridge } from "./infrastructure/localAgentBridgeClient";
 
 type AppProps = {
   repository?: TripRepository;
   decisionRepository?: DecisionWorkspaceRepository;
+  agentBridge?: LocalAgentBridge;
   createDayId?: () => string;
   tripId?: string;
   routeService?: RouteService;
@@ -77,7 +79,7 @@ function RouteFocus() {
   return null;
 }
 
-function TripRoutes({ createDayId = () => "day-ui", routeService, member, memberManagementInitialMembers, onUnauthorized, onLogout, decisionRepository, enforceAdmin, showOfflineStatus }: Pick<AppProps, "createDayId" | "routeService" | "member" | "memberManagementInitialMembers" | "onUnauthorized" | "onLogout" | "decisionRepository"> & { enforceAdmin: boolean; showOfflineStatus: boolean }) {
+function TripRoutes({ createDayId = () => "day-ui", routeService, member, memberManagementInitialMembers, onUnauthorized, onLogout, decisionRepository, agentBridge, enforceAdmin, showOfflineStatus }: Pick<AppProps, "createDayId" | "routeService" | "member" | "memberManagementInitialMembers" | "onUnauthorized" | "onLogout" | "decisionRepository" | "agentBridge"> & { enforceAdmin: boolean; showOfflineStatus: boolean }) {
   const { trip, mutateTrip, syncState, pendingCommandCount, unassignedOfflineCount, conflictPaused } = useTrip();
   const navigate = useNavigate();
   const [requestedDayId, setRequestedDayId] = useState<string>();
@@ -226,7 +228,7 @@ function TripRoutes({ createDayId = () => "day-ui", routeService, member, member
         />
         <Route path="/hotels" element={<HotelComparePage trip={trip} routeService={routeService} onSelectHotel={selectHotel} onBack={() => navigate("/")} />} />
         <Route path="/decisions" element={decisionRepository && member
-          ? <DecisionWorkspacePage repository={decisionRepository} trip={trip} member={member} onBack={() => navigate("/")} />
+          ? <DecisionWorkspacePage repository={decisionRepository} trip={trip} member={member} agentBridge={agentBridge} onBack={() => navigate("/")} />
           : <DecisionAccessGuard onBack={() => navigate("/")} />} />
         <Route path="/admin/members" element={enforceAdmin && member?.role !== "admin" ? <p role="alert">无权访问</p> : <MemberManagementPage initialMembers={memberManagementInitialMembers} onUnauthorized={onUnauthorized} onBack={() => navigate("/", { replace: true })} />} />
         <Route
@@ -253,12 +255,12 @@ function DayRoute({ trip, onBack, routeService }: { trip: Trip; onBack: (dayId: 
   return <DayPage trip={trip} dayId={dayId} onBack={() => onBack(dayId)} routeService={routeService} />;
 }
 
-export function TripApp({ repository, decisionRepository, createDayId, tripId, routeService, member, memberManagementInitialMembers, onUnauthorized, onLogout }: AppProps) {
+export function TripApp({ repository, decisionRepository, agentBridge, createDayId, tripId, routeService, member, memberManagementInitialMembers, onUnauthorized, onLogout }: AppProps) {
   const enforceAdmin = repository?.syncMode === "cloudbase" || !import.meta.env.DEV;
   const [defaultDecisionRepository] = useState<DecisionWorkspaceRepository | undefined>(() => decisionRepository ?? (import.meta.env.VITE_DATA_MODE === "cloudbase" ? new CloudBaseDecisionWorkspaceRepository() : undefined));
   return (
     <TripProvider repository={repository} tripId={tripId} actorUid={member?.uid} onUnauthorized={onUnauthorized}>
-      <TripRoutes createDayId={createDayId} routeService={routeService} member={member} memberManagementInitialMembers={memberManagementInitialMembers} onUnauthorized={onUnauthorized} onLogout={onLogout} decisionRepository={decisionRepository ?? defaultDecisionRepository} enforceAdmin={enforceAdmin} showOfflineStatus={repository === undefined} />
+      <TripRoutes createDayId={createDayId} routeService={routeService} member={member} memberManagementInitialMembers={memberManagementInitialMembers} onUnauthorized={onUnauthorized} onLogout={onLogout} decisionRepository={decisionRepository ?? defaultDecisionRepository} agentBridge={agentBridge} enforceAdmin={enforceAdmin} showOfflineStatus={repository === undefined} />
     </TripProvider>
   );
 }

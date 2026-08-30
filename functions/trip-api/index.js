@@ -48,7 +48,7 @@ const decisionMutationActions = new Set([
   "recordFeedback", "placeTentative", "attachTentativeToLegacyTrip", "detachTentativeFromLegacyTrip",
   "setConfirmationReceipt", "createAgentRun", "revokeAgentRun",
 ]);
-const agentActions = new Set(["claimAgentRun", "submitProposalBatch", "appendEvidenceSnapshot", "reportVerificationBlocked", "generatePreferenceSummary"]);
+const agentActions = new Set(["claimAgentRun", "submitProposalBatch", "appendEvidenceSnapshot", "reportVerificationBlocked", "generatePreferenceSummary", "getDecisionContext"]);
 
 function decisionSuccess(action, result) {
   if (["upsertPreference", "completePreference", "skipPreference"].includes(action)) return { ok: true, action, data: result.preference };
@@ -66,8 +66,15 @@ function agentSuccess(action, result) {
   if (action === "claimAgentRun") return { ok: true, data: result };
   const data = action === "submitProposalBatch" ? result.candidates
     : action === "generatePreferenceSummary" ? result.summary
+      : action === "getDecisionContext" ? result.context
       : result.candidate;
-  return { ok: true, action, data, ...(typeof result.replayed === "boolean" ? { replayed: result.replayed } : {}) };
+  return {
+    ok: true,
+    action,
+    data,
+    ...(result.warning === "VERIFICATION_INCOMPLETE" ? { warning: result.warning } : {}),
+    ...(typeof result.replayed === "boolean" ? { replayed: result.replayed } : {}),
+  };
 }
 
 function createTripHandler({ db, commands, env = process.env, getUserInfo } = {}) {

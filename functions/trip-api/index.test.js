@@ -105,6 +105,41 @@ test("agent command results use their dedicated success envelope", async () => {
   });
 });
 
+test("agent decision context and incomplete verification warning use stable envelopes", async () => {
+  const context = { tripId: "trip-1", preferences: [], candidates: [] };
+  const candidate = { id: "candidate-1", verificationState: "candidate" };
+  const executeAgent = async (payload) => payload.action === "getDecisionContext"
+    ? { context, replayed: false }
+    : { candidate, warning: "VERIFICATION_INCOMPLETE", replayed: false };
+  const handler = createTripHandler({ getUserInfo: () => undefined, commands: { executeAgent } });
+
+  assert.deepEqual(await handler({ action: "getDecisionContext", agentRunId: "agent-run-1", sequence: 1 }), {
+    ok: true,
+    action: "getDecisionContext",
+    data: context,
+    replayed: false,
+  });
+  assert.deepEqual(await handler({ action: "appendEvidenceSnapshot", agentRunId: "agent-run-1", sequence: 2 }), {
+    ok: true,
+    action: "appendEvidenceSnapshot",
+    data: candidate,
+    warning: "VERIFICATION_INCOMPLETE",
+    replayed: false,
+  });
+});
+
+test("an authenticated member can read an agent run safe status", async () => {
+  const status = { agentRunId: "agent-run-1", tripId: "trip-1", status: "claimed", revision: 2 };
+  const calls = [];
+  const handler = createTripHandler({
+    getUserInfo: () => ({ customUserId: "fs_member" }),
+    commands: { execute: async (payload, actorUid) => { calls.push({ payload, actorUid }); return status; } },
+  });
+
+  assert.deepEqual(await handler({ action: "getAgentRunStatus", tripId: "trip-1", agentRunId: "agent-run-1" }), status);
+  assert.deepEqual(calls, [{ payload: { action: "getAgentRunStatus", tripId: "trip-1", agentRunId: "agent-run-1" }, actorUid: "fs_member" }]);
+});
+
 test("an authenticated member summary request is not mistaken for an agent command", async () => {
   const calls = [];
   const summary = { id: "trip-1", revision: 1 };

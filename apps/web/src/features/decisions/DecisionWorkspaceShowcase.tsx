@@ -50,6 +50,10 @@ function CandidateTicket({ candidate }: { candidate: DecisionCandidateViewModel 
     <p className="decision-ticket-location">{candidate.location}</p>
     <p className="decision-ticket-applicability">{candidate.applicability}</p>
     <p className="decision-recommendation">“{candidate.recommendation}”</p>
+    {candidate.verificationBlockReason ? <aside className="decision-takeover" aria-label="网页核验需要人工接管">
+      <strong>{candidate.verificationBlockReason}</strong>
+      <span>{candidate.takeoverGuidance}</span>
+    </aside> : null}
     <dl className="decision-evidence">
       <div><dt>来源</dt><dd>来源 · {candidate.evidence.source}</dd></div>
       <div><dt>最后核验</dt><dd>最后核验 · {dateStamp(candidate.evidence.capturedAt)}</dd></div>

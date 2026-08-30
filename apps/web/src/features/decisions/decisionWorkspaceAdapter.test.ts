@@ -33,4 +33,20 @@ describe("decision workspace adapter", () => {
     expect(view.candidates[0]?.placement).toContain("D1");
     expect(view.candidates[0]?.confirmations).toEqual({ confirmedBy: ["一鸣"], awaiting: ["美垚"] });
   });
+
+  it("preserves a standard verification block reason and human takeover guidance", () => {
+    const blocked = {
+      ...workspace,
+      candidates: [{
+        ...workspace.candidates[0]!,
+        verificationState: "needs_takeover" as const,
+        verificationBlockReason: "risk_control" as const,
+      }],
+    } satisfies DecisionWorkspace;
+
+    expect(toDecisionWorkspaceViewModel(blocked, trip, member).candidates[0]).toMatchObject({
+      verificationBlockReason: "网页触发风险控制",
+      takeoverGuidance: "请在本机浏览器完成验证后，让 Agent 重试网页核验。",
+    });
+  });
 });
