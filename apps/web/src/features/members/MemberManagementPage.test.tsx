@@ -149,6 +149,45 @@ describe("MemberManagementPage", () => {
     await waitFor(() => expect(screen.getByRole("heading", { name: "已加入" })).toHaveFocus());
   });
 
+  it("focuses the next available approval after approving a pending member", async () => {
+    const firstUid = "approval-first";
+    const secondUid = "approval-second";
+    const command = vi.fn(async ({ uid }: { uid?: string }) => ({
+      member: { uid: uid!, displayName: uid === firstUid ? "待审批甲" : "待审批乙", role: "member" as const, version: 1, createdAt: "2026-08-27T00:00:00.000Z" },
+    }));
+    const user = userEvent.setup();
+    render(<MemberManagementPage command={command} initialMembers={[
+      { uid: firstUid, displayName: "待审批甲", role: "pending", version: 0, createdAt: "2026-08-27T00:00:00.000Z" },
+      { uid: secondUid, displayName: "待审批乙", role: "pending", version: 0, createdAt: "2026-08-27T00:00:00.000Z" },
+    ]} />);
+
+    await user.type(screen.getByRole("textbox", { name: "输入待审批甲的身份校验码" }), memberVerificationCode(firstUid));
+    await user.type(screen.getByRole("textbox", { name: "输入待审批乙的身份校验码" }), memberVerificationCode(secondUid));
+    await user.click(screen.getAllByRole("button", { name: "核对后批准" })[0]!);
+
+    expect(await screen.findByRole("status")).toHaveTextContent("已批准待审批甲");
+    await waitFor(() => expect(screen.getByRole("button", { name: "核对后批准" })).toHaveFocus());
+  });
+
+  it("keeps focus in the pending workflow when the next approval still needs verification", async () => {
+    const firstUid = "verification-first";
+    const secondUid = "verification-second";
+    const command = vi.fn(async ({ uid }: { uid?: string }) => ({
+      member: { uid: uid!, displayName: "待审批甲", role: "member" as const, version: 1, createdAt: "2026-08-27T00:00:00.000Z" },
+    }));
+    const user = userEvent.setup();
+    render(<MemberManagementPage command={command} initialMembers={[
+      { uid: firstUid, displayName: "待审批甲", role: "pending", version: 0, createdAt: "2026-08-27T00:00:00.000Z" },
+      { uid: secondUid, displayName: "待审批乙", role: "pending", version: 0, createdAt: "2026-08-27T00:00:00.000Z" },
+    ]} />);
+
+    await user.type(screen.getByRole("textbox", { name: "输入待审批甲的身份校验码" }), memberVerificationCode(firstUid));
+    await user.click(screen.getAllByRole("button", { name: "核对后批准" })[0]!);
+
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "输入待审批乙的身份校验码" })).toHaveFocus());
+    expect(screen.getByRole("heading", { name: "已加入" })).not.toHaveFocus();
+  });
+
   it("focuses the dialog container while a destructive request disables its actions", async () => {
     let finish!: (value: {}) => void;
     const command = vi.fn().mockReturnValue(new Promise<{}>((resolve) => { finish = resolve; }));
@@ -203,5 +242,20 @@ describe("MemberManagementPage", () => {
     await user.click(screen.getByRole("button", { name: "移除" }));
     await user.click(screen.getByRole("button", { name: "确认移除最后已加入" }));
     await waitFor(() => expect(screen.getByRole("heading", { name: "已加入" })).toHaveFocus());
+  });
+
+  it("skips disabled destructive actions when restoring focus after removal", async () => {
+    const user = userEvent.setup();
+    const command = vi.fn().mockResolvedValue({});
+    render(<MemberManagementPage command={command} initialMembers={[
+      { uid: "admin", displayName: "管理员", role: "admin", version: 1, createdAt: "2026-08-27T00:00:00.000Z" },
+      { uid: "member", displayName: "最后的同行", role: "member", version: 1, createdAt: "2026-08-27T00:00:00.000Z" },
+    ]} />);
+
+    await user.click(screen.getAllByRole("button", { name: "移除" })[1]!);
+    await user.click(screen.getByRole("button", { name: "确认移除最后的同行" }));
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "已加入" })).toHaveFocus());
+    expect(screen.getByRole("button", { name: "移除" })).toBeDisabled();
   });
 });

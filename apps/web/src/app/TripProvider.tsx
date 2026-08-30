@@ -284,7 +284,7 @@ export function TripProvider({
   }, [mutateTrip]);
 
   if (loadError) {
-    return <main className="trip-state" role="alert"><p className="eyebrow">连接异常</p><h1>旅行计划暂时无法加载</h1><p>登录状态仍会保留。请检查网络后重试。</p><button className="control-button control-button--secondary" type="button" onClick={() => { setLoadError(false); setReloadAttempt((value) => value + 1); }}>重新加载</button></main>;
+    return <main className="trip-state" role="alert"><p className="eyebrow">连接异常</p><h1>旅行计划暂时无法加载</h1><p>登录状态仍会保留。请检查网络后重试。</p><button autoFocus className="control-button control-button--secondary" type="button" onClick={() => { setLoadError(false); setReloadAttempt((value) => value + 1); }}>重新加载</button></main>;
   }
 
   if (authLost) {

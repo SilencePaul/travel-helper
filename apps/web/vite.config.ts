@@ -52,6 +52,7 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     setupFiles: './src/test-setup.ts',
+    maxWorkers: 2,
     passWithNoTests: true,
   },
 })

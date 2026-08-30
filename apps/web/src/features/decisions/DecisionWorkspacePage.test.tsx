@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { DecisionCommandResult, DecisionWorkspace, DecisionWorkspaceRepository, Member, Trip } from "@travel/contracts";
 import { expect, test, vi } from "vitest";
@@ -16,6 +16,19 @@ const workspace = {
   preferences: [{ id: "p-1", tripId: "trip-1", ownerUid: "fs_admin", answers: { pace: "slow", budget: "mid" }, status: "editing", revision: 1, updatedAt: "2026-08-28T00:00:00.000Z", updatedBy: "fs_admin" }],
   candidates: [], placements: [], evidence: [], feedback: [], confirmations: [], workspaceCursor: "0", fetchedAt: "2026-08-28T00:00:00.000Z",
 } satisfies DecisionWorkspace;
+const candidate = {
+  id: "candidate-1",
+  tripId: "trip-1",
+  category: "hotel",
+  entity: { name: "海边酒店", address: "香港" },
+  applicability: { dates: { start: "2026-10-01", end: "2026-10-02" }, travelers: 2 },
+  recommendation: { round: 1, reason: "交通方便", preferenceRevisionIds: [], feedbackIds: [] },
+  verificationState: "web_verified",
+  decisionState: "tentative",
+  currentEvidenceId: "evidence-1",
+  revision: 3,
+  updatedAt: "2026-08-28T00:00:00.000Z",
+} satisfies DecisionWorkspace["candidates"][number];
 
 test("loads the decision workspace and saves the current member preference", async () => {
   const user = userEvent.setup();
@@ -79,6 +92,26 @@ test("announces a workspace load failure as an alert", async () => {
   expect(await screen.findByRole("alert")).toHaveTextContent("共同决定暂时无法加载");
 });
 
+test("clears a load error when the workspace subscription recovers", async () => {
+  let publish!: (next: DecisionWorkspace) => void;
+  const repository = {
+    load: vi.fn().mockRejectedValue(new Error("offline")),
+    command: vi.fn(),
+    events: vi.fn(),
+    subscribe: vi.fn((_tripId: string, onChange: (next: DecisionWorkspace) => void) => {
+      publish = onChange;
+      return () => undefined;
+    }),
+  } satisfies DecisionWorkspaceRepository;
+  render(<DecisionWorkspacePage repository={repository} trip={trip} member={member} onBack={() => undefined} />);
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("共同决定暂时无法加载");
+  act(() => publish(workspace));
+
+  expect(await screen.findByRole("heading", { name: "两个人的偏好，正在汇成一张路线" })).toBeVisible();
+  expect(screen.queryByText("共同决定暂时无法加载，请检查网络后重试。")).not.toBeInTheDocument();
+});
+
 test.each([
   [{ ok: false as const, error: "INVALID_REQUEST" as const }, "保存失败：INVALID_REQUEST"],
   [{ ok: false as const, error: "VERSION_CONFLICT" as const }, "内容已被同行者更新"],
@@ -92,4 +125,122 @@ test.each([
 
   expect(await screen.findByRole("alert")).toHaveTextContent(expectedMessage);
   expect(screen.queryByRole("status")).not.toBeInTheDocument();
+});
+
+test("restores the command trigger after a command failure", async () => {
+  let finishCommand!: (result: DecisionCommandResult) => void;
+  const command = vi.fn(() => new Promise<DecisionCommandResult>((resolve) => { finishCommand = resolve; }));
+  const repository = { load: vi.fn().mockResolvedValue(workspace), command, events: vi.fn(), subscribe: vi.fn(() => () => undefined) } satisfies DecisionWorkspaceRepository;
+  const user = userEvent.setup();
+  render(<DecisionWorkspacePage repository={repository} trip={trip} member={member} onBack={() => undefined} />);
+
+  await screen.findByRole("heading", { name: "两个人的偏好，正在汇成一张路线" });
+  const trigger = screen.getByRole("button", { name: "保存我的偏好" });
+  await user.click(trigger);
+  document.body.tabIndex = -1;
+  document.body.focus();
+  expect(document.body).toHaveFocus();
+
+  await act(async () => finishCommand({ ok: false, error: "INVALID_REQUEST" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("保存失败：INVALID_REQUEST");
+  await waitFor(() => expect(trigger).toHaveFocus());
+  document.body.removeAttribute("tabindex");
+});
+
+test("restores the stable preference submit action when a failed form submission has no submitter", async () => {
+  let finishCommand!: (result: DecisionCommandResult) => void;
+  const command = vi.fn(() => new Promise<DecisionCommandResult>((resolve) => { finishCommand = resolve; }));
+  const repository = { load: vi.fn().mockResolvedValue(workspace), command, events: vi.fn(), subscribe: vi.fn(() => () => undefined) } satisfies DecisionWorkspaceRepository;
+  render(<DecisionWorkspacePage repository={repository} trip={trip} member={member} onBack={() => undefined} />);
+
+  const save = await screen.findByRole("button", { name: "保存我的偏好" });
+  fireEvent.submit(save.closest("form")!);
+  document.body.tabIndex = -1;
+  document.body.focus();
+
+  await act(async () => finishCommand({ ok: false, error: "INVALID_REQUEST" }));
+
+  try {
+    await waitFor(() => expect(save).toHaveFocus());
+  } finally {
+    document.body.removeAttribute("tabindex");
+  }
+});
+
+test("restores the replacement preference submit action when the failed command trigger disconnects", async () => {
+  let finishCommand!: (result: DecisionCommandResult) => void;
+  let publish!: (next: DecisionWorkspace) => void;
+  const command = vi.fn(() => new Promise<DecisionCommandResult>((resolve) => { finishCommand = resolve; }));
+  const repository = {
+    load: vi.fn().mockResolvedValue(workspace),
+    command,
+    events: vi.fn(),
+    subscribe: vi.fn((_tripId: string, onChange: (next: DecisionWorkspace) => void) => {
+      publish = onChange;
+      return () => undefined;
+    }),
+  } satisfies DecisionWorkspaceRepository;
+  const user = userEvent.setup();
+  render(<DecisionWorkspacePage repository={repository} trip={trip} member={member} onBack={() => undefined} />);
+
+  const disconnectedTrigger = await screen.findByRole("button", { name: "保存我的偏好" });
+  await user.click(disconnectedTrigger);
+  act(() => publish({
+    ...workspace,
+    preferences: [{ ...workspace.preferences[0]!, revision: 2 }],
+  }));
+  expect(disconnectedTrigger.isConnected).toBe(false);
+  const replacementSave = screen.getByRole("button", { name: "保存我的偏好" });
+  document.body.tabIndex = -1;
+  document.body.focus();
+
+  await act(async () => finishCommand({ ok: false, error: "INVALID_REQUEST" }));
+
+  try {
+    await waitFor(() => expect(replacementSave).toHaveFocus());
+  } finally {
+    document.body.removeAttribute("tabindex");
+  }
+});
+
+test("keeps only the confirmation action primary after a candidate is placed", async () => {
+  const placedWorkspace = {
+    ...workspace,
+    candidates: [candidate],
+    placements: [{
+      id: "placement-1",
+      tripId: "trip-1",
+      candidateId: "candidate-1",
+      tripDayId: "day-1",
+      date: "2026-10-01",
+      sortKey: "a0",
+      status: "planned",
+      revision: 1,
+      updatedAt: "2026-08-28T00:00:00.000Z",
+    }],
+  } satisfies DecisionWorkspace;
+  const repository = { load: vi.fn().mockResolvedValue(placedWorkspace), command: vi.fn(), events: vi.fn(), subscribe: vi.fn(() => () => undefined) } satisfies DecisionWorkspaceRepository;
+  render(<DecisionWorkspacePage repository={repository} trip={trip} member={member} onBack={() => undefined} />);
+
+  const adjust = await screen.findByRole("button", { name: "调整暂定日程" });
+  const confirm = screen.getByRole("button", { name: "确认这张票根" });
+
+  expect(adjust).toHaveClass("control-button--secondary");
+  expect(adjust).not.toHaveClass("control-button--primary");
+  expect(confirm).toHaveClass("control-button--primary");
+});
+
+test("keeps the disabled confirmation secondary until a candidate is placed", async () => {
+  const unplacedWorkspace = { ...workspace, candidates: [candidate] } satisfies DecisionWorkspace;
+  const repository = { load: vi.fn().mockResolvedValue(unplacedWorkspace), command: vi.fn(), events: vi.fn(), subscribe: vi.fn(() => () => undefined) } satisfies DecisionWorkspaceRepository;
+  render(<DecisionWorkspacePage repository={repository} trip={trip} member={member} onBack={() => undefined} />);
+
+  const add = await screen.findByRole("button", { name: "加入暂定行程" });
+  const confirm = screen.getByRole("button", { name: "确认这张票根" });
+
+  expect(add.closest(".decision-action-row")?.querySelectorAll(".control-button--primary")).toHaveLength(1);
+  expect(confirm).toBeDisabled();
+  expect(confirm).toHaveClass("control-button--secondary");
+  expect(confirm).not.toHaveClass("control-button--primary");
 });

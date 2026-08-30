@@ -11,8 +11,10 @@ test("explains the shared-trip requirement and returns to the itinerary", () => 
   expect(screen.getByRole("status")).toHaveTextContent("两位成员登录同一个共享行程");
   expect(screen.queryByText("已登录")).not.toBeInTheDocument();
   expect(screen.getAllByText("待验证", { selector: ".decision-access-travelers span" })).toHaveLength(2);
+  const back = screen.getByRole("button", { name: "返回行程" });
+  expect(back).toHaveClass("control-button", "control-button--text");
 
-  fireEvent.click(screen.getByRole("button", { name: "返回行程" }));
+  fireEvent.click(back);
 
   expect(onBack).toHaveBeenCalledOnce();
 });

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Member } from "@travel/contracts";
 import { useState } from "react";
@@ -30,8 +30,9 @@ const adminMember: Member = { uid: "fs_admin", displayName: "一鸣", role: "adm
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 function CallbackHarness() {
@@ -74,6 +75,32 @@ describe("authentication screen flow", () => {
     expect(screen.queryByText("一鸣与美垚的旅行")).not.toBeInTheDocument();
     recovery.resolve(adminMember);
     expect(await screen.findByText("一鸣与美垚的旅行")).toBeInTheDocument();
+  });
+
+  it("exposes and settles the bootstrap submission state", async () => {
+    const submission = deferred<{ role: "admin" }>();
+    bootstrapWithCode.mockReturnValue(submission.promise);
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/auth/bootstrap?state=test-state"]}>
+        <BootstrapPage />
+      </MemoryRouter>,
+    );
+
+    const codeInput = screen.getByLabelText("管理员口令");
+    await user.type(codeInput, "incorrect");
+    await user.click(screen.getByRole("button", { name: "完成并进入行程" }));
+
+    const pendingButton = screen.getByRole("button", { name: "正在确认身份…" });
+    expect(pendingButton).toHaveAttribute("aria-busy", "true");
+    expect(pendingButton).toBeDisabled();
+    expect(codeInput).toBeDisabled();
+
+    await act(async () => submission.reject(new Error("invalid code")));
+    const settledButton = screen.getByRole("button", { name: "完成并进入行程" });
+    expect(settledButton).toHaveAttribute("aria-busy", "false");
+    expect(settledButton).toBeEnabled();
+    expect(codeInput).toBeEnabled();
   });
 
   it("exchanges the one-time callback code and skips bootstrap for an approved member", async () => {
@@ -121,5 +148,29 @@ describe("authentication screen flow", () => {
     await userEvent.click(screen.getByRole("button", { name: "退出登录" }));
 
     expect(onLogout).toHaveBeenCalledTimes(1);
+  });
+
+  it("exposes and settles a failed pending-member exit", async () => {
+    const logout = deferred<void>();
+    const onLogout = vi.fn().mockReturnValue(logout.promise);
+    recoverAuthenticatedMember.mockResolvedValue({ ...adminMember, role: "pending" });
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <PendingApprovalPage onLogout={onLogout} />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "退出登录" }));
+    const pendingButton = screen.getByRole("button", { name: "正在退出…" });
+    expect(pendingButton).toHaveAttribute("aria-busy", "true");
+    expect(pendingButton).toBeDisabled();
+    expect(screen.getByRole("button", { name: "重新检查状态" })).toBeDisabled();
+
+    await act(async () => logout.reject(new Error("network")));
+    const settledButton = screen.getByRole("button", { name: "退出登录" });
+    expect(settledButton).toHaveAttribute("aria-busy", "false");
+    expect(settledButton).toBeEnabled();
+    expect(screen.getByRole("button", { name: "重新检查状态" })).toBeEnabled();
   });
 });

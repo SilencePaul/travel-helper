@@ -19,7 +19,7 @@ test("does not offer an invalid partial transition without a paid amount", () =>
   render(<OrdersPanel orders={orders} onStatusChange={() => undefined} />);
   const select = screen.getByLabelText("山顶缆车状态");
   expect(screen.getByRole("option", { name: "部分支付" })).toBeDisabled();
-  expect(select).toHaveAccessibleDescription("请先录入实际已付金额，才能标记为部分支付。");
+  expect(select).toHaveAccessibleDescription("实际已付金额为 0 时，只能选择未支付。");
 });
 
 test("retains a paid-amount draft and reports an inline error when persistence rejects", async () => {
@@ -31,6 +31,19 @@ test("retains a paid-amount draft and reports an inline error when persistence r
   await user.click(screen.getByRole("button", { name: "保存 山顶缆车 金额" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("保存付款金额失败");
   expect(input).toHaveValue(80);
+});
+
+test("restores focus to the amount field when persistence rejects", async () => {
+  const user = userEvent.setup();
+  render(<OrdersPanel orders={orders} onStatusChange={() => undefined} onPaidChange={async () => { throw new Error("offline"); }} />);
+  const input = screen.getByLabelText("山顶缆车已付金额");
+
+  await user.clear(input);
+  await user.type(input, "80");
+  await user.click(screen.getByRole("button", { name: "保存 山顶缆车 金额" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("保存付款金额失败");
+  await waitFor(() => expect(input).toHaveFocus());
 });
 
 test("does not save a paid-amount draft merely by blurring the field", async () => {
@@ -69,14 +82,14 @@ test("owns validation, busy, and persistence feedback within the affected order 
 
   fireEvent.change(firstInput, { target: { value: "80" } });
   await user.click(screen.getByRole("button", { name: "保存 山顶缆车 金额" }));
-  const firstRow = firstInput.closest("li");
-  expect(firstRow).toHaveAttribute("aria-busy", "true");
-  expect(screen.getByRole("button", { name: "保存 山顶缆车 金额" })).toHaveTextContent("正在保存");
+  const firstSaveButton = screen.getByRole("button", { name: "保存 山顶缆车 金额" });
+  expect(firstSaveButton).toHaveAttribute("aria-busy", "true");
+  expect(firstSaveButton).toHaveTextContent("正在保存");
   expect(screen.getByLabelText("山顶缆车状态")).toBeDisabled();
 
   finishSave();
   expect(await screen.findByText("付款金额已保存")).toBeVisible();
-  expect(firstRow).toHaveAttribute("aria-busy", "false");
+  expect(firstSaveButton).toHaveAttribute("aria-busy", "false");
 });
 
 test("returns a reverted amount draft to idle without announcing a save", () => {
@@ -103,20 +116,36 @@ test("keeps concurrent order saves independently busy until each settles", async
   await user.click(screen.getByRole("button", { name: "保存 山顶缆车 金额" }));
   await user.click(screen.getByRole("button", { name: "保存 港澳船票 金额" }));
 
-  const firstRow = screen.getByLabelText("山顶缆车已付金额").closest("li");
-  const secondRow = screen.getByLabelText("港澳船票已付金额").closest("li");
-  expect(firstRow).toHaveAttribute("aria-busy", "true");
-  expect(secondRow).toHaveAttribute("aria-busy", "true");
-  expect(screen.getByRole("button", { name: "保存 山顶缆车 金额" })).toHaveTextContent("正在保存");
-  expect(screen.getByRole("button", { name: "保存 港澳船票 金额" })).toHaveTextContent("正在保存");
+  const firstSaveButton = screen.getByRole("button", { name: "保存 山顶缆车 金额" });
+  const secondSaveButton = screen.getByRole("button", { name: "保存 港澳船票 金额" });
+  expect(firstSaveButton).toHaveAttribute("aria-busy", "true");
+  expect(secondSaveButton).toHaveAttribute("aria-busy", "true");
+  expect(firstSaveButton).toHaveTextContent("正在保存");
+  expect(secondSaveButton).toHaveTextContent("正在保存");
 
   await act(async () => resolvers.get("ticket")?.());
-  await waitFor(() => expect(firstRow).toHaveAttribute("aria-busy", "false"));
-  expect(secondRow).toHaveAttribute("aria-busy", "true");
+  await waitFor(() => expect(firstSaveButton).toHaveAttribute("aria-busy", "false"));
+  expect(secondSaveButton).toHaveAttribute("aria-busy", "true");
   expect(screen.getByLabelText("港澳船票状态")).toBeDisabled();
 
   await act(async () => resolvers.get("ferry")?.());
-  await waitFor(() => expect(secondRow).toHaveAttribute("aria-busy", "false"));
+  await waitFor(() => expect(secondSaveButton).toHaveAttribute("aria-busy", "false"));
+});
+
+test("keeps the saving announcement outside the busy subtree", async () => {
+  let finishSave!: () => void;
+  const onPaidChange = vi.fn(() => new Promise<void>((resolve) => { finishSave = resolve; }));
+  const user = userEvent.setup();
+  render(<OrdersPanel orders={orders} onStatusChange={() => undefined} onPaidChange={onPaidChange} />);
+
+  fireEvent.change(screen.getByLabelText("山顶缆车已付金额"), { target: { value: "80" } });
+  const saveButton = screen.getByRole("button", { name: "保存 山顶缆车 金额" });
+  await user.click(saveButton);
+
+  expect(screen.getByText("正在保存付款金额").closest('[aria-busy="true"]')).toBeNull();
+  expect(saveButton).toHaveAttribute("aria-busy", "true");
+
+  await act(async () => finishSave());
 });
 
 test("rejects an amount whose cent value is not a safe integer", async () => {
@@ -148,4 +177,50 @@ test("keeps two persistence rejections scoped to their own order rows", async ()
   await user.click(screen.getByRole("button", { name: "保存 港澳船票 金额" }));
   expect(secondInput).toHaveAccessibleDescription("保存付款金额失败，请重试");
   expect(screen.getAllByRole("alert")).toHaveLength(2);
+});
+
+test("uses stable single-token DOM IDs for order descriptions", async () => {
+  const unsafeIdOrder = { ...orders[0]!, id: "ticket / first" };
+  const user = userEvent.setup();
+  const view = render(<OrdersPanel orders={[unsafeIdOrder]} onStatusChange={() => undefined} onPaidChange={() => undefined} />);
+  const input = screen.getByLabelText("山顶缆车已付金额");
+
+  fireEvent.change(input, { target: { value: "1.234" } });
+  await user.click(screen.getByRole("button", { name: "保存 山顶缆车 金额" }));
+
+  const errorId = input.getAttribute("aria-describedby")!;
+  const statusHelpId = screen.getByLabelText("山顶缆车状态").getAttribute("aria-describedby")!;
+  expect(errorId).not.toMatch(/\s/);
+  expect(statusHelpId).not.toMatch(/\s/);
+  expect(document.getElementById(errorId)).toHaveRole("alert");
+  expect(document.getElementById(statusHelpId)).toHaveTextContent("金额尚未保存；请先保存金额，再更改支付状态");
+
+  view.rerender(<OrdersPanel orders={[{ ...unsafeIdOrder }]} onStatusChange={() => undefined} onPaidChange={() => undefined} />);
+  expect(screen.getByLabelText("山顶缆车已付金额")).toHaveAttribute("aria-describedby", errorId);
+  expect(screen.getByLabelText("山顶缆车状态")).toHaveAttribute("aria-describedby", statusHelpId);
+});
+
+test("explains every rule that disables or constrains payment status", async () => {
+  let finishSave!: () => void;
+  const onPaidChange = vi.fn(() => new Promise<void>((resolve) => { finishSave = resolve; }));
+  const paidOrder = { ...secondOrder, paid: 8000, status: "partial" as const };
+  const user = userEvent.setup();
+  const view = render(<OrdersPanel orders={[orders[0]!, paidOrder]} onStatusChange={() => undefined} onPaidChange={onPaidChange} />);
+  const unpaidStatus = screen.getByLabelText("山顶缆车状态");
+  const paidStatus = screen.getByLabelText("港澳船票状态");
+
+  expect(unpaidStatus).toHaveAccessibleDescription("实际已付金额为 0 时，只能选择未支付。");
+  expect(paidStatus).toHaveAccessibleDescription("已有已付金额时，不能选择未支付；请先将已付金额保存为 0。");
+
+  fireEvent.change(screen.getByLabelText("山顶缆车已付金额"), { target: { value: "80" } });
+  expect(unpaidStatus).toBeDisabled();
+  expect(unpaidStatus).toHaveAccessibleDescription("金额尚未保存；请先保存金额，再更改支付状态。 实际已付金额为 0 时，只能选择未支付。");
+
+  await user.click(screen.getByRole("button", { name: "保存 山顶缆车 金额" }));
+  expect(unpaidStatus).toHaveAccessibleDescription("正在保存付款金额；保存完成后才能更改支付状态。 实际已付金额为 0 时，只能选择未支付。");
+  await act(async () => finishSave());
+
+  view.rerender(<OrdersPanel orders={[orders[0]!, paidOrder]} onStatusChange={() => undefined} onPaidChange={onPaidChange} disabled />);
+  expect(paidStatus).toBeDisabled();
+  expect(paidStatus).toHaveAccessibleDescription("行程正在保存；完成后才能更改支付状态。 已有已付金额时，不能选择未支付；请先将已付金额保存为 0。");
 });

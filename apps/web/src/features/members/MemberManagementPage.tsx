@@ -99,9 +99,16 @@ export function MemberManagementPage({ command = cloudbaseCommand, initialMember
   async function approve(member: Member, trigger: HTMLButtonElement) {
     const succeeded = await act(member, "approveMember");
     if (succeeded) setStatus(`已批准${member.displayName}`);
-    queueMicrotask(() => {
-      if (succeeded) activeHeadingRef.current?.focus();
-      else trigger.focus();
+    requestAnimationFrame(() => {
+      if (!succeeded) {
+        trigger.focus();
+        return;
+      }
+      const nextApproval = mainRef.current?.querySelector<HTMLButtonElement>('[data-member-action="approveMember"]');
+      const nextApprovalStep = nextApproval?.disabled
+        ? nextApproval.closest(".member-row")?.querySelector<HTMLInputElement>("input")
+        : nextApproval;
+      (nextApprovalStep ?? activeHeadingRef.current)?.focus();
     });
   }
 
@@ -146,7 +153,7 @@ export function MemberManagementPage({ command = cloudbaseCommand, initialMember
     if (!confirmation) return;
     const { member, action } = confirmation;
     const selector = `[data-member-action="${action}"]`;
-    const actionIndex = Array.from(mainRef.current?.querySelectorAll<HTMLButtonElement>(selector) ?? []).indexOf(confirmation.trigger);
+    const actionIndex = Array.from(mainRef.current?.querySelectorAll<HTMLButtonElement>(`${selector}:not(:disabled)`) ?? []).indexOf(confirmation.trigger);
     confirmationDialogRef.current?.focus();
     const succeeded = await act(member, action);
     if (!succeeded) {
@@ -156,7 +163,7 @@ export function MemberManagementPage({ command = cloudbaseCommand, initialMember
     setStatus(action === "rejectMember" ? `已拒绝${member.displayName}` : `已移除${member.displayName}`);
     setConfirmation(undefined);
     requestAnimationFrame(() => {
-      const actions = Array.from(mainRef.current?.querySelectorAll<HTMLButtonElement>(selector) ?? []);
+      const actions = Array.from(mainRef.current?.querySelectorAll<HTMLButtonElement>(`${selector}:not(:disabled)`) ?? []);
       const nextAction = actions[Math.min(Math.max(actionIndex, 0), actions.length - 1)];
       if (nextAction) nextAction.focus();
       else (action === "rejectMember" ? pendingHeadingRef.current : activeHeadingRef.current)?.focus();
@@ -179,7 +186,7 @@ export function MemberManagementPage({ command = cloudbaseCommand, initialMember
         {pending.map((member) => <div key={member.uid} className="member-row member-row--verification" aria-busy={busyUid === member.uid}>
           <span><b>{member.displayName}</b><small>请先通过飞书私聊或当面核对对方等待页上的身份校验码。</small></span>
           <label>身份校验码<input className="control-field" aria-label={`输入${member.displayName}的身份校验码`} autoComplete="off" inputMode="text" placeholder="XXXX-XXXX" value={verificationCodes[member.uid] ?? ""} onChange={(event) => setVerificationCodes((current) => ({ ...current, [member.uid]: event.target.value }))} /></label>
-          <span><button className="control-button control-button--primary" type="button" disabled={busyUid !== undefined || !matchesMemberVerificationCode(member.uid, verificationCodes[member.uid] ?? "")} onClick={(event) => void approve(member, event.currentTarget)}>{busyUid === member.uid ? "正在批准" : "核对后批准"}</button><button className="control-button control-button--danger" type="button" data-member-action="rejectMember" disabled={busyUid !== undefined} onClick={(event) => openConfirmation(member, "rejectMember", event.currentTarget)}>拒绝</button></span>
+          <span><button className="control-button control-button--primary" type="button" data-member-action="approveMember" disabled={busyUid !== undefined || !matchesMemberVerificationCode(member.uid, verificationCodes[member.uid] ?? "")} onClick={(event) => void approve(member, event.currentTarget)}>{busyUid === member.uid ? "正在批准" : "核对后批准"}</button><button className="control-button control-button--danger" type="button" data-member-action="rejectMember" disabled={busyUid !== undefined} onClick={(event) => openConfirmation(member, "rejectMember", event.currentTarget)}>拒绝</button></span>
         </div>)}
         {!loading && !error && pending.length === 0 ? <p className="empty-state">暂无待批准成员</p> : null}
       </section>

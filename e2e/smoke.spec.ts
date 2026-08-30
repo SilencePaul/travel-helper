@@ -1,4 +1,11 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
+
+async function expectMinimumTouchTarget(locator: Locator) {
+  await expect.poll(async () => {
+    const box = await locator.boundingBox();
+    return box ? Math.min(box.width, box.height) : 0;
+  }).toBeGreaterThanOrEqual(44);
+}
 
 test("renders the travel app shell", async ({ page }) => {
   await page.goto("/");
@@ -13,22 +20,24 @@ test("keeps representative shared controls and feedback layout persistent", asyn
   const danger = page.getByRole("button", { name: "删除当天" });
   const field = page.getByLabel("北京 → 深圳、珠海 → 北京机票（两人）已付金额");
 
+  await Promise.all([primary, text, danger, field].map(expectMinimumTouchTarget));
+
   await expect.poll(() => primary.evaluate((element) => {
     const style = getComputedStyle(element);
-    return { minHeight: style.minHeight, height: element.getBoundingClientRect().height, background: style.backgroundColor, radius: style.borderRadius };
-  })).toMatchObject({ minHeight: "44px", height: 44, background: "rgb(32, 77, 63)", radius: "4px" });
+    return { minHeight: style.minHeight, background: style.backgroundColor, radius: style.borderRadius };
+  })).toMatchObject({ minHeight: "44px", background: "rgb(32, 77, 63)", radius: "4px" });
   await expect.poll(() => text.evaluate((element) => {
     const style = getComputedStyle(element);
-    return { minHeight: style.minHeight, height: element.getBoundingClientRect().height, background: style.backgroundColor, decoration: style.textDecorationLine };
-  })).toMatchObject({ minHeight: "44px", height: 44, background: "rgba(0, 0, 0, 0)", decoration: "underline" });
+    return { minHeight: style.minHeight, background: style.backgroundColor, decoration: style.textDecorationLine };
+  })).toMatchObject({ minHeight: "44px", background: "rgba(0, 0, 0, 0)", decoration: "underline" });
   await expect.poll(() => danger.evaluate((element) => {
     const style = getComputedStyle(element);
-    return { minHeight: style.minHeight, height: element.getBoundingClientRect().height, color: style.color };
-  })).toMatchObject({ minHeight: "44px", height: 44, color: "rgb(132, 51, 37)" });
+    return { minHeight: style.minHeight, color: style.color };
+  })).toMatchObject({ minHeight: "44px", color: "rgb(132, 51, 37)" });
   await expect.poll(() => field.evaluate((element) => {
     const style = getComputedStyle(element);
-    return { minHeight: style.minHeight, height: element.getBoundingClientRect().height, fontSize: style.fontSize, radius: style.borderRadius };
-  })).toMatchObject({ minHeight: "44px", height: 44, fontSize: "16px", radius: "4px" });
+    return { minHeight: style.minHeight, fontSize: style.fontSize, radius: style.borderRadius };
+  })).toMatchObject({ minHeight: "44px", fontSize: "16px", radius: "4px" });
 
   await text.focus();
   await expect.poll(() => text.evaluate((element) => {
@@ -45,6 +54,113 @@ test("keeps representative shared controls and feedback layout persistent", asyn
     const controls = [...row.querySelectorAll<HTMLElement>("input, button, select")];
     return status.getBoundingClientRect().top >= Math.max(...controls.map((control) => control.getBoundingClientRect().bottom)) - 1;
   })).toBe(true);
+});
+
+test("keeps minimum-size drag handles outside their date tabs", async ({ page }) => {
+  await page.goto("/");
+  const tab = page.getByRole("tab", { name: /D1/ });
+  const handle = page.getByRole("button", { name: "拖动 D1" });
+
+  await expectMinimumTouchTarget(handle);
+
+  await expect.poll(async () => {
+    const tabBox = await tab.boundingBox();
+    const handleBox = await handle.boundingBox();
+    if (!tabBox || !handleBox) return null;
+    const overlapWidth = Math.max(0, Math.min(tabBox.x + tabBox.width, handleBox.x + handleBox.width) - Math.max(tabBox.x, handleBox.x));
+    const overlapHeight = Math.max(0, Math.min(tabBox.y + tabBox.height, handleBox.y + handleBox.height) - Math.max(tabBox.y, handleBox.y));
+    return overlapWidth * overlapHeight;
+  }).toBe(0);
+});
+
+test("keeps the focused day tab on the shared 3px outline-offset", async ({ page }) => {
+  await page.goto("/");
+  const tablist = page.getByRole("tablist", { name: "旅行日期" });
+  const firstTab = page.getByRole("tab", { name: /D1/ });
+  await firstTab.focus();
+
+  await expect.poll(async () => {
+    const listBox = await tablist.boundingBox();
+    const tabBox = await firstTab.boundingBox();
+    if (!listBox || !tabBox) return { topClearance: false, leftClearance: false };
+    return {
+      topClearance: tabBox.y - listBox.y >= 6,
+      leftClearance: tabBox.x - listBox.x >= 6,
+    };
+  }).toEqual({ topClearance: true, leftClearance: true });
+
+  await page.keyboard.press("ArrowRight");
+  const focusedTab = page.getByRole("tab", { name: /D2/ });
+
+  await expect(focusedTab).toBeFocused();
+  await expect.poll(() => focusedTab.evaluate((element) => ({
+    focusVisible: element.matches(":focus-visible"),
+    outlineOffset: getComputedStyle(element).outlineOffset,
+  }))).toEqual({ focusVisible: true, outlineOffset: "3px" });
+});
+
+test("keeps overview actions on the shared font size at narrow widths", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "narrow shared-control coverage");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+
+  await expect(page.getByRole("button", { name: "复制当天" })).toHaveCSS("font-size", "14px");
+});
+
+test("uses the shared control contract at the protected shared-decision entry", async ({ page }) => {
+  await page.goto("/");
+  const entry = page.getByRole("button", { name: "共同决定" });
+  await expect(entry).toHaveClass("control-button control-button--text");
+  await expect(entry).toHaveCSS("font-size", "14px");
+  await entry.click();
+
+  await expect(page).toHaveURL(/\/decisions$/);
+  await expect(page.getByRole("heading", { name: /共同决定，\s*需要两张同行票/ })).toBeVisible();
+  const returnControl = page.getByRole("button", { name: "返回行程" });
+  await expect(returnControl).toHaveClass("control-button control-button--text");
+  await expect(returnControl).toHaveCSS("font-size", "14px");
+});
+
+test("removes authentication hover movement when reduced motion is requested", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/");
+  const authButton = page.locator("body > .auth-primary");
+  await page.evaluate(() => {
+    const button = document.createElement("button");
+    button.className = "auth-primary";
+    button.textContent = "认证操作";
+    document.body.append(button);
+  });
+
+  await authButton.hover();
+  await expect(authButton).toHaveCSS("transform", "none");
+});
+
+test("keeps member confirmation actions visible in a low viewport", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "low viewport dialog coverage");
+  await page.setViewportSize({ width: 320, height: 240 });
+  await page.goto("/?__testMemberManagement=1");
+  await page.getByRole("button", { name: "成员管理" }).click();
+  await expect(page).toHaveURL(/\/admin\/members$/);
+  await expect(page.getByRole("heading", { name: "成员管理" })).toBeVisible();
+
+  const memberRow = page.locator(".member-row").filter({ hasText: "低视口测试同行者（名字很长）" });
+  await memberRow.getByRole("button", { name: "移除", exact: true }).click();
+  const dialog = page.getByRole("alertdialog", { name: "确认移除低视口测试同行者（名字很长）" });
+
+  await expect.poll(() => dialog.evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    const actionsElement = element.querySelector(":scope > div")!;
+    const actions = actionsElement.getBoundingClientRect();
+    return {
+      modal: element.matches(":modal"),
+      insideViewport: box.top >= 16 && box.bottom <= window.innerHeight - 16,
+      actionsVisible: actions.top >= box.top && actions.bottom <= Math.min(box.bottom, window.innerHeight),
+      overflowY: getComputedStyle(element).overflowY,
+      maxHeight: getComputedStyle(element).maxHeight,
+      actionsPosition: getComputedStyle(actionsElement).position,
+    };
+  })).toEqual({ modal: true, insideViewport: true, actionsVisible: true, overflowY: "auto", maxHeight: "208px", actionsPosition: "sticky" });
 });
 
 test("bounds the date warning and wraps its actions", async ({ page }) => {
@@ -165,7 +281,7 @@ test("keeps the drag handle focused and inert during a delayed save", async ({ p
   await page.mouse.move(target!.x + target!.width / 2, target!.y + target!.height / 2);
   await expect(firstHandle).not.toHaveAttribute("aria-pressed", "true");
   await page.mouse.up();
-  await expect(page.getByText("正在保存")).toBeVisible();
+  await expect(page.getByText("正在保存", { exact: true })).toBeVisible();
 
   await expect(page.getByText("正在使用本地计划")).toBeVisible();
   await expect(firstHandle).toHaveAccessibleName("拖动 D2");
@@ -189,6 +305,7 @@ test("restaurant drawer shows sourced details and restores focus on desktop", as
   await card.click();
   const drawer = page.getByRole("dialog", { name: "%Arabica(香港凌霄阁店)" });
   await expect(drawer).toBeVisible();
+  await expect.poll(() => drawer.evaluate((element) => element.matches(":modal"))).toBe(true);
   const drawerBox = await drawer.boundingBox();
   expect(drawerBox?.x + drawerBox!.width).toBeCloseTo(page.viewportSize()!.width, 0);
   await expect(drawer.getByText(/HK\$45–60/)).toBeVisible();
@@ -196,11 +313,13 @@ test("restaurant drawer shows sourced details and restores focus on desktop", as
   await expect(drawer.getByRole("link", { name: "开始导航（新窗口）" })).toHaveAttribute("href", /uri\.amap\.com\/navigation/);
   await expect(drawer.getByRole("link", { name: "开始导航（新窗口）" })).toHaveAttribute("href", /callnative=1/);
   await expect(page.locator("#root")).toHaveAttribute("inert", "");
+  await expect(page.locator("#root")).toHaveAttribute("aria-hidden", "true");
   await expect(page.locator("body")).toHaveCSS("overflow", "hidden");
   await expect(page.locator(".back-button").click({ timeout: 300 })).rejects.toThrow();
   await page.keyboard.press("Escape");
   await expect(drawer).toBeHidden();
   await expect(page.locator("#root")).not.toHaveAttribute("inert", "");
+  await expect(page.locator("#root")).not.toHaveAttribute("aria-hidden", "true");
   await expect(page.locator("body")).toHaveCSS("overflow", "visible");
   await expect(card).toBeFocused();
 });

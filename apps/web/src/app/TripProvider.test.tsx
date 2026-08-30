@@ -292,6 +292,34 @@ test("lets the user retry a failed trip load without refreshing the browser", as
   expect(repository.load).toHaveBeenCalledTimes(2);
 });
 
+test("focuses the retry action after initial and repeated trip load failures", async () => {
+  const firstLoad = deferred<Trip>();
+  const secondLoad = deferred<Trip>();
+  const repository: TripRepository = {
+    load: vi.fn()
+      .mockReturnValueOnce(firstLoad.promise)
+      .mockReturnValueOnce(secondLoad.promise),
+    save: vi.fn(),
+    subscribe: () => () => undefined,
+  };
+  const user = userEvent.setup();
+  render(
+    <TripProvider repository={repository} tripId={seed.id}>
+      <ProviderProbe />
+    </TripProvider>,
+  );
+
+  expect(screen.getByRole("status")).toHaveTextContent("正在加载旅行计划");
+  await act(async () => firstLoad.reject(new Error("initial outage")));
+  const firstRetry = await screen.findByRole("button", { name: "重新加载" });
+  expect(firstRetry).toHaveFocus();
+
+  await user.click(firstRetry);
+  expect(screen.getByRole("status")).toHaveTextContent("正在加载旅行计划");
+  await act(async () => secondLoad.reject(new Error("repeated outage")));
+  expect(await screen.findByRole("button", { name: "重新加载" })).toHaveFocus();
+});
+
 test("ignores a delayed save result from a replaced repository", async () => {
   const firstRepository = new ControlledTripRepository();
   const secondRepository = new ControlledTripRepository();

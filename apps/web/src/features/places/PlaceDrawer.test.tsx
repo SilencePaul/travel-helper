@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import type { AttractionPlace, RestaurantPlace } from "@travel/contracts";
 import { expect, test, vi } from "vitest";
 import { PlaceDrawer } from "./PlaceDrawer";
+import placeDrawerSource from "./PlaceDrawer.tsx?raw";
 
 const sources = [
   { label: "官方资料", url: "https://example.com/official", kind: "official" as const, checkedAt: "2026-08-26T00:00:00.000Z" },
@@ -43,6 +44,14 @@ test("restaurant drawer shows sourced food details and navigation", async () => 
   expect(navigation).toHaveAttribute("href", expect.stringContaining("uri.amap.com/navigation"));
   expect(navigation).toHaveAttribute("href", expect.stringContaining("callnative=1"));
   await user.click(navigation);
+});
+
+test("gives the restaurant website and source links exact new-window accessible names", () => {
+  render(<PlaceDrawer place={restaurant} triggerRef={{ current: null }} onClose={() => undefined} />);
+
+  expect(screen.getByRole("link", { name: "查看餐厅官网（新窗口）" })).toHaveAttribute("target", "_blank");
+  expect(screen.getByRole("link", { name: "官方资料 · 2026年8月26日（新窗口）" })).toHaveAttribute("target", "_blank");
+  expect(screen.getByRole("link", { name: "小红书搜索 · 2026年8月26日（新窗口）" })).toHaveAttribute("target", "_blank");
 });
 
 test("attraction drawer shows visit details and official booking", () => {
@@ -114,6 +123,12 @@ test("offers a selectable manual address when clipboard access is unavailable or
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) } });
   render(<PlaceDrawer place={restaurant} triggerRef={{ current: null }} onClose={() => undefined} />);
   await user.click(screen.getByRole("button", { name: "复制地址" }));
-  expect(await screen.findByText("无法自动复制，请手动复制下方地址")).toBeVisible();
-  expect(screen.getByLabelText("可手动复制的地址")).toHaveValue(restaurant.address);
+  expect(await screen.findByRole("alert")).toHaveTextContent("无法自动复制，请手动复制下方地址");
+  expect(screen.getByText("手动复制地址", { exact: true })).toBeVisible();
+  expect(screen.getByRole("textbox", { name: "手动复制地址" })).toHaveValue(restaurant.address);
+});
+
+test("models copy outcomes structurally instead of inferring failure from localized text", () => {
+  expect(placeDrawerSource).toMatch(/"success"\s*\|\s*"error"/);
+  expect(placeDrawerSource).not.toContain(".startsWith(");
 });

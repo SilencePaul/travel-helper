@@ -61,6 +61,7 @@ export function OverviewPage({
   const [rangeEnd, setRangeEnd] = useState(trip.endDate);
   const [rangeWarning, setRangeWarning] = useState<{ startDate: string; endDate: string; orders: AffectedOrder[] }>();
   const [rangeValidationError, setRangeValidationError] = useState<string>();
+  const [rangeValidationTarget, setRangeValidationTarget] = useState<"start" | "end">("end");
   const [rangePersistenceError, setRangePersistenceError] = useState<string>();
   const [rangeSaving, setRangeSaving] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
@@ -77,6 +78,8 @@ export function OverviewPage({
   const deleteDescriptionId = useId();
   const rangeTitleId = useId();
   const rangeDescriptionId = useId();
+  const rangeValidationErrorId = useId();
+  const rangePersistenceErrorId = useId();
   const requestedIndex = trip.days.findIndex((day) => day.id === selectedDayId);
   const selectedIndex = requestedIndex >= 0 ? requestedIndex : trip.days.length > 0 ? 0 : -1;
   const selectedDay = trip.days[selectedIndex];
@@ -138,7 +141,7 @@ export function OverviewPage({
       requestAnimationFrame(() => dateTriggerRef.current?.focus());
     } catch (error) {
       setRangePersistenceError(error instanceof Error ? error.message : "日期修改失败，请重试");
-      if (confirmed) requestAnimationFrame(() => rangeConfirmRef.current?.focus());
+      requestAnimationFrame(() => (confirmed ? rangeConfirmRef : dateTriggerRef).current?.focus());
     } finally {
       if (confirmed) setRangeSaving(false);
     }
@@ -200,12 +203,14 @@ export function OverviewPage({
   }
 
   function changeRangeStart(value: string) {
+    setRangeValidationTarget("start");
     setRangeStart(value);
     setRangePersistenceError(undefined);
     if (rangeValidationError) setRangeValidationError(validateDateRange(value, rangeEnd));
   }
 
   function changeRangeEnd(value: string) {
+    setRangeValidationTarget("end");
     setRangeEnd(value);
     setRangePersistenceError(undefined);
     if (rangeValidationError) setRangeValidationError(validateDateRange(rangeStart, value));
@@ -251,7 +256,7 @@ export function OverviewPage({
       setDeleteError(error instanceof Error && error.message
         ? error.message
         : "删除失败，请重试");
-      deleteDialogRef.current?.focus();
+      requestAnimationFrame(() => confirmButtonRef.current?.focus());
     } finally {
       setIsDeleting(false);
     }
@@ -373,11 +378,11 @@ export function OverviewPage({
 
       {onChangeDateRange ? <section className="date-range" aria-labelledby="date-range-heading">
         <div><p className="eyebrow">日期</p><h2 id="date-range-heading">调整旅行日期</h2></div>
-        <label>开始日期<input className="control-field" type="date" value={rangeStart} aria-invalid={rangeValidationError ? "true" : undefined} aria-describedby={rangeValidationError ? "date-range-validation-error" : undefined} onChange={(event) => changeRangeStart(event.target.value)} /></label>
-        <label>结束日期<input className="control-field" type="date" value={rangeEnd} aria-invalid={rangeValidationError ? "true" : undefined} aria-describedby={rangeValidationError ? "date-range-validation-error" : undefined} onChange={(event) => changeRangeEnd(event.target.value)} /></label>
+        <label>开始日期<input className="control-field" type="date" value={rangeStart} aria-invalid={rangeValidationError && rangeValidationTarget === "start" ? "true" : undefined} aria-describedby={rangeValidationError && rangeValidationTarget === "start" ? rangeValidationErrorId : undefined} onChange={(event) => changeRangeStart(event.target.value)} /></label>
+        <label>结束日期<input className="control-field" type="date" value={rangeEnd} aria-invalid={rangeValidationError && rangeValidationTarget === "end" ? "true" : undefined} aria-describedby={rangeValidationError && rangeValidationTarget === "end" ? rangeValidationErrorId : undefined} onChange={(event) => changeRangeEnd(event.target.value)} /></label>
         <button ref={dateTriggerRef} className="control-button control-button--primary" type="button" onClick={() => void requestDateRange()} disabled={isSaving || rangeSaving}>更新日期</button>
-        {rangeValidationError ? <p id="date-range-validation-error" role="alert">{rangeValidationError}</p> : null}
-        {rangePersistenceError && !rangeWarning ? <p id="date-range-persistence-error" role="alert">{rangePersistenceError}</p> : null}
+        {rangeValidationError ? <p id={rangeValidationErrorId} role="alert">{rangeValidationError}</p> : null}
+        {rangePersistenceError && !rangeWarning ? <p id={rangePersistenceErrorId} role="alert">{rangePersistenceError}</p> : null}
       </section> : null}
 
       {rangeWarning ? <dialog ref={rangeDialogRef} className="date-warning" aria-modal="true" aria-labelledby={rangeTitleId} aria-describedby={rangeDescriptionId} aria-busy={rangeSaving} tabIndex={-1} onCancel={(event) => { event.preventDefault(); cancelRangeWarning(); }} onKeyDown={handleRangeDialogKeyDown}>
@@ -390,7 +395,7 @@ export function OverviewPage({
 
       <div className="overview-sidepanels">
         <BudgetPanel trip={trip} />
-        <OrdersPanel orders={trip.orders ?? []} onStatusChange={onOrderStatusChange} onPaidChange={onOrderPaymentChange} disabled={isSaving} />
+        <OrdersPanel orders={trip.orders ?? []} onStatusChange={onOrderStatusChange} onPaidChange={onOrderPaymentChange} />
       </div>
 
       {trip.unscheduledItemIds.length > 0 ? (

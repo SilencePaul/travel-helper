@@ -126,6 +126,13 @@ function createBrowserTestRouteService(): RouteService | undefined {
   };
 }
 
+function createBrowserTestMemberFixture() {
+  if (!import.meta.env.DEV || new URLSearchParams(window.location.search).get("__testMemberManagement") !== "1") return undefined;
+  const admin = { uid: "e2e-admin", displayName: "测试管理员", role: "admin", version: 1, createdAt: "2026-08-30T00:00:00.000Z" } satisfies Member;
+  const companion = { uid: "e2e-companion", displayName: "低视口测试同行者（名字很长）", role: "member", version: 1, createdAt: "2026-08-30T00:00:00.000Z" } satisfies Member;
+  return { admin, members: [admin, companion] };
+}
+
 export function browserDataMode(isDevelopment: boolean, configuredMode: string | undefined): "cloudbase" | "local" | "invalid" {
   if (configuredMode === "cloudbase") return "cloudbase";
   return isDevelopment ? "local" : "invalid";
@@ -145,7 +152,8 @@ export function BrowserRoot() {
 function DevBrowserRoot() {
   const [repository] = useState(createBrowserTestRepository);
   const [routeService] = useState(createBrowserTestRouteService);
-  return <BrowserRouter><TripApp repository={repository} routeService={routeService} /></BrowserRouter>;
+  const [memberFixture] = useState(createBrowserTestMemberFixture);
+  return <BrowserRouter><TripApp repository={repository} routeService={routeService} member={memberFixture?.admin} memberManagementInitialMembers={memberFixture?.members} /></BrowserRouter>;
 }
 
 export function ProductionAuthGate() {

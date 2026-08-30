@@ -241,6 +241,34 @@ test("exposes the travel actions in text navigation and calls their original cal
   expect(onLogout).toHaveBeenCalledOnce();
 });
 
+test("exposes and settles the overview exit state", async () => {
+  let finishLogout!: () => void;
+  const onLogout = vi.fn(() => new Promise<void>((resolve) => { finishLogout = resolve; }));
+  const user = userEvent.setup();
+  render(
+    <OverviewPage
+      trip={threeDayTrip}
+      selectedDayId="day-1"
+      onSelectDay={() => undefined}
+      onAddDay={() => undefined}
+      onDuplicateDay={() => undefined}
+      onDeleteDay={() => undefined}
+      onMoveDay={() => undefined}
+      onLogout={onLogout}
+    />,
+  );
+
+  await user.click(screen.getByRole("button", { name: "退出登录" }));
+  const pendingButton = screen.getByRole("button", { name: "正在退出" });
+  expect(pendingButton).toHaveAttribute("aria-busy", "true");
+  expect(pendingButton).toBeDisabled();
+
+  await act(async () => finishLogout());
+  const settledButton = screen.getByRole("button", { name: "退出登录" });
+  expect(settledButton).toHaveAttribute("aria-busy", "false");
+  expect(settledButton).toBeEnabled();
+});
+
 test("moves focus to the destination main after route navigation", async () => {
   const user = userEvent.setup();
   const repository = new LocalTripRepository(threeDayTrip);
@@ -342,6 +370,40 @@ test("confirms the captured reviewed date range and keeps the warning retryable 
   await waitFor(() => expect(repository.saveRequests).toHaveLength(2));
 });
 
+test("restores the update trigger after an ordinary date save rejects without a warning", async () => {
+  let rejectSave!: (reason?: unknown) => void;
+  const onChangeDateRange = vi.fn(() => new Promise<{ affectedOrders: [] }>((_resolve, reject) => { rejectSave = reject; }));
+  const user = userEvent.setup();
+  render(
+    <OverviewPage
+      trip={threeDayTrip}
+      selectedDayId="day-1"
+      onSelectDay={() => undefined}
+      onAddDay={() => undefined}
+      onDuplicateDay={() => undefined}
+      onDeleteDay={() => undefined}
+      onMoveDay={() => undefined}
+      onChangeDateRange={onChangeDateRange}
+    />,
+  );
+  const start = screen.getByLabelText("开始日期");
+  const end = screen.getByLabelText("结束日期");
+  const updateButton = screen.getByRole("button", { name: "更新日期" });
+
+  fireEvent.change(end, { target: { value: "2026-10-06" } });
+  await user.click(updateButton);
+  await waitFor(() => expect(onChangeDateRange).toHaveBeenCalledOnce());
+  start.focus();
+  await act(async () => rejectSave(new Error("日期保存失败")));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("日期保存失败");
+  expect(start).not.toHaveAttribute("aria-invalid");
+  expect(end).not.toHaveAttribute("aria-invalid");
+  expect(end).not.toHaveAccessibleDescription();
+  expect(end).toHaveValue("2026-10-06");
+  await waitFor(() => expect(updateButton).toHaveFocus());
+});
+
 test("revalidates date input errors as either boundary changes", async () => {
   const onChangeDateRange = vi.fn(async () => ({ affectedOrders: [] }));
   const user = userEvent.setup();
@@ -363,6 +425,9 @@ test("revalidates date input errors as either boundary changes", async () => {
   fireEvent.change(end, { target: { value: "2026-10-02" } });
   await user.click(screen.getByRole("button", { name: "更新日期" }));
   expect(end).toHaveAttribute("aria-invalid", "true");
+  expect(end).toHaveAccessibleDescription("结束日期不能早于开始日期");
+  expect(start).not.toHaveAttribute("aria-invalid");
+  expect(start).not.toHaveAccessibleDescription();
   expect(screen.getByRole("alert")).toHaveTextContent("结束日期不能早于开始日期");
 
   fireEvent.change(start, { target: { value: "2026-10-01" } });
@@ -373,11 +438,46 @@ test("revalidates date input errors as either boundary changes", async () => {
   fireEvent.change(start, { target: { value: "2026-10-06" } });
   await user.click(screen.getByRole("button", { name: "更新日期" }));
   expect(start).toHaveAttribute("aria-invalid", "true");
+  expect(start).toHaveAccessibleDescription("结束日期不能早于开始日期");
+  expect(end).not.toHaveAttribute("aria-invalid");
+  expect(end).not.toHaveAccessibleDescription();
   fireEvent.change(end, { target: { value: "2026-10-07" } });
   expect(start).not.toHaveAttribute("aria-invalid");
   expect(end).not.toHaveAttribute("aria-invalid");
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   expect(onChangeDateRange).not.toHaveBeenCalled();
+});
+
+test("uses stable unique DOM IDs for date validation descriptions", async () => {
+  const user = userEvent.setup();
+  const props = {
+    trip: threeDayTrip,
+    selectedDayId: "day-1",
+    onSelectDay: () => undefined,
+    onAddDay: () => undefined,
+    onDuplicateDay: () => undefined,
+    onDeleteDay: () => undefined,
+    onMoveDay: () => undefined,
+    onChangeDateRange: async () => ({ affectedOrders: [] }),
+  };
+  const view = render(<><OverviewPage {...props} /><OverviewPage {...props} /></>);
+
+  for (const end of screen.getAllByLabelText("结束日期")) {
+    fireEvent.change(end, { target: { value: "2026-10-02" } });
+  }
+  for (const button of screen.getAllByRole("button", { name: "更新日期" })) {
+    await user.click(button);
+  }
+
+  const descriptionIds = screen.getAllByLabelText("结束日期").map((input) => input.getAttribute("aria-describedby")!);
+  expect(new Set(descriptionIds).size).toBe(2);
+  for (const id of descriptionIds) {
+    expect(id).not.toMatch(/\s/);
+    expect(document.getElementById(id)).toHaveRole("alert");
+  }
+
+  view.rerender(<><OverviewPage {...props} /><OverviewPage {...props} /></>);
+  expect(screen.getAllByLabelText("结束日期").map((input) => input.getAttribute("aria-describedby"))).toEqual(descriptionIds);
 });
 
 test("persists day controls and keeps removed items available to arrange", async () => {
@@ -481,6 +581,48 @@ test("disables every mutation control and exposes failure while a save is pendin
 
   await act(async () => repository.saveRequests[0]!.reject(new Error("offline")));
   expect(await screen.findByText("保存失败，请重试")).toBeVisible();
+});
+
+test("keeps order amount saves independently actionable while repository writes remain queued", async () => {
+  const tripWithOrders: Trip = {
+    ...threeDayTrip,
+    id: "trip-concurrent-order-saves",
+    orders: [
+      { id: "ticket", name: "山顶缆车", category: "ticket", estimated: 21600, paid: 0, currency: "HKD", status: "unpaid", dayId: "day-2" },
+      { id: "ferry", name: "港澳船票", category: "ticket", estimated: 15000, paid: 0, currency: "HKD", status: "unpaid", dayId: "day-2" },
+    ],
+  };
+  const repository = new DelayedSaveRepository(tripWithOrders);
+  const user = userEvent.setup();
+  render(<App repository={repository} tripId={tripWithOrders.id} />);
+
+  const ticketInput = await screen.findByLabelText("山顶缆车已付金额");
+  const ferryInput = screen.getByLabelText("港澳船票已付金额");
+  fireEvent.change(ticketInput, { target: { value: "8" } });
+  fireEvent.change(ferryInput, { target: { value: "6" } });
+  const ticketSave = screen.getByRole("button", { name: "保存 山顶缆车 金额" });
+  const ferrySave = screen.getByRole("button", { name: "保存 港澳船票 金额" });
+
+  await user.click(ticketSave);
+  await waitFor(() => expect(repository.saveRequests).toHaveLength(1));
+  expect(ticketSave).toHaveAttribute("aria-busy", "true");
+  expect(ferryInput).toBeEnabled();
+  expect(ferrySave).toBeEnabled();
+
+  await user.click(ferrySave);
+  expect(ferrySave).toHaveAttribute("aria-busy", "true");
+  expect(repository.saveRequests).toHaveLength(1);
+
+  await act(async () => repository.saveRequests[0]!.resolve({ ...repository.saveRequests[0]!.next, version: 1 }));
+  await waitFor(() => expect(repository.saveRequests).toHaveLength(2));
+  expect(repository.saveRequests[1]!.expectedVersion).toBe(1);
+  expect(repository.saveRequests[1]!.next.orders).toMatchObject([
+    { id: "ticket", paid: 800 },
+    { id: "ferry", paid: 600 },
+  ]);
+
+  await act(async () => repository.saveRequests[1]!.resolve({ ...repository.saveRequests[1]!.next, version: 2 }));
+  await waitFor(() => expect(ferrySave).toHaveAttribute("aria-busy", "false"));
 });
 
 test("restores direct-route selection and chooses the next day after middle deletion", async () => {
@@ -646,7 +788,9 @@ test("retains the modal and reports a rejected deletion", async () => {
   expect(onDeleteDay).toHaveBeenCalledWith("day-2");
   expect(await screen.findByRole("alert")).toHaveTextContent("无法删除这个旅行日");
   expect(screen.getByRole("alertdialog", { name: /删除 D2/ })).toHaveAttribute("open");
-  expect(screen.getByRole("alertdialog")).toHaveFocus();
+  const confirmButton = screen.getByRole("button", { name: "确认删除" });
+  expect(confirmButton).toBeEnabled();
+  await waitFor(() => expect(confirmButton).toHaveFocus());
 });
 
 test("does not delete a different day when an external update removes the modal target", async () => {

@@ -150,6 +150,34 @@ describe("ProductionAuthGate", () => {
     await waitFor(() => expect(screen.getByRole("main")).toHaveFocus());
   });
 
+  it("focuses the final authenticated trip main after it replaces the loading state", async () => {
+    let finishLoad!: (trip: typeof seededTrip) => void;
+    const repository: TripRepository = {
+      syncMode: "cloudbase",
+      load: () => new Promise((resolve) => { finishLoad = resolve; }),
+      save: async (trip) => trip,
+      subscribe: () => () => undefined,
+    };
+    render(
+      <MemoryRouter>
+        <TripApp
+          repository={repository}
+          member={{ uid: "fs_admin", displayName: "一鸣", role: "admin", version: 1, createdAt: "2026-08-27T00:00:00.000Z" }}
+        />
+      </MemoryRouter>,
+    );
+
+    const loadingMain = screen.getByRole("status").closest("main")!;
+    loadingMain.tabIndex = -1;
+    loadingMain.focus();
+    expect(loadingMain).toHaveFocus();
+
+    await act(async () => finishLoad(structuredClone(seededTrip)));
+
+    expect(await screen.findByRole("heading", { name: /两个人，\s*一条向南的路线。/ })).toBeVisible();
+    await waitFor(() => expect(screen.getByRole("main")).toHaveFocus());
+  });
+
   it("gives an administrator visible member management, back, and logout controls", async () => {
     const onLogout = vi.fn().mockResolvedValue(undefined);
     const repository: TripRepository = {

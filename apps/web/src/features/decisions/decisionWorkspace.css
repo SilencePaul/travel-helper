@@ -26,7 +26,7 @@
   font-family: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 .decision-access-nav { align-items: center; display: flex; justify-content: space-between; gap: 1rem; margin-bottom: clamp(3rem, 8vh, 6rem); }
-.decision-access-nav button { color: var(--decision-access-green); font-size: 0.78rem; font-weight: 700; }
+.decision-access-nav button { color: var(--decision-access-green); font-weight: 700; }
 .decision-access-nav button:hover { color: var(--decision-access-coral); }
 .decision-access-nav button:focus-visible { outline: 3px solid var(--accent-semantic); outline-offset: 4px; }
 .decision-access-nav > span { color: var(--decision-access-muted); font-size: 0.65rem; font-weight: 700; letter-spacing: 0.14em; text-align: right; }

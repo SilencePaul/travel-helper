@@ -13,6 +13,11 @@ type PlaceDrawerProps = {
   rainAlternative?: Place;
 };
 
+type CopyResult = {
+  status: "success" | "error";
+  message: string;
+};
+
 function formatCheckedAt(value: string) {
   return new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium" }).format(new Date(value));
 }
@@ -38,7 +43,7 @@ export function PlaceDrawer({ place, triggerRef, onClose, mobile = false, rainAl
   const contentId = useId();
   const [open, setOpen] = useState(true);
   const [mobileState, setMobileState] = useState<"partial" | "full">("partial");
-  const [copyMessage, setCopyMessage] = useState<string>();
+  const [copyResult, setCopyResult] = useState<CopyResult>();
   const [portalRoot, setPortalRoot] = useState<HTMLElement | null>(null);
   const viewportIsMobile = useSyncExternalStore(subscribeToMobileViewport, getMobileViewportSnapshot, () => false);
   const isMobile = mobile || viewportIsMobile;
@@ -58,9 +63,9 @@ export function PlaceDrawer({ place, triggerRef, onClose, mobile = false, rainAl
     try {
       if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
       await navigator.clipboard.writeText(place.address);
-      setCopyMessage("地址已复制");
+      setCopyResult({ status: "success", message: "地址已复制" });
     } catch {
-      setCopyMessage("无法自动复制，请手动复制下方地址");
+      setCopyResult({ status: "error", message: "无法自动复制，请手动复制下方地址" });
     }
   };
 
@@ -142,7 +147,7 @@ export function PlaceDrawer({ place, triggerRef, onClose, mobile = false, rainAl
           <button type="button" className="place-action control-button control-button--secondary" onClick={() => void copyAddress()}>复制地址</button>
           {communitySource ? <a className="place-action control-button control-button--text" aria-label="小红书搜索（新窗口）" href={communitySource.url} target="_blank" rel="noreferrer">小红书搜索</a> : null}
         </div>
-        {copyMessage ? <div className="copy-address-state" role="status"><p>{copyMessage}</p>{copyMessage.startsWith("无法") ? <input className="control-field" aria-label="可手动复制的地址" readOnly value={place.address} onFocus={(event) => event.currentTarget.select()} /> : null}</div> : null}
+        {copyResult ? <div className="copy-address-state" role={copyResult.status === "error" ? "alert" : "status"}><p>{copyResult.message}</p>{copyResult.status === "error" ? <label>手动复制地址<input className="control-field" readOnly value={place.address} onFocus={(event) => event.currentTarget.select()} /></label> : null}</div> : null}
         <section className="place-detail-section" aria-labelledby="place-sources">
           <h3 id="place-sources">资料来源</h3>
           <ul className="place-sources">
