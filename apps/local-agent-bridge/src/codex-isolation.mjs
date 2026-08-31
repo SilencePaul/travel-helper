@@ -67,16 +67,30 @@ function validThreadId(value) {
 }
 
 function parseProbeEvidence(response, check) {
-  if (!response || response.exitCode !== 0 || typeof response.stdout !== "string") throw new Error("probe failed");
+  if (
+    !response
+    || typeof response !== "object"
+    || Array.isArray(response)
+    || !Object.hasOwn(response, "exitCode")
+    || !Object.hasOwn(response, "stdout")
+    || response.exitCode !== 0
+    || typeof response.stdout !== "string"
+  ) {
+    throw new Error("probe failed");
+  }
   const lines = response.stdout.split(/\r?\n/u).filter((line) => line.trim());
   if (lines.length !== 1) throw new Error("invalid evidence");
   const evidence = JSON.parse(lines[0]);
   if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) throw new Error("invalid evidence");
+  if (!Object.hasOwn(evidence, "check") || !Object.hasOwn(evidence, "observed")) throw new Error("missing evidence");
   if (evidence.check !== check.name || evidence.observed !== check.expected) throw new Error("mismatched evidence");
-  if (Object.hasOwn(check, "target") && evidence.target !== check.target) throw new Error("mismatched target");
+  if (Object.hasOwn(check, "target") && (!Object.hasOwn(evidence, "target") || evidence.target !== check.target)) throw new Error("mismatched target");
   if (!Object.hasOwn(check, "target") && Object.hasOwn(evidence, "target")) throw new Error("unexpected target");
-  if (check.name === "persistenceAvailable" && !validThreadId(evidence.codexThreadId ?? evidence.codexTaskId)) {
-    throw new Error("missing persistent task");
+  if (check.name === "persistenceAvailable") {
+    const persistentIds = ["codexThreadId", "codexTaskId"]
+      .filter((key) => Object.hasOwn(evidence, key))
+      .map((key) => evidence[key]);
+    if (!persistentIds.some(validThreadId)) throw new Error("missing persistent task");
   }
 }
 

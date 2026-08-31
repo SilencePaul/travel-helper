@@ -21,6 +21,29 @@ const COMPLETE_REPORT = {
   persistenceAvailable: true,
 };
 
+const PROBE_OPTIONS = {
+  codexPath: "/controlled/codex",
+  isolatedDir: "/isolated",
+  projectDir: "/project",
+  probePaths: {
+    isolatedFile: "/isolated/inside.txt",
+    outsideFile: "/outside/probe.txt",
+    projectFile: "/project/project.txt",
+  },
+};
+
+function successfulProbeResponse(request) {
+  return {
+    exitCode: 0,
+    stdout: `${JSON.stringify({
+      check: request.check.name,
+      ...(Object.hasOwn(request.check, "target") ? { target: request.check.target } : {}),
+      observed: request.check.expected,
+      ...(request.check.name === "persistenceAvailable" ? { codexThreadId: "probe-thread-1" } : {}),
+    })}\n`,
+  };
+}
+
 test("the isolation module exposes only its fixed public surface", () => {
   assert.deepEqual(Object.keys(isolation).sort(), [
     "CODEX_ISOLATION_ERROR",
@@ -240,5 +263,48 @@ test("low-level probe evidence fails closed when it is mismatched, incomplete or
       ...base,
       probeAdapter: async () => response,
     }), { code: "CODEX_ISOLATION_UNAVAILABLE" });
+  }
+});
+
+test("probe response exitCode and stdout must be own properties", async () => {
+  await assert.rejects(isolation.probeCodexIsolation({
+    ...PROBE_OPTIONS,
+    probeAdapter: async (request) => Object.create(successfulProbeResponse(request)),
+  }), { code: "CODEX_ISOLATION_UNAVAILABLE" });
+});
+
+test("parsed evidence required fields must be own properties", async () => {
+  const originalParse = JSON.parse;
+  JSON.parse = (text) => {
+    const parsed = originalParse(text);
+    if (parsed.check !== "isolatedDirectoryReadable") return parsed;
+    const { check, ...own } = parsed;
+    return Object.assign(Object.create({ check }), own);
+  };
+  try {
+    await assert.rejects(isolation.probeCodexIsolation({
+      ...PROBE_OPTIONS,
+      probeAdapter: async (request) => successfulProbeResponse(request),
+    }), { code: "CODEX_ISOLATION_UNAVAILABLE" });
+  } finally {
+    JSON.parse = originalParse;
+  }
+});
+
+test("persistence thread or task ID must be an own property", async () => {
+  const originalParse = JSON.parse;
+  JSON.parse = (text) => {
+    const parsed = originalParse(text);
+    if (parsed.check !== "persistenceAvailable") return parsed;
+    const { codexThreadId, ...own } = parsed;
+    return Object.assign(Object.create({ codexThreadId }), own);
+  };
+  try {
+    await assert.rejects(isolation.probeCodexIsolation({
+      ...PROBE_OPTIONS,
+      probeAdapter: async (request) => successfulProbeResponse(request),
+    }), { code: "CODEX_ISOLATION_UNAVAILABLE" });
+  } finally {
+    JSON.parse = originalParse;
   }
 });

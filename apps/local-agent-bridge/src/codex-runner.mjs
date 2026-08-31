@@ -61,11 +61,37 @@ function validHttpsUrl(value) {
   }
 }
 
+function validRfc3339DateTime(value) {
+  if (typeof value !== "string") return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-])(\d{2}):(\d{2}))$/i.exec(value);
+  if (!match) return false;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, offsetSign, offsetHourText, offsetMinuteText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const offsetHour = offsetHourText === undefined ? 0 : Number(offsetHourText);
+  const offsetMinute = offsetMinuteText === undefined ? 0 : Number(offsetMinuteText);
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 60 || offsetHour > 23 || offsetMinute > 59) return false;
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (day < 1 || day > daysInMonth[month - 1]) return false;
+  if (second < 60) return true;
+  const offset = (offsetSign === "-" ? -1 : 1) * (offsetHour * 60 + offsetMinute);
+  const utc = new Date(0);
+  utc.setUTCFullYear(year, month - 1, day);
+  utc.setUTCHours(hour, minute, 59, 0);
+  utc.setTime(utc.getTime() - offset * 60_000);
+  return utc.getUTCHours() === 23
+    && utc.getUTCMinutes() === 59
+    && ((utc.getUTCMonth() === 5 && utc.getUTCDate() === 30) || (utc.getUTCMonth() === 11 && utc.getUTCDate() === 31));
+}
+
 function validVerification(value) {
   return objectWithKeys(value, ["checkedAt", "method"])
-    && typeof value.checkedAt === "string"
-    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value.checkedAt)
-    && Number.isFinite(Date.parse(value.checkedAt))
+    && validRfc3339DateTime(value.checkedAt)
     && VERIFICATION_METHODS.has(value.method);
 }
 

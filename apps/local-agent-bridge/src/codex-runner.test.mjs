@@ -60,6 +60,12 @@ function jsonl(threadId, output = VALID_OUTPUT) {
   ].join("\n");
 }
 
+function outputWithCheckedAt(checkedAt) {
+  const output = structuredClone(VALID_OUTPUT);
+  output.candidates[0].evidence[0].verification.checkedAt = checkedAt;
+  return output;
+}
+
 function createFakeSpawn(outcomes) {
   const calls = [];
   const spawnImpl = (executable, args, options) => {
@@ -323,6 +329,66 @@ test("the built-in validator rejects enum, count, HTTPS, required-field and extr
     const runner = makeRunner(fake, { validateOutput: undefined });
     await assert.rejects(runner.runInitial({ prompt: "private" }), { code: "CODEX_OUTPUT_INVALID" });
     assert.equal(fake.calls.length, 2);
+  }
+});
+
+test("the built-in validator rejects nonexistent RFC3339 calendar dates after one correction", async () => {
+  for (const checkedAt of [
+    "2026-02-30T00:00:00Z",
+    "2025-02-29T00:00:00Z",
+    "1900-02-29T00:00:00Z",
+    "2026-00-01T00:00:00Z",
+    "2026-13-01T00:00:00Z",
+    "2026-04-31T00:00:00Z",
+    "2026-01-00T00:00:00Z",
+  ]) {
+    const invalid = outputWithCheckedAt(checkedAt);
+    const fake = createFakeSpawn([
+      { stdout: jsonl("thread-1", invalid) },
+      { stdout: jsonl("thread-1", invalid) },
+    ]);
+    const runner = makeRunner(fake, { validateOutput: undefined });
+    await assert.rejects(runner.runInitial({ prompt: "private" }), { code: "CODEX_OUTPUT_INVALID" });
+    assert.equal(fake.calls.length, 2);
+  }
+});
+
+test("the built-in validator rejects out-of-range RFC3339 time and offset fields", async () => {
+  for (const checkedAt of [
+    "2026-01-01T24:00:00Z",
+    "2026-01-01T23:60:00Z",
+    "2026-01-01T23:59:61Z",
+    "2026-01-01T23:59:60Z",
+    "2026-06-30T12:00:60Z",
+    "2026-01-01T23:59:59+24:00",
+    "2026-01-01T23:59:59+05:60",
+    "2026-01-01T23:59:59-24:00",
+  ]) {
+    const invalid = outputWithCheckedAt(checkedAt);
+    const fake = createFakeSpawn([
+      { stdout: jsonl("thread-1", invalid) },
+      { stdout: jsonl("thread-1", invalid) },
+    ]);
+    const runner = makeRunner(fake, { validateOutput: undefined });
+    await assert.rejects(runner.runInitial({ prompt: "private" }), { code: "CODEX_OUTPUT_INVALID" });
+    assert.equal(fake.calls.length, 2);
+  }
+});
+
+test("the built-in validator accepts real leap days with Z and legal offsets", async () => {
+  for (const checkedAt of [
+    "2024-02-29T23:59:59Z",
+    "2000-02-29T00:00:00.123+14:00",
+    "2024-02-29T00:00:00-05:30",
+    "1990-12-31T23:59:60Z",
+    "2024-02-29t23:59:59z",
+    "2024-02-29T23:59:59+23:59",
+  ]) {
+    const output = outputWithCheckedAt(checkedAt);
+    const fake = createFakeSpawn([{ stdout: jsonl("thread-1", output) }]);
+    const runner = makeRunner(fake, { validateOutput: undefined });
+    assert.deepEqual((await runner.runInitial({ prompt: "private" })).output, output);
+    assert.equal(fake.calls.length, 1);
   }
 });
 
