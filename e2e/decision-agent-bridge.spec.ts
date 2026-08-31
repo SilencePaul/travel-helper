@@ -47,3 +47,59 @@ test("member confirms the Agent panel and completes the local Bridge control loo
     await bridge.close();
   }
 });
+
+test("a mismatched Origin cannot prepare or create an Agent authorization", async ({ page, browserName }) => {
+  test.skip(browserName !== "chromium", "Private Network Access is verified in Chromium");
+  let prepareCalls = 0;
+  let createCalls = 0;
+  await page.exposeFunction("__createTestAgentRun", async () => {
+    createCalls += 1;
+    return { agentRunId: "unexpected-run", expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString() };
+  });
+  const bridge = await startLocalAgentBridge({
+    appUrl: "http://127.0.0.1:4174/?__testDecisionAgent=1",
+    port: 0,
+    allowInsecureLoopbackApp: true,
+    runtime: {
+      prepare: async () => {
+        prepareCalls += 1;
+        return {};
+      },
+      claim: async () => ({ agentRunId: "unexpected-run", status: "claimed" }),
+    },
+  });
+
+  try {
+    const url = new URL("http://127.0.0.1:4173/?__testDecisionAgent=1");
+    url.hash = new URLSearchParams({ agentBridge: bridge.origin }).toString();
+    await page.goto(url.toString());
+    await expect.poll(() => page.url()).not.toContain("#agentBridge=");
+    await page.getByRole("button", { name: "共同决定" }).click();
+    await page.getByRole("button", { name: "准备本机 Agent" }).click();
+
+    await expect(page.getByRole("alert")).toHaveText("Desktop Bridge 未在线，已保存的共同决定仍可使用。");
+    await expect(page.getByRole("button", { name: "授权并连接" })).toHaveCount(0);
+    expect(prepareCalls).toBe(0);
+    expect(createCalls).toBe(0);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("a non-loopback Agent fragment is cleared before any request or authorization", async ({ page }) => {
+  let createCalls = 0;
+  await page.exposeFunction("__createTestAgentRun", async () => {
+    createCalls += 1;
+    return { agentRunId: "unexpected-run", expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString() };
+  });
+  const fragment = new URLSearchParams({ agentBridge: "https://evil.example" }).toString();
+
+  await page.goto(`http://127.0.0.1:4173/?__testDecisionAgent=1#${fragment}`);
+  await expect.poll(() => page.url()).not.toContain("#agentBridge=");
+  await page.getByRole("button", { name: "共同决定" }).click();
+
+  await expect(page.getByRole("heading", { name: "Desktop Bridge 未连接" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "准备本机 Agent" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "授权并连接" })).toHaveCount(0);
+  expect(createCalls).toBe(0);
+});

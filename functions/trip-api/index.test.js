@@ -230,6 +230,21 @@ test("the public Agent adapter maps unexpected handler failures to 503", async (
   assert.deepEqual(JSON.parse(response.body), { ok: false, error: "TRIP_API_UNAVAILABLE" });
 });
 
+test("the public Agent adapter maps a returned backend outage to 503", async () => {
+  const transport = createAgentHttpHandler({ handler: async () => ({ ok: false, error: "TRIP_API_UNAVAILABLE" }) });
+  const response = await transport({
+    httpMethod: "POST",
+    path: "/api/agent",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "claimAgentRun", agentRunId: "run", pairingCode: "code", clientNonce: "nonce-001", signature: "signature" }),
+  });
+
+  assert.equal(response.statusCode, 503);
+  assert.deepEqual(JSON.parse(response.body), { ok: false, error: "TRIP_API_UNAVAILABLE" });
+  assert.equal(response.headers["cache-control"], "no-store");
+  assert.equal(response.body.includes("database"), false);
+});
+
 test("the public Agent entry rejects an invalid signature through the real command verifier", async () => {
   const backendBridge = createDecisionAgentBridge({ now: () => new Date("2026-08-31T00:05:00.000Z") });
   const run = {
