@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://travel.local/schemas/codex-travel-output.schema.json",
+  "title": "Codex travel research output",
+  "oneOf": [
+    { "$ref": "#/$defs/completed" },
+    { "$ref": "#/$defs/needsOwnerAction" }
+  ],
+  "$defs": {
+    "completed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "category", "candidates"],
+      "properties": {
+        "status": { "const": "completed" },
+        "category": { "enum": ["hotel", "restaurant", "attraction"] },
+        "candidates": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/candidate" }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "category": { "const": "hotel" } } },
+          "then": { "properties": { "candidates": { "items": { "properties": { "category": { "const": "hotel" } } } } } }
+        },
+        {
+          "if": { "properties": { "category": { "const": "restaurant" } } },
+          "then": { "properties": { "candidates": { "items": { "properties": { "category": { "const": "restaurant" } } } } } }
+        },
+        {
+          "if": { "properties": { "category": { "const": "attraction" } } },
+          "then": { "properties": { "candidates": { "items": { "properties": { "category": { "const": "attraction" } } } } } }
+        }
+      ]
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "name", "evidence"],
+      "properties": {
+        "category": { "enum": ["hotel", "restaurant", "attraction"] },
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "evidence": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "$ref": "#/$defs/evidence" }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceUrl", "title", "summary", "verification"],
+      "properties": {
+        "sourceUrl": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "verification": { "$ref": "#/$defs/verification" }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["checkedAt", "method"],
+      "properties": {
+        "checkedAt": { "type": "string", "format": "date-time" },
+        "method": { "enum": ["web_search", "source_page"] }
+      }
+    },
+    "needsOwnerAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reason", "message"],
+      "properties": {
+        "status": { "const": "needs_owner_action" },
+        "reason": {
+          "enum": [
+            "codex_auth_required",
+            "source_login_required",
+            "source_captcha",
+            "source_risk_control"
+          ]
+        },
+        "message": {
+          "enum": [
+            "请在 Codex 应用中恢复登录后返回此页面继续。",
+            "请在来源网站中完成所需操作后返回此页面继续。"
+          ]
+        },
+        "sourceHostname": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9.-]+$"
+        }
+      }
+    }
+  }
+}
