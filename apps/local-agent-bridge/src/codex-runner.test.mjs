@@ -43,6 +43,15 @@ const VALID_OUTPUT = {
   ],
 };
 
+const COMPLETE_ISOLATION_REPORT = {
+  isolatedDirectoryReadable: true,
+  outsideDirectoryUnreadable: true,
+  projectDirectoryUnreadable: true,
+  httpsNetworkAvailable: true,
+  authenticationAvailable: true,
+  persistenceAvailable: true,
+};
+
 function jsonl(threadId, output = VALID_OUTPUT) {
   return [
     JSON.stringify({ type: "thread.started", thread_id: threadId }),
@@ -88,8 +97,10 @@ function makeRunner(fake, overrides = {}) {
   return createCodexRunner({
     codexPath: "/Applications/ChatGPT.app/Contents/Resources/codex",
     isolatedDir: "/isolated",
+    projectDir: "/project",
     schemaPath: "/schema.json",
     spawnImpl: fake.spawnImpl,
+    probeIsolation: async () => COMPLETE_ISOLATION_REPORT,
     sourceEnv: {
       PATH: "/usr/bin:/bin",
       HOME: "/Users/owner",
@@ -163,6 +174,58 @@ test("runner spawns a controlled absolute binary in the isolated directory and s
   assert.equal(fake.calls[0].args.includes("untrusted travel context"), false);
 });
 
+test("runner awaits a complete isolation probe before every Codex spawn", async () => {
+  const fake = createFakeSpawn([{ stdout: jsonl("thread-1") }]);
+  const probeCalls = [];
+  let releaseProbe;
+  const runner = makeRunner(fake, {
+    probeIsolation: async (request) => {
+      probeCalls.push(request);
+      return new Promise((resolve) => { releaseProbe = () => resolve(COMPLETE_ISOLATION_REPORT); });
+    },
+  });
+
+  const running = runner.runInitial({ prompt: "private" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fake.calls.length, 0);
+  assert.equal(probeCalls.length, 1);
+  assert.equal(probeCalls[0].codexPath, "/Applications/ChatGPT.app/Contents/Resources/codex");
+  assert.equal(probeCalls[0].isolatedDir, "/isolated");
+  assert.equal(probeCalls[0].projectDir, "/project");
+  assert.deepEqual(probeCalls[0].sourceEnv, {
+    PATH: "/usr/bin:/bin",
+    HOME: "/Users/owner",
+    CODEX_HOME: "/Users/owner/.codex",
+    LANG: "zh_CN.UTF-8",
+    HTTPS_PROXY: "http://proxy.example:8080",
+  });
+  releaseProbe();
+  await running;
+  assert.equal(fake.calls.length, 1);
+});
+
+test("runner fails closed when isolation evidence is missing, failed or uncertain", async () => {
+  for (const probeIsolation of [
+    undefined,
+    async () => undefined,
+    async () => ({ ...COMPLETE_ISOLATION_REPORT, projectDirectoryUnreadable: false }),
+    async () => Object.create(COMPLETE_ISOLATION_REPORT),
+    async () => { throw new Error("raw probe path /private/project"); },
+  ]) {
+    const fake = createFakeSpawn([{ stdout: jsonl("thread-1") }]);
+    const runner = makeRunner(fake, { probeIsolation });
+    await assert.rejects(runner.runInitial({ prompt: "private" }), (error) => {
+      assert.equal(error.code, "CODEX_ISOLATION_UNAVAILABLE");
+      assert.equal(error.message, "CODEX_ISOLATION_UNAVAILABLE");
+      assert.equal(JSON.stringify(error).includes("/private/project"), false);
+      return true;
+    });
+    assert.equal(fake.calls.length, 0);
+  }
+  const fake = createFakeSpawn([]);
+  assert.throws(() => makeRunner(fake, { probeIsolation: null }), { code: "CODEX_ISOLATION_UNAVAILABLE" });
+});
+
 test("public resume returns the same safe result shape without exposing JSONL", async () => {
   const fake = createFakeSpawn([{ stdout: jsonl("thread-1", { ...VALID_OUTPUT, category: "restaurant", candidates: VALID_OUTPUT.candidates.map((candidate) => ({ ...candidate, category: "restaurant" })) }) }]);
   const runner = makeRunner(fake, { validateOutput: (value) => value?.status === "completed" });
@@ -191,6 +254,78 @@ test("invalid structured output is corrected exactly once on the same thread", a
   assert.equal(fake.calls[1].stdin.includes("original private context"), false);
 });
 
+test("the built-in validator accepts both strict output variants without a custom validator", async () => {
+  const needsOwnerAction = {
+    status: "needs_owner_action",
+    reason: "source_captcha",
+    message: "请在来源网站中完成所需操作后返回此页面继续。",
+    sourceHostname: "tickets.example.com",
+  };
+  for (const output of [VALID_OUTPUT, needsOwnerAction]) {
+    const fake = createFakeSpawn([{ stdout: jsonl("thread-1", output) }]);
+    const runner = makeRunner(fake, { validateOutput: undefined });
+    assert.deepEqual((await runner.runInitial({ prompt: "private" })).output, output);
+    assert.equal(fake.calls.length, 1);
+  }
+});
+
+test("the built-in validator corrects an invalid default output once on the same thread", async () => {
+  const fake = createFakeSpawn([
+    { stdout: jsonl("thread-1", { status: "completed", category: "hotel", candidates: [] }) },
+    { stdout: jsonl("thread-1", VALID_OUTPUT) },
+  ]);
+  const runner = makeRunner(fake, { validateOutput: undefined });
+
+  assert.deepEqual((await runner.runInitial({ prompt: "private" })).output, VALID_OUTPUT);
+  assert.equal(fake.calls.length, 2);
+  assert.deepEqual(fake.calls[1].args, buildResumeArgs({ cwd: "/isolated", schemaPath: "/schema.json", codexThreadId: "thread-1" }));
+});
+
+test("the built-in validator rejects enum, count, HTTPS, required-field and extra-field violations", async () => {
+  const wrongCategory = structuredClone(VALID_OUTPUT);
+  wrongCategory.category = "flight";
+  wrongCategory.candidates.forEach((candidate) => { candidate.category = "flight"; });
+  const tooFewCandidates = { ...VALID_OUTPUT, candidates: [VALID_OUTPUT.candidates[0]] };
+  const nonHttpsEvidence = structuredClone(VALID_OUTPUT);
+  nonHttpsEvidence.candidates[0].evidence[0].sourceUrl = "http://one.example/hotel";
+  const missingSummary = structuredClone(VALID_OUTPUT);
+  delete missingSummary.candidates[0].evidence[0].summary;
+  const extraCandidateField = structuredClone(VALID_OUTPUT);
+  extraCandidateField.candidates[0].rawLog = "must not be accepted";
+  const invalidCheckedAt = structuredClone(VALID_OUTPUT);
+  invalidCheckedAt.candidates[0].evidence[0].verification.checkedAt = "2026";
+  const invalidOwnerReason = {
+    status: "needs_owner_action",
+    reason: "other",
+    message: "请在来源网站中完成所需操作后返回此页面继续。",
+  };
+  const ownerThreadLeak = {
+    status: "needs_owner_action",
+    reason: "codex_auth_required",
+    message: "请在 Codex 应用中恢复登录后返回此页面继续。",
+    threadId: "private-thread",
+  };
+
+  for (const invalid of [
+    wrongCategory,
+    tooFewCandidates,
+    nonHttpsEvidence,
+    missingSummary,
+    extraCandidateField,
+    invalidCheckedAt,
+    invalidOwnerReason,
+    ownerThreadLeak,
+  ]) {
+    const fake = createFakeSpawn([
+      { stdout: jsonl("thread-1", invalid) },
+      { stdout: jsonl("thread-1", invalid) },
+    ]);
+    const runner = makeRunner(fake, { validateOutput: undefined });
+    await assert.rejects(runner.runInitial({ prompt: "private" }), { code: "CODEX_OUTPUT_INVALID" });
+    assert.equal(fake.calls.length, 2);
+  }
+});
+
 test("a second invalid output fails without creating a third process or exposing output", async () => {
   const invalid = { status: "completed", candidates: [] };
   const fake = createFakeSpawn([
@@ -209,6 +344,44 @@ test("a second invalid output fails without creating a third process or exposing
     },
   );
   assert.equal(fake.calls.length, 2);
+});
+
+test("format correction is available only once across multiple public resumes", async () => {
+  const invalid = { status: "completed", category: "hotel", candidates: [] };
+  const fake = createFakeSpawn([
+    { stdout: jsonl("thread-1", invalid) },
+    { stdout: jsonl("thread-1", VALID_OUTPUT) },
+    { stdout: jsonl("thread-1", invalid) },
+  ]);
+  const runner = makeRunner(fake, { validateOutput: undefined });
+
+  assert.deepEqual((await runner.resume({ codexThreadId: "thread-1", prompt: "first resume" })).output, VALID_OUTPUT);
+  await assert.rejects(
+    runner.resume({ codexThreadId: "thread-1", prompt: "second resume" }),
+    { code: "CODEX_OUTPUT_INVALID" },
+  );
+  assert.equal(fake.calls.length, 3);
+  assert.equal(fake.calls.filter((call) => call.stdin.includes("上次输出未通过")).length, 1);
+});
+
+test("a runner binds to its first Codex thread and rejects a different resume thread before probing or spawning", async () => {
+  const fake = createFakeSpawn([
+    { stdout: jsonl("thread-1", VALID_OUTPUT) },
+    { stdout: jsonl("thread-2", VALID_OUTPUT) },
+  ]);
+  let probeCalls = 0;
+  const runner = makeRunner(fake, {
+    validateOutput: undefined,
+    probeIsolation: async () => { probeCalls += 1; return COMPLETE_ISOLATION_REPORT; },
+  });
+
+  await runner.runInitial({ prompt: "initial" });
+  await assert.rejects(
+    runner.resume({ codexThreadId: "thread-2", prompt: "wrong thread" }),
+    { code: "CODEX_OUTPUT_INVALID" },
+  );
+  assert.equal(fake.calls.length, 1);
+  assert.equal(probeCalls, 1);
 });
 
 test("malformed JSONL maps to a stable sanitized output error", async () => {
@@ -282,6 +455,9 @@ test("runner rejects relative executables and non-isolated launch paths before s
     { codexPath: "/Applications/ChatGPT.app/Contents/Resources/../evil-codex" },
     { isolatedDir: "relative/isolated" },
     { isolatedDir: "/isolated/../project" },
+    { projectDir: undefined },
+    { projectDir: "/isolated" },
+    { isolatedDir: "/project/isolated", projectDir: "/project" },
     { schemaPath: "relative/schema.json" },
     { schemaPath: "/isolated/../project/schema.json" },
   ]) {

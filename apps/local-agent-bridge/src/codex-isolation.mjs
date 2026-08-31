@@ -38,6 +38,8 @@ const REQUIRED_PROBE_CHECKS = [
   "persistenceAvailable",
 ];
 
+const NETWORK_PROBE_URL = "https://example.com/";
+
 function codedError(code) {
   return Object.assign(new Error(code), { code });
 }
@@ -58,6 +60,24 @@ function normalizedAbsolutePath(value) {
 function containsPath(parent, child) {
   const pathFromParent = relative(parent, child);
   return pathFromParent === "" || (!isAbsolute(pathFromParent) && pathFromParent !== ".." && !pathFromParent.startsWith(`..${sep}`));
+}
+
+function validThreadId(value) {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,255}$/.test(value);
+}
+
+function parseProbeEvidence(response, check) {
+  if (!response || response.exitCode !== 0 || typeof response.stdout !== "string") throw new Error("probe failed");
+  const lines = response.stdout.split(/\r?\n/u).filter((line) => line.trim());
+  if (lines.length !== 1) throw new Error("invalid evidence");
+  const evidence = JSON.parse(lines[0]);
+  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) throw new Error("invalid evidence");
+  if (evidence.check !== check.name || evidence.observed !== check.expected) throw new Error("mismatched evidence");
+  if (Object.hasOwn(check, "target") && evidence.target !== check.target) throw new Error("mismatched target");
+  if (!Object.hasOwn(check, "target") && Object.hasOwn(evidence, "target")) throw new Error("unexpected target");
+  if (check.name === "persistenceAvailable" && !validThreadId(evidence.codexThreadId ?? evidence.codexTaskId)) {
+    throw new Error("missing persistent task");
+  }
 }
 
 export function discoverCodexExecutable(options = {}) {
@@ -81,17 +101,39 @@ export function buildPermissionOverrides() {
 
 export async function probeCodexIsolation(options) {
   try {
-    if (!options || typeof options.runner !== "function") throw new Error("invalid probe");
+    if (!options || typeof options.probeAdapter !== "function") throw new Error("invalid probe");
+    if (!normalizedAbsolutePath(options.codexPath)) throw new Error("invalid executable");
     if (!normalizedAbsolutePath(options.isolatedDir) || !normalizedAbsolutePath(options.projectDir)) throw new Error("invalid boundary");
     if (containsPath(options.projectDir, options.isolatedDir) || containsPath(options.isolatedDir, options.projectDir)) throw new Error("overlapping boundary");
-    const report = await options.runner({
-      isolatedDir: options.isolatedDir,
-      projectDir: options.projectDir,
-      permissionOverrides: buildPermissionOverrides(),
-      requiredChecks: [...REQUIRED_PROBE_CHECKS],
-    });
-    if (!report || typeof report !== "object" || Array.isArray(report)) throw new Error("invalid report");
-    if (REQUIRED_PROBE_CHECKS.some((check) => report[check] !== true)) throw new Error("incomplete report");
+    const probePaths = options.probePaths;
+    if (!probePaths || !normalizedAbsolutePath(probePaths.isolatedFile) || !normalizedAbsolutePath(probePaths.outsideFile) || !normalizedAbsolutePath(probePaths.projectFile)) {
+      throw new Error("invalid probe paths");
+    }
+    if (!containsPath(options.isolatedDir, probePaths.isolatedFile) || !containsPath(options.projectDir, probePaths.projectFile)) {
+      throw new Error("misplaced probe path");
+    }
+    if (containsPath(options.isolatedDir, probePaths.outsideFile) || containsPath(options.projectDir, probePaths.outsideFile)) {
+      throw new Error("outside probe is not outside");
+    }
+    const checks = [
+      { name: "isolatedDirectoryReadable", target: probePaths.isolatedFile, expected: "readable" },
+      { name: "outsideDirectoryUnreadable", target: probePaths.outsideFile, expected: "denied" },
+      { name: "projectDirectoryUnreadable", target: probePaths.projectFile, expected: "denied" },
+      { name: "httpsNetworkAvailable", target: NETWORK_PROBE_URL, expected: "available" },
+      { name: "authenticationAvailable", expected: "authenticated" },
+      { name: "persistenceAvailable", expected: "persistent" },
+    ];
+    const env = minimalCodexEnvironment(options.sourceEnv);
+    for (const check of checks) {
+      const response = await options.probeAdapter({
+        executable: options.codexPath,
+        cwd: options.isolatedDir,
+        env,
+        permissionOverrides: buildPermissionOverrides(),
+        check,
+      });
+      parseProbeEvidence(response, check);
+    }
     return Object.fromEntries(REQUIRED_PROBE_CHECKS.map((check) => [check, true]));
   } catch {
     throw codedError(CODEX_ISOLATION_ERROR);

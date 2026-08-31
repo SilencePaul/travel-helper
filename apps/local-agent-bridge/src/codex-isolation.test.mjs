@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import * as isolation from "./codex-isolation.mjs";
@@ -8,6 +11,15 @@ const EXPECTED_OVERRIDES = [
   "permissions.travel_research.network.enabled=true",
   'default_permissions="travel_research"',
 ];
+
+const COMPLETE_REPORT = {
+  isolatedDirectoryReadable: true,
+  outsideDirectoryUnreadable: true,
+  projectDirectoryUnreadable: true,
+  httpsNetworkAvailable: true,
+  authenticationAvailable: true,
+  persistenceAvailable: true,
+};
 
 test("the isolation module exposes only its fixed public surface", () => {
   assert.deepEqual(Object.keys(isolation).sort(), [
@@ -90,79 +102,43 @@ test("the child environment keeps only system launch, locale and proxy variables
   });
 });
 
-test("the isolation probe requires affirmative evidence for every boundary", async () => {
-  const calls = [];
-  const report = {
-    isolatedDirectoryReadable: true,
-    outsideDirectoryUnreadable: true,
-    projectDirectoryUnreadable: true,
-    httpsNetworkAvailable: true,
-    authenticationAvailable: true,
-    persistenceAvailable: true,
-  };
-
-  const result = await isolation.probeCodexIsolation({
+test("the isolation probe does not trust a legacy affirmative boolean report", async () => {
+  let runnerCalls = 0;
+  await assert.rejects(isolation.probeCodexIsolation({
+    codexPath: "/controlled/codex",
     isolatedDir: "/isolated",
     projectDir: "/project",
-    runner: async (request) => {
-      calls.push(request);
-      return report;
-    },
-  });
-
-  assert.deepEqual(result, report);
-  assert.deepEqual(calls, [{
-    isolatedDir: "/isolated",
-    projectDir: "/project",
-    permissionOverrides: EXPECTED_OVERRIDES,
-    requiredChecks: Object.keys(report),
-  }]);
+    runner: async () => { runnerCalls += 1; return COMPLETE_REPORT; },
+  }), { code: "CODEX_ISOLATION_UNAVAILABLE" });
+  assert.equal(runnerCalls, 0);
 });
 
 test("the isolation probe fails closed without exposing raw probe details", async () => {
-  const complete = {
-    isolatedDirectoryReadable: true,
-    outsideDirectoryUnreadable: true,
-    projectDirectoryUnreadable: true,
-    httpsNetworkAvailable: true,
-    authenticationAvailable: true,
-    persistenceAvailable: true,
-  };
-
-  for (const runner of [
-    async () => ({ ...complete, projectDirectoryUnreadable: false }),
-    async () => {
-      const incomplete = { ...complete };
-      delete incomplete.persistenceAvailable;
-      return incomplete;
-    },
-    async () => ({ ...complete, httpsNetworkAvailable: "uncertain" }),
-    async () => { throw new Error("raw token and /private/project/path"); },
-  ]) {
-    await assert.rejects(
-      isolation.probeCodexIsolation({ isolatedDir: "/isolated", projectDir: "/project", runner }),
-      (error) => {
-        assert.equal(error.code, "CODEX_ISOLATION_UNAVAILABLE");
-        assert.equal(error.message, "CODEX_ISOLATION_UNAVAILABLE");
-        assert.equal(JSON.stringify(error).includes("raw token"), false);
-        assert.equal(JSON.stringify(error).includes("/private/project/path"), false);
-        return true;
+  await assert.rejects(
+    isolation.probeCodexIsolation({
+      codexPath: "/controlled/codex",
+      isolatedDir: "/isolated",
+      projectDir: "/project",
+      probePaths: {
+        isolatedFile: "/isolated/inside.txt",
+        outsideFile: "/outside/probe.txt",
+        projectFile: "/project/project.txt",
       },
-    );
-  }
+      probeAdapter: async () => { throw new Error("raw token and /private/project/path"); },
+    }),
+    (error) => {
+      assert.equal(error.code, "CODEX_ISOLATION_UNAVAILABLE");
+      assert.equal(error.message, "CODEX_ISOLATION_UNAVAILABLE");
+      assert.equal(JSON.stringify(error).includes("raw token"), false);
+      assert.equal(JSON.stringify(error).includes("/private/project/path"), false);
+      return true;
+    },
+  );
 });
 
 test("the isolation probe rejects missing, relative or project-overlapping boundaries", async () => {
-  const complete = {
-    isolatedDirectoryReadable: true,
-    outsideDirectoryUnreadable: true,
-    projectDirectoryUnreadable: true,
-    httpsNetworkAvailable: true,
-    authenticationAvailable: true,
-    persistenceAvailable: true,
-  };
-  let runnerCalls = 0;
-  const runner = async () => { runnerCalls += 1; return complete; };
+  let adapterCalls = 0;
+  const probeAdapter = async () => { adapterCalls += 1; return { exitCode: 0, stdout: "{}\n" }; };
 
   for (const boundaries of [
     { projectDir: "/project" },
@@ -171,9 +147,98 @@ test("the isolation probe rejects missing, relative or project-overlapping bound
     { isolatedDir: "/project", projectDir: "/project" },
     { isolatedDir: "/project/isolated", projectDir: "/project" },
   ]) {
-    await assert.rejects(isolation.probeCodexIsolation({ ...boundaries, runner }), {
+    await assert.rejects(isolation.probeCodexIsolation({
+      codexPath: "/controlled/codex",
+      probePaths: {
+        isolatedFile: "/isolated/inside.txt",
+        outsideFile: "/outside/probe.txt",
+        projectFile: "/project/project.txt",
+      },
+      ...boundaries,
+      probeAdapter,
+    }), {
       code: "CODEX_ISOLATION_UNAVAILABLE",
     });
   }
-  assert.equal(runnerCalls, 0);
+  assert.equal(adapterCalls, 0);
+});
+
+test("the isolation probe executes and parses evidence for synthetic file, HTTPS, auth and persistence checks", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-isolation-test-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const isolatedDir = join(root, "isolated");
+  const projectDir = join(root, "project");
+  await Promise.all([mkdir(isolatedDir), mkdir(projectDir)]);
+  const probePaths = {
+    isolatedFile: join(isolatedDir, "inside.txt"),
+    outsideFile: join(root, "outside.txt"),
+    projectFile: join(projectDir, "project.txt"),
+  };
+  await Promise.all([
+    writeFile(probePaths.isolatedFile, "inside"),
+    writeFile(probePaths.outsideFile, "outside"),
+    writeFile(probePaths.projectFile, "project"),
+  ]);
+  const calls = [];
+
+  const result = await isolation.probeCodexIsolation({
+    codexPath: "/controlled/codex",
+    isolatedDir,
+    projectDir,
+    probePaths,
+    sourceEnv: { PATH: "/usr/bin", HOME: "/Users/owner", PROJECT_SECRET: "must-not-leak" },
+    probeAdapter: async (request) => {
+      calls.push(request);
+      return {
+        exitCode: 0,
+        stdout: `${JSON.stringify({
+          check: request.check.name,
+          target: request.check.target,
+          observed: request.check.expected,
+          ...(request.check.name === "persistenceAvailable" ? { codexThreadId: "probe-thread-1" } : {}),
+        })}\n`,
+      };
+    },
+  });
+
+  assert.deepEqual(result, COMPLETE_REPORT);
+  assert.equal(calls.length, 6);
+  assert.deepEqual(calls.map((call) => call.check), [
+    { name: "isolatedDirectoryReadable", target: probePaths.isolatedFile, expected: "readable" },
+    { name: "outsideDirectoryUnreadable", target: probePaths.outsideFile, expected: "denied" },
+    { name: "projectDirectoryUnreadable", target: probePaths.projectFile, expected: "denied" },
+    { name: "httpsNetworkAvailable", target: "https://example.com/", expected: "available" },
+    { name: "authenticationAvailable", expected: "authenticated" },
+    { name: "persistenceAvailable", expected: "persistent" },
+  ]);
+  for (const call of calls) {
+    assert.equal(call.executable, "/controlled/codex");
+    assert.equal(call.cwd, isolatedDir);
+    assert.deepEqual(call.permissionOverrides, EXPECTED_OVERRIDES);
+    assert.deepEqual(call.env, { PATH: "/usr/bin", HOME: "/Users/owner" });
+  }
+});
+
+test("low-level probe evidence fails closed when it is mismatched, incomplete or raw-invalid", async () => {
+  const base = {
+    codexPath: "/controlled/codex",
+    isolatedDir: "/isolated",
+    projectDir: "/project",
+    probePaths: {
+      isolatedFile: "/isolated/inside.txt",
+      outsideFile: "/outside/probe.txt",
+      projectFile: "/project/project.txt",
+    },
+  };
+  for (const response of [
+    { exitCode: 1, stdout: "" },
+    { exitCode: 0, stdout: "not-json\n" },
+    { exitCode: 0, stdout: `${JSON.stringify({ check: "wrong", target: "/isolated/inside.txt", observed: "readable" })}\n` },
+    { exitCode: 0, stdout: `${JSON.stringify({ check: "isolatedDirectoryReadable", target: "/wrong", observed: "readable" })}\n` },
+  ]) {
+    await assert.rejects(isolation.probeCodexIsolation({
+      ...base,
+      probeAdapter: async () => response,
+    }), { code: "CODEX_ISOLATION_UNAVAILABLE" });
+  }
 });

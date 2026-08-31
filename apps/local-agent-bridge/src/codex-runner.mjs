@@ -1,9 +1,27 @@
 import { spawn } from "node:child_process";
-import { isAbsolute, normalize } from "node:path";
+import { isAbsolute, normalize, relative, sep } from "node:path";
 
-import { buildPermissionOverrides, minimalCodexEnvironment } from "./codex-isolation.mjs";
+import {
+  buildPermissionOverrides,
+  CODEX_ISOLATION_ERROR,
+  minimalCodexEnvironment,
+  probeCodexIsolation,
+} from "./codex-isolation.mjs";
 
 const FORMAT_CORRECTION_PROMPT = "上次输出未通过结构化格式校验。请严格按照原任务和输出 Schema 重新输出完整 JSON；不要添加新事实、路径、凭据或日志。";
+
+const CATEGORIES = new Set(["hotel", "restaurant", "attraction"]);
+const OWNER_ACTION_REASONS = new Set([
+  "codex_auth_required",
+  "source_login_required",
+  "source_captcha",
+  "source_risk_control",
+]);
+const OWNER_ACTION_MESSAGES = new Set([
+  "请在 Codex 应用中恢复登录后返回此页面继续。",
+  "请在来源网站中完成所需操作后返回此页面继续。",
+]);
+const VERIFICATION_METHODS = new Set(["web_search", "source_page"]);
 
 function codedError(code) {
   return Object.assign(new Error(code), { code });
@@ -13,10 +31,82 @@ function validateAbsolutePath(value, code) {
   if (typeof value !== "string" || !isAbsolute(value) || normalize(value) !== value) throw codedError(code);
 }
 
+function containsPath(parent, child) {
+  const pathFromParent = relative(parent, child);
+  return pathFromParent === "" || (!isAbsolute(pathFromParent) && pathFromParent !== ".." && !pathFromParent.startsWith(`..${sep}`));
+}
+
 function validateThreadId(value) {
   if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,255}$/.test(value)) {
     throw codedError("CODEX_OUTPUT_INVALID");
   }
+}
+
+function objectWithKeys(value, required, allowed = required) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  return required.every((key) => Object.hasOwn(value, key)) && keys.every((key) => allowed.includes(key));
+}
+
+function sizedString(value, maxLength) {
+  return typeof value === "string" && value.length >= 1 && value.length <= maxLength;
+}
+
+function validHttpsUrl(value) {
+  if (typeof value !== "string" || !value.startsWith("https://")) return false;
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function validVerification(value) {
+  return objectWithKeys(value, ["checkedAt", "method"])
+    && typeof value.checkedAt === "string"
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value.checkedAt)
+    && Number.isFinite(Date.parse(value.checkedAt))
+    && VERIFICATION_METHODS.has(value.method);
+}
+
+function validEvidence(value) {
+  return objectWithKeys(value, ["sourceUrl", "title", "summary", "verification"])
+    && validHttpsUrl(value.sourceUrl)
+    && sizedString(value.title, 300)
+    && sizedString(value.summary, 2_000)
+    && validVerification(value.verification);
+}
+
+function validCandidate(value, category) {
+  return objectWithKeys(value, ["category", "name", "evidence"])
+    && value.category === category
+    && sizedString(value.name, 200)
+    && Array.isArray(value.evidence)
+    && value.evidence.length >= 2
+    && value.evidence.every(validEvidence);
+}
+
+function validCompletedOutput(value) {
+  return objectWithKeys(value, ["status", "category", "candidates"])
+    && value.status === "completed"
+    && CATEGORIES.has(value.category)
+    && Array.isArray(value.candidates)
+    && value.candidates.length >= 2
+    && value.candidates.length <= 4
+    && value.candidates.every((candidate) => validCandidate(candidate, value.category));
+}
+
+function validOwnerActionOutput(value) {
+  return objectWithKeys(value, ["status", "reason", "message"], ["status", "reason", "message", "sourceHostname"])
+    && value.status === "needs_owner_action"
+    && OWNER_ACTION_REASONS.has(value.reason)
+    && OWNER_ACTION_MESSAGES.has(value.message)
+    && (!Object.hasOwn(value, "sourceHostname")
+      || (sizedString(value.sourceHostname, 253) && /^[A-Za-z0-9.-]+$/.test(value.sourceHostname)));
+}
+
+function validTravelOutput(value) {
+  return validCompletedOutput(value) || validOwnerActionOutput(value);
 }
 
 function topLevelArgs(cwd) {
@@ -107,26 +197,74 @@ export function createCodexRunner(options) {
   const {
     codexPath,
     isolatedDir,
+    projectDir,
     schemaPath,
     spawnImpl = spawn,
+    probeIsolation = probeCodexIsolation,
+    probeAdapter,
+    probePaths,
     sourceEnv = process.env,
     activeTimeoutMs = 600_000,
     killGraceMs = 3_000,
-    validateOutput = (value) => Boolean(value && typeof value === "object" && !Array.isArray(value)),
+    validateOutput: customValidateOutput,
   } = options ?? {};
 
   validateAbsolutePath(codexPath, "CODEX_NOT_AVAILABLE");
   validateAbsolutePath(isolatedDir, "CODEX_ISOLATION_UNAVAILABLE");
+  validateAbsolutePath(projectDir, "CODEX_ISOLATION_UNAVAILABLE");
+  if (containsPath(projectDir, isolatedDir) || containsPath(isolatedDir, projectDir)) throw codedError(CODEX_ISOLATION_ERROR);
   validateAbsolutePath(schemaPath, "CODEX_OUTPUT_INVALID");
-  if (typeof spawnImpl !== "function" || typeof validateOutput !== "function") throw codedError("CODEX_RESEARCH_FAILED");
+  if (typeof probeIsolation !== "function") throw codedError(CODEX_ISOLATION_ERROR);
+  if (typeof spawnImpl !== "function" || (customValidateOutput !== undefined && typeof customValidateOutput !== "function")) {
+    throw codedError("CODEX_RESEARCH_FAILED");
+  }
   if (!Number.isSafeInteger(activeTimeoutMs) || activeTimeoutMs <= 0) throw codedError("CODEX_RESEARCH_TIMEOUT");
   if (!Number.isSafeInteger(killGraceMs) || killGraceMs < 0) throw codedError("CODEX_RESEARCH_TIMEOUT");
 
   const environment = minimalCodexEnvironment(sourceEnv);
+  const validateOutput = customValidateOutput === undefined
+    ? validTravelOutput
+    : async (value) => validTravelOutput(value) && await customValidateOutput(value) === true;
   let activeDurationMs = 0;
   let initialStarted = false;
+  let boundThreadId;
+  let correctionUsed = false;
 
-  function execute(args, prompt, expectedThreadId) {
+  function bindThread(codexThreadId) {
+    validateThreadId(codexThreadId);
+    if (boundThreadId && boundThreadId !== codexThreadId) throw codedError("CODEX_OUTPUT_INVALID");
+    boundThreadId ??= codexThreadId;
+  }
+
+  async function verifyIsolation() {
+    try {
+      const report = await probeIsolation({
+        codexPath,
+        isolatedDir,
+        projectDir,
+        probeAdapter,
+        probePaths,
+        sourceEnv: environment,
+        permissionOverrides: buildPermissionOverrides(),
+      });
+      const required = [
+        "isolatedDirectoryReadable",
+        "outsideDirectoryUnreadable",
+        "projectDirectoryUnreadable",
+        "httpsNetworkAvailable",
+        "authenticationAvailable",
+        "persistenceAvailable",
+      ];
+      if (!report || typeof report !== "object" || Array.isArray(report) || required.some((check) => !Object.hasOwn(report, check) || report[check] !== true)) {
+        throw new Error("incomplete isolation evidence");
+      }
+    } catch {
+      throw codedError(CODEX_ISOLATION_ERROR);
+    }
+  }
+
+  async function execute(args, prompt, expectedThreadId) {
+    await verifyIsolation();
     const remainingMs = activeTimeoutMs - activeDurationMs;
     if (remainingMs <= 0) return Promise.reject(codedError("CODEX_RESEARCH_TIMEOUT"));
     const startedAt = Date.now();
@@ -228,10 +366,14 @@ export function createCodexRunner(options) {
   }
 
   async function runWithCorrection(args, prompt, expectedThreadId) {
+    if (expectedThreadId) bindThread(expectedThreadId);
     const first = await execute(args, prompt, expectedThreadId);
+    bindThread(first.codexThreadId);
     if (await outputIsValid(first.output)) {
       return { ...first, activeDurationMs };
     }
+    if (correctionUsed) throw codedError("CODEX_OUTPUT_INVALID");
+    correctionUsed = true;
     const corrected = await execute(
       buildResumeArgs({ cwd: isolatedDir, schemaPath, codexThreadId: first.codexThreadId }),
       FORMAT_CORRECTION_PROMPT,
@@ -243,7 +385,7 @@ export function createCodexRunner(options) {
 
   return {
     async runInitial({ prompt }) {
-      if (initialStarted || typeof prompt !== "string") throw codedError("CODEX_RESEARCH_FAILED");
+      if (initialStarted || boundThreadId || typeof prompt !== "string") throw codedError("CODEX_RESEARCH_FAILED");
       initialStarted = true;
       return runWithCorrection(buildInitialArgs({ cwd: isolatedDir, schemaPath }), prompt);
     },
