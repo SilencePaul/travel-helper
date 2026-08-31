@@ -18,6 +18,7 @@ const requiredNames = [
   "TENCENTCLOUD_SECRET_ID",
   "TENCENTCLOUD_SECRET_KEY",
   "PUBLIC_APP_URL",
+  "AGENT_API_URL",
 ];
 
 function run(environment) {
@@ -52,6 +53,7 @@ const validEnvironment = {
     TENCENTCLOUD_SECRET_ID: "secret-id",
     TENCENTCLOUD_SECRET_KEY: "secret-key",
     PUBLIC_APP_URL: "https://trip.example",
+    AGENT_API_URL: "https://api.example.com/api/agent",
   };
 assert.deepEqual(
   validateProductionConfig(validEnvironment),
@@ -92,6 +94,14 @@ assert.deepEqual(
   validateProductionConfig({ ...validEnvironment, FEISHU_REDIRECT_URI: "https://auth.example.com/wrong-callback" }),
   { ok: false, missing: [], invalid: ["FEISHU_REDIRECT_URI"] },
 );
+assert.deepEqual(
+  validateProductionConfig({ ...validEnvironment, AGENT_API_URL: "http://api.example.com/api/agent" }),
+  { ok: false, missing: [], invalid: ["AGENT_API_URL"] },
+);
+assert.deepEqual(
+  validateProductionConfig({ ...validEnvironment, AGENT_API_URL: "https://api.example.com/api/member" }),
+  { ok: false, missing: [], invalid: ["AGENT_API_URL"] },
+);
 
 const missing = run({});
 assert.equal(missing.status, 1);
@@ -108,10 +118,20 @@ assert.ok(functionByName["auth-service"].timeout >= 20, "auth-service must allow
 assert.ok(functionByName["trip-api"].timeout >= 10, "trip-api must allow enough time for transactional saves");
 assert.deepEqual(functionByName["auth-service"].aclRule, { invoke: false });
 assert.deepEqual(functionByName["trip-api"].aclRule, { invoke: "auth.loginType != 'ANONYMOUS' && auth != null" });
-assert.deepEqual(cloudbaseConfig.gateway.routes[0].qpsPolicy, { qpsTotal: 100, qpsPerClient: { limitBy: "ClientIP", limitValue: 3 } });
+assert.equal(functionByName["trip-api"].handler, "index.main");
+assert.equal(functionByName["agent-api"].dir, "trip-api");
+assert.equal(functionByName["agent-api"].handler, "index.agentMain");
+assert.deepEqual(functionByName["agent-api"].aclRule, { invoke: false });
+const routeByPath = Object.fromEntries(cloudbaseConfig.gateway.routes.map((route) => [route.path, route]));
+assert.deepEqual(routeByPath["/api/auth"].qpsPolicy, { qpsTotal: 100, qpsPerClient: { limitBy: "ClientIP", limitValue: 3 } });
+assert.equal(routeByPath["/api/agent"].target, "function:agent-api");
+assert.equal(routeByPath["/api/agent"].enableAuth, false);
+assert.deepEqual(routeByPath["/api/agent"].qpsPolicy, { qpsTotal: 40, qpsPerClient: { limitBy: "ClientIP", limitValue: 4 } });
 assert.equal(functionByName["auth-service"].envVariables.CLOUDBASE_SERVER_SECRET_ID, "{{env.TENCENTCLOUD_SECRET_ID}}");
 assert.equal(functionByName["auth-service"].envVariables.CLOUDBASE_SERVER_SECRET_KEY, "{{env.TENCENTCLOUD_SECRET_KEY}}");
 assert.equal(functionByName["trip-api"].envVariables.CLOUDBASE_SERVER_SECRET_ID, "{{env.TENCENTCLOUD_SECRET_ID}}");
 assert.equal(functionByName["trip-api"].envVariables.CLOUDBASE_SERVER_SECRET_KEY, "{{env.TENCENTCLOUD_SECRET_KEY}}");
+assert.equal(functionByName["agent-api"].envVariables.CLOUDBASE_SERVER_SECRET_ID, "{{env.TENCENTCLOUD_SECRET_ID}}");
+assert.equal(functionByName["agent-api"].envVariables.CLOUDBASE_SERVER_SECRET_KEY, "{{env.TENCENTCLOUD_SECRET_KEY}}");
 
 console.log("production config checker tests passed");

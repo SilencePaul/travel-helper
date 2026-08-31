@@ -50,6 +50,62 @@ const decisionMutationActions = new Set([
 ]);
 const agentActions = new Set(["claimAgentRun", "submitProposalBatch", "appendEvidenceSnapshot", "reportVerificationBlocked", "generatePreferenceSummary", "getDecisionContext"]);
 
+function isAgentEnvelope(payload) {
+  const nonempty = (value) => typeof value === "string" && value.length > 0;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload) || !agentActions.has(payload.action)) return false;
+  if (payload.action === "claimAgentRun") {
+    return nonempty(payload.agentRunId) && nonempty(payload.pairingCode) && nonempty(payload.clientNonce) && nonempty(payload.signature);
+  }
+  return nonempty(payload.agentRunId)
+    && Number.isSafeInteger(payload.sequence) && payload.sequence > 0
+    && nonempty(payload.idempotencyKey)
+    && nonempty(payload.signature)
+    && payload.payload && typeof payload.payload === "object" && !Array.isArray(payload.payload);
+}
+
+function header(headers = {}, name) {
+  const key = Object.keys(headers).find((item) => item.toLowerCase() === name.toLowerCase());
+  return key ? headers[key] : undefined;
+}
+
+function json(statusCode, body) {
+  return {
+    statusCode,
+    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+    body: JSON.stringify(body),
+  };
+}
+
+function createAgentHttpHandler({ handler, maxBodyBytes = 64 * 1024 } = {}) {
+  if (typeof handler !== "function") throw new TypeError("handler is required");
+  return async (event = {}) => {
+    const method = String(event.httpMethod || event.method || "").toUpperCase();
+    const path = String(event.path || event.requestContext?.http?.path || event.requestContext?.path || "/");
+    if (method !== "POST" || path !== "/api/agent") return json(404, { ok: false, error: "INVALID_REQUEST" });
+    if (!/^application\/json(?:\s*;|$)/i.test(String(header(event.headers, "content-type") || ""))) {
+      return json(415, { ok: false, error: "INVALID_REQUEST" });
+    }
+    const source = typeof event.body === "string" ? event.body : JSON.stringify(event.body ?? {});
+    if (Buffer.byteLength(source) > maxBodyBytes) return json(413, { ok: false, error: "INVALID_REQUEST" });
+    let payload;
+    try { payload = JSON.parse(source); } catch { return json(400, { ok: false, error: "INVALID_REQUEST" }); }
+    if (!isAgentEnvelope(payload)) {
+      return json(400, { ok: false, error: "INVALID_REQUEST" });
+    }
+    try {
+      const result = await handler(payload);
+      const statusCode = result?.ok === true ? 200
+        : result?.error === "AGENT_RUN_EXPIRED" ? 410
+          : result?.error === "TRIP_API_UNAVAILABLE" ? 503
+            : ["INVALID_AGENT_CLAIM", "AGENT_SCOPE_FORBIDDEN", "FORBIDDEN"].includes(result?.error) ? 403
+              : 400;
+      return json(statusCode, result?.ok === true || result?.ok === false ? result : { ok: false, error: "TRIP_API_UNAVAILABLE" });
+    } catch {
+      return json(503, { ok: false, error: "TRIP_API_UNAVAILABLE" });
+    }
+  };
+}
+
 function decisionSuccess(action, result) {
   if (["upsertPreference", "completePreference", "skipPreference"].includes(action)) return { ok: true, action, data: result.preference };
   if (action === "generatePreferenceSummary") return { ok: true, action, data: result.summary };
@@ -119,4 +175,8 @@ function createTripHandler({ db, commands, env = process.env, getUserInfo } = {}
 }
 
 exports.createTripHandler = createTripHandler;
-exports.main = createTripHandler();
+exports.createAgentHttpHandler = createAgentHttpHandler;
+const defaultTripHandler = createTripHandler();
+const defaultAgentHttpHandler = createAgentHttpHandler({ handler: defaultTripHandler });
+exports.main = defaultTripHandler;
+exports.agentMain = defaultAgentHttpHandler;

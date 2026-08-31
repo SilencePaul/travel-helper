@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { createTripHandler } = require("./index.js");
+const { agentMain, createAgentHttpHandler, createTripHandler, main } = require("./index.js");
+const { createDecisionAgentBridge } = require("./lib/decision-agent-bridge.js");
 
 test("uses the authenticated custom UID and ignores a payload actor UID", async () => {
   const calls = [];
@@ -154,4 +155,118 @@ test("an authenticated member summary request is not mistaken for an agent comma
 
   assert.deepEqual(await handler(input), { ok: true, action: "generatePreferenceSummary", data: summary });
   assert.equal(calls[0].kind, "member");
+});
+
+test("the public Agent HTTP transport accepts only signed Agent actions", async () => {
+  const calls = [];
+  const transport = createAgentHttpHandler({
+    handler: createTripHandler({
+      getUserInfo: () => undefined,
+      commands: { executeAgent: async (payload) => { calls.push(payload); return { agentRunId: payload.agentRunId, claimedAt: "2026-08-31T00:00:00.000Z", nextSequence: 1 }; } },
+    }),
+  });
+  const claim = { action: "claimAgentRun", agentRunId: "agent-run-1", pairingCode: "secret", clientNonce: "nonce-001", signature: "signature" };
+
+  const response = await transport({ httpMethod: "POST", path: "/api/agent", headers: { "content-type": "application/json" }, body: JSON.stringify(claim) });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(JSON.parse(response.body), { ok: true, data: { agentRunId: "agent-run-1", claimedAt: "2026-08-31T00:00:00.000Z", nextSequence: 1 } });
+  assert.deepEqual(calls, [claim]);
+});
+
+test("the public Agent HTTP transport rejects member commands before data access", async () => {
+  let memberCalls = 0;
+  const transport = createAgentHttpHandler({
+    handler: createTripHandler({
+      getUserInfo: () => ({ customUserId: "fs_member" }),
+      commands: {
+        execute: async () => { memberCalls += 1; return { title: "private trip" }; },
+        executeAgent: async () => ({}),
+      },
+    }),
+  });
+
+  const response = await transport({ httpMethod: "POST", path: "/api/agent", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "getTrip", tripId: "trip-1" }) });
+
+  assert.equal(response.statusCode, 400);
+  assert.deepEqual(JSON.parse(response.body), { ok: false, error: "INVALID_REQUEST" });
+  assert.equal(memberCalls, 0);
+});
+
+test("the public Agent HTTP transport rejects wrong methods, types and oversized bodies", async () => {
+  let calls = 0;
+  const transport = createAgentHttpHandler({ handler: async () => { calls += 1; return { ok: true }; }, maxBodyBytes: 32 });
+
+  for (const event of [
+    { httpMethod: "GET", path: "/api/agent", headers: {} },
+    { httpMethod: "POST", path: "/", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "claimAgentRun" }) },
+    { httpMethod: "POST", path: "/api/agent", headers: { "content-type": "text/plain" }, body: "{}" },
+    { httpMethod: "POST", path: "/api/agent?debug=1", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "claimAgentRun" }) },
+    { httpMethod: "POST", path: "/api/agent", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "getDecisionContext", agentRunId: "agent-run-1" }) },
+    { httpMethod: "POST", path: "/api/agent", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "claimAgentRun", padding: "x".repeat(64) }) },
+  ]) {
+    const response = await transport(event);
+    assert.equal(response.statusCode >= 400 && response.statusCode < 500, true);
+  }
+  assert.equal(calls, 0);
+});
+
+test("member and public Agent exports stay isolated", async () => {
+  assert.deepEqual(await main({ action: "getTrip", tripId: "trip-1" }), { error: "AUTH_REQUIRED" });
+  const response = await agentMain({ httpMethod: "POST", path: "/api/agent", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "getTrip", tripId: "trip-1" }) });
+  assert.equal(response.statusCode, 400);
+  assert.deepEqual(JSON.parse(response.body), { ok: false, error: "INVALID_REQUEST" });
+});
+
+test("the public Agent adapter maps unexpected handler failures to 503", async () => {
+  const transport = createAgentHttpHandler({ handler: async () => { throw new Error("database unavailable"); } });
+  const response = await transport({
+    httpMethod: "POST",
+    path: "/api/agent",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "claimAgentRun", agentRunId: "run", pairingCode: "code", clientNonce: "nonce-001", signature: "signature" }),
+  });
+  assert.equal(response.statusCode, 503);
+  assert.deepEqual(JSON.parse(response.body), { ok: false, error: "TRIP_API_UNAVAILABLE" });
+});
+
+test("the public Agent entry rejects an invalid signature through the real command verifier", async () => {
+  const backendBridge = createDecisionAgentBridge({ now: () => new Date("2026-08-31T00:05:00.000Z") });
+  const run = {
+    id: "agent-run-1",
+    tripId: "trip-1",
+    publicKeyJwk: { kty: "EC", crv: "P-256", x: "invalid", y: "invalid" },
+    scope: ["submitProposalBatch"],
+    status: "claimed",
+    lastSequence: 0,
+    revision: 2,
+    expiresAt: "2026-08-31T00:15:00.000Z",
+  };
+  const transaction = {
+    collection(name) {
+      assert.equal(name, "trip_agent_runs");
+      return { doc() { return { async get() { return { data: [run] }; } }; } };
+    },
+  };
+  const handler = createTripHandler({
+    commands: { executeAgent: (input) => backendBridge.run(transaction, input, async () => { throw new Error("must not run"); }) },
+  });
+  const transport = createAgentHttpHandler({ handler });
+
+  const response = await transport({
+    httpMethod: "POST",
+    path: "/api/agent",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      action: "getDecisionContext",
+      agentRunId: "agent-run-1",
+      sequence: 1,
+      idempotencyKey: "request-001",
+      payload: {},
+      signature: "invalid-signature",
+    }),
+  });
+
+  assert.equal(response.statusCode, 403);
+  assert.deepEqual(JSON.parse(response.body), { ok: false, error: "INVALID_AGENT_CLAIM" });
 });

@@ -1,4 +1,12 @@
-import type { Member, TripRepository } from "@travel/contracts";
+import type {
+  AgentRun,
+  DecisionCommand,
+  DecisionCommandResult,
+  DecisionWorkspace,
+  DecisionWorkspaceRepository,
+  Member,
+  TripRepository,
+} from "@travel/contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { BrowserRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import seed from "../../../../content/trip.seed.json";
@@ -11,6 +19,7 @@ import { BootstrapPage } from "../features/auth/BootstrapPage";
 import { PendingApprovalPage } from "../features/auth/PendingApprovalPage";
 import { AuthShell } from "../features/auth/AuthShell";
 import { logout, recoverAuthenticatedMember } from "../infrastructure/authSession";
+import type { LocalAgentBridge } from "../infrastructure/localAgentBridgeClient";
 
 type ProductionAuthState =
   | { status: "checking" }
@@ -127,10 +136,58 @@ function createBrowserTestRouteService(): RouteService | undefined {
 }
 
 function createBrowserTestMemberFixture() {
-  if (!import.meta.env.DEV || new URLSearchParams(window.location.search).get("__testMemberManagement") !== "1") return undefined;
+  if (!import.meta.env.DEV) return undefined;
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("__testMemberManagement") !== "1" && params.get("__testDecisionAgent") !== "1") return undefined;
   const admin = { uid: "e2e-admin", displayName: "测试管理员", role: "admin", version: 1, createdAt: "2026-08-30T00:00:00.000Z" } satisfies Member;
   const companion = { uid: "e2e-companion", displayName: "低视口测试同行者（名字很长）", role: "member", version: 1, createdAt: "2026-08-30T00:00:00.000Z" } satisfies Member;
   return { admin, members: [admin, companion] };
+}
+
+type TestAgentRunCoordinator = (input: Extract<DecisionCommand, { action: "createAgentRun" }>) => Promise<{ agentRunId: string; expiresAt: string }>;
+
+function createBrowserTestDecisionRepository(): DecisionWorkspaceRepository | undefined {
+  if (!import.meta.env.DEV || new URLSearchParams(window.location.search).get("__testDecisionAgent") !== "1") return undefined;
+  const coordinator = (window as typeof window & { __createTestAgentRun?: TestAgentRunCoordinator }).__createTestAgentRun;
+  if (typeof coordinator !== "function") return undefined;
+  let run: AgentRun | undefined;
+  const workspace = (tripId: string): DecisionWorkspace => ({
+    tripId,
+    preferences: [],
+    candidates: [],
+    placements: [],
+    evidence: [],
+    feedback: [],
+    confirmations: [],
+    workspaceCursor: "0",
+    fetchedAt: new Date().toISOString(),
+  });
+  return {
+    load: async (tripId) => workspace(tripId),
+    subscribe: () => () => undefined,
+    events: async (_tripId, afterCursor) => ({ events: [], cursor: afterCursor }),
+    command: async (input): Promise<DecisionCommandResult> => {
+      if (input.action !== "createAgentRun") return { ok: false, error: "INVALID_REQUEST" };
+      const data = await coordinator(input);
+      const createdAt = new Date().toISOString();
+      run = {
+        agentRunId: data.agentRunId,
+        tripId: input.tripId,
+        status: "claimed",
+        scope: input.scope,
+        revision: 2,
+        nextSequence: 2,
+        createdAt,
+        claimedAt: createdAt,
+        expiresAt: data.expiresAt,
+      };
+      return { ok: true, action: "createAgentRun", data };
+    },
+    getAgentRunStatus: async (tripId, agentRunId) => {
+      if (!run || run.tripId !== tripId || run.agentRunId !== agentRunId) throw new Error("AGENT_RUN_NOT_FOUND");
+      return run;
+    },
+  };
 }
 
 export function browserDataMode(isDevelopment: boolean, configuredMode: string | undefined): "cloudbase" | "local" | "invalid" {
@@ -138,10 +195,10 @@ export function browserDataMode(isDevelopment: boolean, configuredMode: string |
   return isDevelopment ? "local" : "invalid";
 }
 
-export function BrowserRoot() {
+export function BrowserRoot({ agentBridge }: { agentBridge?: LocalAgentBridge } = {}) {
   const mode = browserDataMode(import.meta.env.DEV, import.meta.env.VITE_DATA_MODE);
-  if (mode === "cloudbase") return <ProductionAuthGate />;
-  if (mode === "local") return <DevBrowserRoot />;
+  if (mode === "cloudbase") return <ProductionAuthGate agentBridge={agentBridge} />;
+  if (mode === "local") return <DevBrowserRoot agentBridge={agentBridge} />;
   return (
     <AuthShell step="配置检查" title="旅行助手尚未正确发布" description="生产环境没有连接到共享行程服务。">
       <p className="auth-error" role="alert">请联系管理员检查数据模式配置后重新发布。</p>
@@ -149,14 +206,15 @@ export function BrowserRoot() {
   );
 }
 
-function DevBrowserRoot() {
+function DevBrowserRoot({ agentBridge }: { agentBridge?: LocalAgentBridge }) {
   const [repository] = useState(createBrowserTestRepository);
+  const [decisionRepository] = useState(createBrowserTestDecisionRepository);
   const [routeService] = useState(createBrowserTestRouteService);
   const [memberFixture] = useState(createBrowserTestMemberFixture);
-  return <BrowserRouter><TripApp repository={repository} routeService={routeService} member={memberFixture?.admin} memberManagementInitialMembers={memberFixture?.members} /></BrowserRouter>;
+  return <BrowserRouter><TripApp repository={repository} decisionRepository={decisionRepository} routeService={routeService} member={memberFixture?.admin} memberManagementInitialMembers={memberFixture?.members} agentBridge={agentBridge} /></BrowserRouter>;
 }
 
-export function ProductionAuthGate() {
+export function ProductionAuthGate({ agentBridge }: { agentBridge?: LocalAgentBridge } = {}) {
   const [authState, setAuthState] = useState<ProductionAuthState>({ status: "checking" });
   const acceptMember = useCallback((member: Member) => {
     setAuthState(member.role === "pending" ? { status: "pending" } : member.role === "admin" || member.role === "member" ? { status: "authenticated", member } : { status: "login" });
@@ -180,12 +238,12 @@ export function ProductionAuthGate() {
 
   return (
     <BrowserRouter>
-      <ProductionRoutes authState={authState} setAuthState={setAuthState} acceptMember={acceptMember} onRetryAuth={refreshAuth} />
+      <ProductionRoutes authState={authState} setAuthState={setAuthState} acceptMember={acceptMember} onRetryAuth={refreshAuth} agentBridge={agentBridge} />
     </BrowserRouter>
   );
 }
 
-function ProductionRoutes({ authState, setAuthState, acceptMember, onRetryAuth }: { authState: ProductionAuthState; setAuthState: (state: ProductionAuthState) => void; acceptMember: (member: Member) => void; onRetryAuth: () => Promise<void> }) {
+function ProductionRoutes({ authState, setAuthState, acceptMember, onRetryAuth, agentBridge }: { authState: ProductionAuthState; setAuthState: (state: ProductionAuthState) => void; acceptMember: (member: Member) => void; onRetryAuth: () => Promise<void>; agentBridge?: LocalAgentBridge }) {
   const navigate = useNavigate();
   const location = useLocation();
   const mounted = useRef(false);
@@ -220,7 +278,7 @@ function ProductionRoutes({ authState, setAuthState, acceptMember, onRetryAuth }
     : authState.status === "pending"
       ? <PendingApprovalPage onAuthenticated={acceptMember} onLogout={handleLogout} />
       : authState.status === "authenticated"
-        ? <TripApp member={authState.member} onUnauthorized={handleUnauthorized} onLogout={handleLogout} />
+        ? <TripApp member={authState.member} onUnauthorized={handleUnauthorized} onLogout={handleLogout} agentBridge={agentBridge} />
         : <LoginPage />;
   const isHostingCallback = new URLSearchParams(location.search).get("auth_callback") === "1";
 

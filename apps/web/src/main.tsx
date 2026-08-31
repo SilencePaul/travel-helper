@@ -3,12 +3,14 @@ import { createRoot } from "react-dom/client";
 import { BrowserRoot } from "./app/BrowserRoot";
 import { registerSW } from "virtual:pwa-register";
 import { stageAuthenticationExchangeFromUrl } from "./infrastructure/authCallbackExchange";
+import { consumeLocalAgentBridgeFromFragment } from "./infrastructure/localAgentBridgeClient";
 
+const agentBridge = consumeLocalAgentBridgeFromFragment(window.location, window.history);
 stageAuthenticationExchangeFromUrl(window.location, window.sessionStorage, window.history);
 registerSW({ immediate: true });
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <BrowserRoot />
+    <BrowserRoot agentBridge={agentBridge} />
   </StrictMode>,
 );

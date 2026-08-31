@@ -1006,11 +1006,11 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
       let input;
       try { input = AgentApiSchema.parse(event); } catch { throw codedError("INVALID_REQUEST"); }
       if (input.action === "claimAgentRun") {
-        return db.runTransaction(async (transaction) => {
-          const run = one(await transaction.collection("trip_agent_runs").doc(input.agentRunId).get());
-          if (run) await assertTripMember(transaction, run.tripId, run.creatorUid);
-          return effectiveAgentBridge.claim(transaction, input);
-        });
+        return db.runTransaction((transaction) => effectiveAgentBridge.claim(
+          transaction,
+          input,
+          (run) => assertTripMember(transaction, run.tripId, run.creatorUid),
+        ));
       }
       const outcome = await db.runTransaction((transaction) => effectiveAgentBridge.run(
         transaction,

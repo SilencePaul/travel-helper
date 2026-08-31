@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { LocalAgentBridgeClient } from "./localAgentBridgeClient";
+import { consumeLocalAgentBridgeFromFragment, LocalAgentBridgeClient } from "./localAgentBridgeClient";
 
 const prepared = {
   publicKeyJwk: { kty: "EC" as const, crv: "P-256" as const, x: "x-coordinate", y: "y-coordinate" },
@@ -30,6 +30,7 @@ describe("LocalAgentBridgeClient", () => {
     const [url, init] = fetch.mock.calls[0]!;
     expect(url).toBe("http://127.0.0.1:43120/v1/agent-runs/prepare");
     expect(init).toMatchObject({ method: "POST", credentials: "omit", cache: "no-store" });
+    expect(init).toMatchObject({ mode: "cors" });
     expect(JSON.parse(String(init.body))).toEqual({ scope: ["submitProposalBatch", "reportVerificationBlocked"] });
     expect(String(init.body)).not.toContain("pairingCode\"");
     expect(String(init.body)).not.toContain("privateKey");
@@ -81,5 +82,36 @@ describe("LocalAgentBridgeClient", () => {
       new Promise<string>((resolve) => globalThis.setTimeout(() => resolve("still-pending"), 30)),
     ]);
     expect(outcome).toBe("BRIDGE_UNAVAILABLE");
+  });
+
+  it("consumes a loopback origin from the fragment and clears it immediately", () => {
+    const replaceState = vi.fn();
+    const location = { href: "https://trip.example/decisions?tab=agent#agentBridge=http%3A%2F%2F127.0.0.1%3A43120" };
+
+    const bridge = consumeLocalAgentBridgeFromFragment(location, { state: { keep: true }, replaceState });
+
+    expect(bridge).toBeInstanceOf(LocalAgentBridgeClient);
+    expect(replaceState).toHaveBeenCalledWith({ keep: true }, "", "https://trip.example/decisions?tab=agent");
+  });
+
+  it("clears an invalid bridge fragment without connecting or storing it", () => {
+    const replaceState = vi.fn();
+    const location = { href: "https://trip.example/#agentBridge=https%3A%2F%2Fevil.example" };
+
+    expect(consumeLocalAgentBridgeFromFragment(location, { state: null, replaceState })).toBeUndefined();
+    expect(replaceState).toHaveBeenCalledWith(null, "", "https://trip.example/");
+  });
+
+  it("keeps App initialization alive and clears the fragment when replaceState throws", () => {
+    const location = {
+      href: "https://trip.example/#agentBridge=http%3A%2F%2F127.0.0.1%3A43120",
+      hash: "#agentBridge=http%3A%2F%2F127.0.0.1%3A43120",
+    };
+    const history = { state: null, replaceState: vi.fn(() => { throw new Error("history unavailable"); }) };
+    let bridge: LocalAgentBridgeClient | undefined;
+
+    expect(() => { bridge = consumeLocalAgentBridgeFromFragment(location, history); }).not.toThrow();
+    expect(bridge).toBeInstanceOf(LocalAgentBridgeClient);
+    expect(location.hash).toBe("");
   });
 });

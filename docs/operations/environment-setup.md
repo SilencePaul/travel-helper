@@ -9,6 +9,7 @@ This runbook is for the CloudBase production environment. It describes where eac
 | Production app URL | `<PRODUCTION_APP_URL>` | CloudBase static hosting |
 | CloudBase environment ID | `<CLOUDBASE_ENV_ID>` | CloudBase console |
 | Public auth-service URL | `<AUTH_SERVICE_URL>` | CloudBase function details |
+| Public Agent API URL | `<AGENT_API_URL>` | CloudBase gateway output; the value already ends in `/api/agent` |
 | Feishu redirect URL | `<AUTH_SERVICE_URL>/api/auth/callback` | Must exactly match the Feishu app |
 | Feishu document URL | `https://icnk2498ysl1.feishu.cn/wiki/RQJtwKJaTireiQkdYzlcOMA7nHb` | Existing document |
 
@@ -69,9 +70,9 @@ Test anonymous reads, a pending/non-member read, and a direct client write; all 
 
 ## Function routes and environment variables
 
-`auth-service` is the only public HTTP function. Configure these routes:
+`auth-service` 与 Agent transport 是两个公网 HTTP 入口。配置以下路由：
 
-The `/api/auth` gateway route must use the checked-in per-client IP QPS policy. Do not remove this control when editing the route in the console.
+`/api/auth` 与 `/api/agent` 网关路由都必须使用仓库中的按 Client IP QPS 限流；在控制台编辑路由时不得删除。
 
 | Route | Purpose | Access |
 | --- | --- | --- |
@@ -81,8 +82,9 @@ The `/api/auth` gateway route must use the checked-in per-client IP QPS policy. 
 | `POST /api/auth/bootstrap` | One-time administrator bootstrap | HTTPS, one-time code |
 | `POST /api/auth/ticket` | Issue a short-lived CloudBase custom-login ticket | Authenticated server session |
 | `POST /api/auth/logout` | Revoke the server session | Authenticated server session |
+| `POST /api/agent` | Claim AgentRun and submit an existing signed Agent envelope | Public transport; ES256/run scope/sequence/idempotency verified server-side |
 
-`trip-api` is an authenticated event function. It owns version checks, idempotency, membership authorization, and audit writes; it is not a browser-facing public endpoint.
+`trip-api` 的函数 invoke ACL 保持需要已认证 CloudBase 身份；独立的 `agent-api` 入口复用同一函数目录的 `index.agentMain`，仅让 `/api/agent` 无 bearer 到达验签层。HTTP transport 在调用任何命令前拒绝非 Agent action；成员 action 仍然必须通过 CloudBase SDK 事件调用，并在处理器和命令层重新检查已登录身份及 Trip 成员资格。不得向 Agent Bridge 配置成员 bearer、CloudBase 凭据或浏览器 Cookie。
 
 Set the following in the appropriate scope:
 
@@ -92,6 +94,7 @@ Set the following in the appropriate scope:
 | `VITE_CLOUDBASE_ENV_ID` | build + functions | Public environment identifier |
 | `VITE_AUTH_SERVICE_URL` | build | Exact HTTPS auth-service URL |
 | `PUBLIC_APP_URL` | auth-service | Exact HTTPS app URL |
+| `AGENT_API_URL` | operator/local Bridge | Exact public HTTPS URL ending in `/api/agent`; not a secret and never a `VITE_` value |
 | `FEISHU_APP_ID` | auth-service | Secret-managed deployment input |
 | `FEISHU_APP_SECRET` | auth-service | Secret; never log |
 | `FEISHU_REDIRECT_URI` | auth-service | Exact callback URL above |
@@ -105,6 +108,25 @@ Set the following in the appropriate scope:
 | `CODEX_IMPORT_TOKEN` | trip-api/import job | Secret-managed, never returned |
 
 Browser build variables are limited to `VITE_AMAP_JS_KEY` and `VITE_AMAP_SECURITY_CODE` in addition to the CloudBase public identifiers. Never put Web Service, QWeather, Feishu, CloudBase private, or Codex credentials behind a `VITE_` prefix.
+
+## 本地 Agent Bridge 启动与验证
+
+使用 Node 20+，从信任的操作员终端启动。`--app-url` 必须是正式 HTTPS 应用 URL，`--agent-endpoint` 必须是以 `/api/agent` 结尾的 HTTPS 网关 URL，`--port 0` 由操作系统选择随机 loopback 端口：
+
+```bash
+node apps/local-agent-bridge/src/cli.mjs \
+  --app-url "$PUBLIC_APP_URL" \
+  --agent-endpoint "$AGENT_API_URL" \
+  --port 0
+```
+
+终端会输出待打开的应用 URL，并在 Web 调用 prepare 后输出本机配对指纹，供用户与页面显示值对照。URL fragment 只含非机密的 `http://127.0.0.1:<random-port>`；Web 在启动时立即尽力清除，不写入 DOM、localStorage 或 sessionStorage。P-256 私钥和 32-byte pairing code 只存在 Bridge 进程内存中，不打印、不落盘。停止进程或刷新 Web 页面后应视为已断开，需重新启动/连接。
+
+验证分层：
+
+- 本地：运行 `node --test apps/local-agent-bridge/src/*.test.mjs` 与 `pnpm exec playwright test e2e/decision-agent-bridge.spec.ts --project=chromium`；这些使用真实 loopback HTTP/P-256 和测试 transport，不是生产 E2E。
+- Staging：将两个 URL 替换为 staging HTTPS 值，确认 prepare → create → claim → getDecisionContext，同时检查无效签名、匿名成员命令和限流均被拒绝。
+- 生产：只在发布审批后执行相同验收；仓库中的 mock/本地结果不得记录为生产 E2E 成功。本指南不表示已执行真实部署或写入真实旅行数据。
 
 ## Feishu and AMap console setup
 
@@ -121,7 +143,7 @@ In AMap security settings:
 
 ## Safe-origin, backup, and rollback preparation
 
-Configure CloudBase safe origins for the production HTTPS origin and the documented local development origin only. Before deployment, export database collections and record the backup location in `release-checklist.md`. Record the hosting version, function revisions, deployment ID, and rollback tag. A rollback restores the prior hosting version and both function revisions together; do not roll back only the web bundle or only one function.
+Configure CloudBase safe origins for the production HTTPS origin and the documented local development origin only. Before deployment, export database collections and record the backup location in `release-checklist.md`. Record the hosting version, all function revisions, Agent gateway route/QPS configuration, deployment ID, and rollback tag. A rollback restores the prior hosting version, `auth-service`, authenticated `trip-api`, public `agent-api`, and `/api/agent` gateway/ACL configuration together; do not roll back only the web bundle or only one function.
 
 Run the secret-safe check before deployment:
 

@@ -853,6 +853,39 @@ test("agent run revoke conflicts include only the latest safe projection", async
   );
 });
 
+test("an invalid claim signature is rejected before trip or member data is read", async () => {
+  const { publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const db = createDb();
+  db.data.trip_agent_runs.set("agent-run-invalid", {
+    id: "agent-run-invalid",
+    tripId: "trip-2026-autumn",
+    creatorUid: "fs_member",
+    publicKeyJwk: publicKey.export({ format: "jwk" }),
+    pairingCodeHash: sha256Base64Url("pairing-code"),
+    scope: ["submitProposalBatch"],
+    status: "pending_claim",
+    lastSequence: 0,
+    revision: 1,
+    expiresAt: "2026-08-31T00:15:00.000Z",
+  });
+  const originalRunTransaction = db.runTransaction.bind(db);
+  db.runTransaction = (callback) => originalRunTransaction((transaction) => callback({
+    collection(name) {
+      if (name === "trips" || name === "members") throw new Error("MEMBER_DATA_READ_BEFORE_SIGNATURE");
+      return transaction.collection(name);
+    },
+  }));
+  const commands = createTripCommands({ db, now: () => new Date("2026-08-31T00:05:00.000Z") });
+
+  await assert.rejects(() => commands.executeAgent({
+    action: "claimAgentRun",
+    agentRunId: "agent-run-invalid",
+    pairingCode: "pairing-code",
+    clientNonce: "nonce-001",
+    signature: "invalid-signature",
+  }), { code: "INVALID_AGENT_CLAIM" });
+});
+
 test("a claimed scoped agent submits an atomic two-candidate proposal batch", async () => {
   const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
   const ids = ["agent-run-1", "candidate-1", "evidence-1", "candidate-2", "evidence-2"];

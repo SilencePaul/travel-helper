@@ -1,0 +1,14 @@
+{
+  "name": "@travel/local-agent-bridge",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "bin": { "travel-agent-bridge": "src/cli.mjs" },
+  "scripts": {
+    "test": "node --test src/*.test.mjs",
+    "typecheck": "node --check src/*.mjs",
+    "build": "node --check src/*.mjs",
+    "lint": "node --check src/*.mjs"
+  }
+}

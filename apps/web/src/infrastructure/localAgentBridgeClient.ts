@@ -76,6 +76,7 @@ export class LocalAgentBridgeClient implements LocalAgentBridge {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
+        mode: "cors",
         credentials: "omit",
         cache: "no-store",
         signal: controller.signal,
@@ -109,5 +110,31 @@ export class LocalAgentBridgeClient implements LocalAgentBridge {
     const parsed = ClaimResponseSchema.safeParse(response);
     if (!parsed.success || parsed.data.data.agentRunId !== agentRunId) throw new Error("INVALID_BRIDGE_RESPONSE");
     return parsed.data.data;
+  }
+}
+
+type FragmentLocation = { href: string; hash?: string };
+type FragmentHistory = { state: unknown; replaceState(state: unknown, unused: string, url?: string | URL | null): void };
+
+export function consumeLocalAgentBridgeFromFragment(location: FragmentLocation, history: FragmentHistory): LocalAgentBridgeClient | undefined {
+  let url: URL;
+  try {
+    url = new URL(location.href);
+  } catch {
+    return undefined;
+  }
+  const params = new URLSearchParams(url.hash.slice(1));
+  const bridgeOrigin = params.get("agentBridge");
+  if (bridgeOrigin === null) return undefined;
+  url.hash = "";
+  try {
+    history.replaceState(history.state, "", url.toString());
+  } catch {
+    try { location.hash = ""; } catch { /* best-effort removal */ }
+  }
+  try {
+    return new LocalAgentBridgeClient(bridgeOrigin);
+  } catch {
+    return undefined;
   }
 }

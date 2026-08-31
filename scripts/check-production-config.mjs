@@ -13,6 +13,7 @@ export const requiredNames = [
   "TENCENTCLOUD_SECRET_ID",
   "TENCENTCLOUD_SECRET_KEY",
   "PUBLIC_APP_URL",
+  "AGENT_API_URL",
 ];
 
 function validCustomLoginCredentials(encoded, expectedEnvId) {
@@ -61,6 +62,10 @@ export function validateProductionConfig(environment) {
   if (environment.PUBLIC_APP_URL?.trim()) {
     const publicUrl = parsedHttpsUrl(environment.PUBLIC_APP_URL);
     if (!publicUrl || publicUrl.origin !== environment.PUBLIC_APP_URL.trim()) invalid.push("PUBLIC_APP_URL");
+  }
+  if (environment.AGENT_API_URL?.trim()) {
+    const agentUrl = parsedHttpsUrl(environment.AGENT_API_URL);
+    if (!agentUrl || agentUrl.pathname !== "/api/agent") invalid.push("AGENT_API_URL");
   }
   return { ok: missing.length === 0 && invalid.length === 0, missing, invalid };
 }

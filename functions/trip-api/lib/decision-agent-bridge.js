@@ -50,7 +50,7 @@ function createDecisionAgentBridge({ now = () => new Date() } = {}) {
   }
 
   return {
-    async claim(transaction, input) {
+    async claim(transaction, input, beforeCommit) {
       const runs = transaction.collection("trip_agent_runs");
       const run = one(await runs.doc(input.agentRunId).get());
       const signed = { agentRunId: input.agentRunId, pairingCode: input.pairingCode, clientNonce: input.clientNonce };
@@ -65,6 +65,7 @@ function createDecisionAgentBridge({ now = () => new Date() } = {}) {
         || !sameSecret(run.pairingCodeHash, sha256Base64Url(input.pairingCode))) {
         throw codedError("INVALID_AGENT_CLAIM");
       }
+      if (beforeCommit) await beforeCommit(run);
       const { pairingCodeHash: _consumedPairingCodeHash, ...withoutPairingCode } = run;
       const claimedAt = now().toISOString();
       const claimed = {

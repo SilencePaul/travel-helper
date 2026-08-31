@@ -38,6 +38,21 @@
         "CLOUDBASE_SERVER_SECRET_ID": "{{env.TENCENTCLOUD_SECRET_ID}}",
         "CLOUDBASE_SERVER_SECRET_KEY": "{{env.TENCENTCLOUD_SECRET_KEY}}"
       }
+    },
+    {
+      "name": "agent-api",
+      "dir": "trip-api",
+      "type": "Event",
+      "handler": "index.agentMain",
+      "runtime": "Nodejs20.19",
+      "timeout": 20,
+      "aclRule": { "invoke": false },
+      "installDependency": true,
+      "envVariables": {
+        "VITE_CLOUDBASE_ENV_ID": "{{env.VITE_CLOUDBASE_ENV_ID}}",
+        "CLOUDBASE_SERVER_SECRET_ID": "{{env.TENCENTCLOUD_SECRET_ID}}",
+        "CLOUDBASE_SERVER_SECRET_KEY": "{{env.TENCENTCLOUD_SECRET_KEY}}"
+      }
     }
   ],
   "gateway": {
@@ -52,6 +67,19 @@
           "qpsPerClient": {
             "limitBy": "ClientIP",
             "limitValue": 3
+          }
+        }
+      },
+      {
+        "path": "/api/agent",
+        "target": "function:agent-api",
+        "enableAuth": false,
+        "enablePathTransmission": false,
+        "qpsPolicy": {
+          "qpsTotal": 40,
+          "qpsPerClient": {
+            "limitBy": "ClientIP",
+            "limitValue": 4
           }
         }
       }
