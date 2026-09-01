@@ -38,7 +38,8 @@ pnpm briefing:publish -- ~/wiki/briefings/刘一鸣-试用期转正汇报.html p
 5. 核验 `dist` 中的汇报副本仍逐字节一致且 `sw.js` 已生成；
 6. **只**暂存并提交该汇报页面；不会提交其它工作区改动；
 7. 推送 `main`，触发 Cloudflare Pages 自动部署；
-8. 输出稳定分享地址：`https://trip.yiming.ca/briefings/<slug>/`。
+8. 轮询公开 URL，直到线上响应与源 HTML 逐字节一致；
+9. 仅在验证完成后输出稳定分享地址：`https://trip.yiming.ca/briefings/<slug>/`。
 
 脚本要求当前分支为 `main`。若同一个 slug 的内容没有变化，它不会创建空提交，但仍会推送并输出 URL。
 
@@ -50,9 +51,17 @@ pnpm briefing:publish -- ~/wiki/briefings/刘一鸣-试用期转正汇报.html p
 pnpm briefing:prepare -- /absolute/path/to/your-briefing.html your-briefing-slug
 ```
 
-## 发布后核验
+## 单独复核已发布页面
 
-Cloudflare 构建完成后，打开：
+如果只想复核某次已经推送的发布，可运行：
+
+```bash
+pnpm briefing:verify -- /absolute/path/to/your-briefing.html your-briefing-slug
+```
+
+它会等待公开响应与源 HTML 逐字节一致（默认最多 5 分钟）。
+
+发布后，也可以打开：
 
 ```text
 https://trip.yiming.ca/briefings/<slug>/

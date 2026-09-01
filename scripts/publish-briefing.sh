@@ -32,4 +32,5 @@ if ! git diff --quiet -- "$target" || ! git ls-files --error-unmatch "$target" >
 fi
 
 git push origin main
+"$node_bin" scripts/verify-briefing.mjs "$source_file" "$slug"
 printf '\nPublished briefing: https://trip.yiming.ca/briefings/%s/\n' "$slug"
