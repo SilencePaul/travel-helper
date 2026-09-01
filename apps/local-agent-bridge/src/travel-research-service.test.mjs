@@ -1939,6 +1939,119 @@ test("an unclaimed or mismatched resume preserves blocked recovery and never rev
   assert.deepEqual(mismatched.actions, ["claimAgentRun"]);
 });
 
+test("cancelling an old blocker releases a newer orphan claim after external cloud revocation", async () => {
+  const request = await targetRequest();
+  const recovered = {
+    researchTaskId: "research-task-old-blocker",
+    codexThreadId: "thread-old-blocker",
+    targetCategory: "hotel",
+    targetScopeId: request.targetScopeId,
+    disclosureFingerprint: request.disclosureFingerprint,
+    aliasSalt: "alias-salt-old-blocker",
+    blockedReason: "codex_auth_required",
+    blockedHostname: null,
+    activeRuntimeMs: 12_000,
+    phase: "needs_owner_action",
+    startedAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:01:00.000Z",
+  };
+  const actions = [];
+  const harness = createHarness({
+    initialState: recovered,
+    transportFactory(_events, runtimeClock) {
+      return new LocalAgentBridgeRuntime({
+        agentEndpoint: "https://api.public.org/api/agent",
+        now: runtimeClock,
+        fetch: async (_url, init) => {
+          const body = JSON.parse(init.body);
+          actions.push(body.action);
+          if (body.action === "claimAgentRun") {
+            return Response.json({
+              ok: true,
+              data: {
+                agentRunId: body.agentRunId,
+                claimedAt: "2026-09-01T00:00:00.000Z",
+                expiresAt: "2026-09-01T00:15:00.000Z",
+                nextSequence: 1,
+              },
+            });
+          }
+          assert.equal(body.action, "revokeAgentRunSelf");
+          return Response.json({ ok: false, error: "INVALID_AGENT_CLAIM" }, { status: 403 });
+        },
+      });
+    },
+  });
+  assert.equal((await harness.service.getResearchStatus()).phase, "needs_owner_action");
+  harness.service.prepare();
+  await harness.service.claim("agent-run-new-orphan");
+
+  const status = await harness.service.cancelResearch({ researchTaskId: recovered.researchTaskId });
+
+  assert.equal(status.phase, "cancelled");
+  assert.deepEqual(actions, ["claimAgentRun", "revokeAgentRunSelf"]);
+  assert.equal(harness.transport.claimedRun, undefined);
+  assert.doesNotThrow(() => harness.service.prepare());
+});
+
+test("an uncertain orphan revoke keeps the claim and reports failed instead of cancelled", async () => {
+  const request = await targetRequest();
+  const recovered = {
+    researchTaskId: "research-task-uncertain-orphan",
+    codexThreadId: "thread-uncertain-orphan",
+    targetCategory: "hotel",
+    targetScopeId: request.targetScopeId,
+    disclosureFingerprint: request.disclosureFingerprint,
+    aliasSalt: "alias-salt-uncertain-orphan",
+    blockedReason: "codex_auth_required",
+    blockedHostname: null,
+    activeRuntimeMs: 12_000,
+    phase: "needs_owner_action",
+    startedAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:01:00.000Z",
+  };
+  const harness = createHarness({ initialState: recovered, transportOptions: { uncertainRevoke: true } });
+  await harness.service.getResearchStatus();
+  harness.service.prepare();
+  await harness.service.claim("agent-run-uncertain-orphan");
+
+  const status = await harness.service.cancelResearch({ researchTaskId: recovered.researchTaskId });
+
+  assert.equal(status.phase, "failed");
+  assert.equal(status.errorCode, "AGENT_TRANSPORT_UNAVAILABLE");
+  assert.equal(harness.transport.claimedRun?.agentRunId, "agent-run-uncertain-orphan");
+  assert.equal(harness.events.filter((event) => event === "transport.revokeSelf").length, 1);
+});
+
+test("cancelling an active task revokes its matching claim exactly once", async () => {
+  let releaseContext;
+  let contextStarted;
+  const contextGate = new Promise((resolve) => { releaseContext = resolve; });
+  const observedContext = new Promise((resolve) => { contextStarted = resolve; });
+  const harness = createHarness({
+    transportOptions: { contextGate },
+    scripts: [{ codexThreadId: "must-not-run", output: completedOutput(), activeDurationMs: 1 }],
+  });
+  const originalGetContext = harness.transport.getDecisionContext.bind(harness.transport);
+  harness.transport.getDecisionContext = async () => {
+    contextStarted();
+    return originalGetContext();
+  };
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+  const execution = harness.service.executeTravelResearch(request);
+  await observedContext;
+
+  const cancellation = harness.service.cancelResearch({ researchTaskId: "research-task-1" });
+  releaseContext();
+  const [executeStatus, cancelStatus] = await Promise.all([execution, cancellation]);
+
+  assert.equal(executeStatus.phase, "cancelled");
+  assert.equal(cancelStatus.phase, "cancelled");
+  assert.equal(harness.events.filter((event) => event === "transport.revokeSelf").length, 1);
+});
+
 test("cleanup revoke remains available after cancellation exhausts the active research budget", async () => {
   let releaseContext;
   let contextStarted;

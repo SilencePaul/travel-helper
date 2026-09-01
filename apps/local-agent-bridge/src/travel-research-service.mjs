@@ -870,7 +870,22 @@ export class TravelResearchService {
     return this.#setStatus("failed", { errorCode: finalCode });
   }
 
+  async #releaseOrphanClaim() {
+    const claimed = this.#transport.claimedRun;
+    if (!claimed || (this.#task.agentRunId && claimed.agentRunId === this.#task.agentRunId)) return;
+    try {
+      await this.#transport.revokeSelf();
+    } catch (error) {
+      if (stableFailureCode(error) !== "AGENT_RUN_INACTIVE") throw error;
+    }
+  }
+
   async #finishCancelled() {
+    try {
+      await this.#releaseOrphanClaim();
+    } catch (error) {
+      return this.#finishFailure(stableFailureCode(error), false);
+    }
     if (this.#status.phase === "cancelled") return this.#status;
     if (this.#task.agentRunId && this.#transport.claimedRun?.agentRunId === this.#task.agentRunId) {
       try {
