@@ -153,6 +153,26 @@ function createControlledClock(start = "2026-09-01T00:00:00.000Z") {
     return true;
   };
   clock.pendingTimers = () => timers.size;
+  clock.nextDelay = () => [...timers.values()].sort((left, right) => left.delay - right.delay)[0]?.delay;
+  return clock;
+}
+
+function createAutoAdvanceClock(start = "2026-09-01T00:00:00.000Z") {
+  let time = Date.parse(start);
+  const delays = [];
+  const clock = () => new Date(time);
+  clock.setTimeout = (callback, delay) => {
+    const timer = { cancelled: false };
+    delays.push(delay);
+    queueMicrotask(() => {
+      if (timer.cancelled) return;
+      time += delay;
+      callback();
+    });
+    return timer;
+  };
+  clock.clearTimeout = (timer) => { timer.cancelled = true; };
+  clock.delays = delays;
   return clock;
 }
 
@@ -1617,6 +1637,415 @@ test("invalid resume state revokes a newly claimed real-runtime capability and p
     }
     assert.doesNotThrow(() => harness.service.prepare(), scenario.name);
   }
+});
+
+test("an unclaimed or mismatched resume preserves blocked recovery and never revokes another run", async () => {
+  const request = await targetRequest();
+  const recovered = {
+    researchTaskId: "research-task-preserved-resume",
+    codexThreadId: "thread-preserved-resume",
+    targetCategory: "hotel",
+    targetScopeId: request.targetScopeId,
+    disclosureFingerprint: request.disclosureFingerprint,
+    aliasSalt: "alias-salt-preserved-resume",
+    blockedReason: "codex_auth_required",
+    blockedHostname: null,
+    activeRuntimeMs: 12_000,
+    phase: "needs_owner_action",
+    startedAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:01:00.000Z",
+  };
+  const createRuntimeHarness = () => {
+    const actions = [];
+    const harness = createHarness({
+      initialState: recovered,
+      scripts: [{ codexThreadId: recovered.codexThreadId, output: completedOutput(), activeDurationMs: 13_000 }],
+      transportFactory(_events, runtimeClock) {
+        return new LocalAgentBridgeRuntime({
+          agentEndpoint: "https://api.public.org/api/agent",
+          now: runtimeClock,
+          fetch: async (_url, init) => {
+            const body = JSON.parse(init.body);
+            actions.push(body.action);
+            if (body.action === "claimAgentRun") {
+              return Response.json({
+                ok: true,
+                data: {
+                  agentRunId: body.agentRunId,
+                  claimedAt: "2026-09-01T00:00:00.000Z",
+                  expiresAt: "2026-09-01T00:15:00.000Z",
+                  nextSequence: 1,
+                },
+              });
+            }
+            if (body.action === "getDecisionContext") {
+              return Response.json({ ok: true, action: body.action, data: contextFixture() });
+            }
+            if (body.action === "submitProposalBatch") {
+              return Response.json({ ok: true, action: body.action, data: candidateBatchData() });
+            }
+            assert.equal(body.action, "revokeAgentRunSelf");
+            return Response.json({
+              ok: true,
+              action: body.action,
+              data: { agentRunId: body.agentRunId, revokedAt: "2026-09-01T00:02:00.000Z" },
+            });
+          },
+        });
+      },
+    });
+    return { ...harness, actions };
+  };
+
+  const unclaimed = createRuntimeHarness();
+  assert.equal((await unclaimed.service.getResearchStatus()).phase, "needs_owner_action");
+  await assert.rejects(unclaimed.service.resumeTravelResearch({
+    agentRunId: "agent-run-correct-resume",
+    researchTaskId: recovered.researchTaskId,
+    resumeAction: "retry_codex_auth",
+  }), { code: "AGENT_RUN_INACTIVE" });
+  assert.deepEqual(unclaimed.store.state, recovered);
+  assert.equal((await unclaimed.service.getResearchStatus()).phase, "needs_owner_action");
+  assert.deepEqual(unclaimed.actions, []);
+
+  unclaimed.service.prepare();
+  await unclaimed.service.claim("agent-run-correct-resume");
+  const completed = await unclaimed.service.resumeTravelResearch({
+    agentRunId: "agent-run-correct-resume",
+    researchTaskId: recovered.researchTaskId,
+    resumeAction: "retry_codex_auth",
+  });
+  assert.equal(completed.phase, "completed");
+  assert.deepEqual(unclaimed.actions, [
+    "claimAgentRun",
+    "getDecisionContext",
+    "submitProposalBatch",
+    "revokeAgentRunSelf",
+  ]);
+
+  const mismatched = createRuntimeHarness();
+  assert.equal((await mismatched.service.getResearchStatus()).phase, "needs_owner_action");
+  mismatched.service.prepare();
+  await mismatched.service.claim("agent-run-other");
+  await assert.rejects(mismatched.service.resumeTravelResearch({
+    agentRunId: "agent-run-correct-resume",
+    researchTaskId: recovered.researchTaskId,
+    resumeAction: "retry_codex_auth",
+  }), { code: "AGENT_RUN_INACTIVE" });
+  assert.deepEqual(mismatched.store.state, recovered);
+  assert.equal((await mismatched.service.getResearchStatus()).phase, "needs_owner_action");
+  assert.equal(mismatched.transport.claimedRun.agentRunId, "agent-run-other");
+  assert.deepEqual(mismatched.actions, ["claimAgentRun"]);
+});
+
+test("cleanup revoke remains available after cancellation exhausts the active research budget", async () => {
+  let releaseContext;
+  let contextStarted;
+  const contextGate = new Promise((resolve) => { releaseContext = resolve; });
+  const observedContext = new Promise((resolve) => { contextStarted = resolve; });
+  const clock = createClock();
+  const actions = [];
+  const harness = createHarness({
+    clock,
+    scripts: [{ codexThreadId: "must-not-run", output: completedOutput(), activeDurationMs: 1 }],
+    transportFactory(_events, runtimeClock) {
+      return new LocalAgentBridgeRuntime({
+        agentEndpoint: "https://api.public.org/api/agent",
+        now: runtimeClock,
+        fetch: async (_url, init) => {
+          const body = JSON.parse(init.body);
+          actions.push(body.action);
+          if (body.action === "claimAgentRun") {
+            return Response.json({
+              ok: true,
+              data: {
+                agentRunId: body.agentRunId,
+                claimedAt: "2026-09-01T00:00:00.000Z",
+                expiresAt: "2026-09-01T00:15:00.000Z",
+                nextSequence: 1,
+              },
+            });
+          }
+          if (body.action === "getDecisionContext") {
+            contextStarted();
+            await contextGate;
+            return Response.json({ ok: true, action: body.action, data: contextFixture() });
+          }
+          assert.equal(body.action, "revokeAgentRunSelf");
+          return Response.json({
+            ok: true,
+            action: body.action,
+            data: { agentRunId: body.agentRunId, revokedAt: "2026-09-01T00:10:00.001Z" },
+          });
+        },
+      });
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+  const execution = harness.service.executeTravelResearch(request);
+  await observedContext;
+  const cancellation = harness.service.cancelResearch({ researchTaskId: "research-task-1" });
+
+  clock.advance(600_001);
+  releaseContext();
+  const [executeStatus, cancelStatus] = await Promise.all([execution, cancellation]);
+
+  assert.equal(executeStatus.phase, "cancelled");
+  assert.equal(cancelStatus.phase, "cancelled");
+  assert.deepEqual(actions, ["claimAgentRun", "getDecisionContext", "revokeAgentRunSelf"]);
+  assert.equal(harness.runner.createCount, 0);
+  assert.equal(harness.transport.claimedRun, undefined);
+  assert.equal(harness.store.state, undefined);
+});
+
+test("permanently uncertain context uses capped exponential backoff and releases only after run expiry", async () => {
+  const clock = createAutoAdvanceClock();
+  let contextAttempts = 0;
+  const harness = createHarness({
+    clock,
+    scripts: [{ codexThreadId: "must-not-run", output: completedOutput(), activeDurationMs: 1 }],
+    transportFactory(_events, runtimeClock) {
+      return new LocalAgentBridgeRuntime({
+        agentEndpoint: "https://api.public.org/api/agent",
+        now: runtimeClock,
+        fetch: async (_url, init) => {
+          const body = JSON.parse(init.body);
+          if (body.action === "claimAgentRun") {
+            return Response.json({
+              ok: true,
+              data: {
+                agentRunId: body.agentRunId,
+                claimedAt: "2026-09-01T00:00:00.000Z",
+                expiresAt: "2026-09-01T00:00:20.000Z",
+                nextSequence: 1,
+              },
+            });
+          }
+          if (body.action === "revokeAgentRunSelf") {
+            return Response.json({
+              ok: true,
+              action: body.action,
+              data: { agentRunId: body.agentRunId, revokedAt: "2026-09-01T00:00:01.000Z" },
+            });
+          }
+          assert.equal(body.action, "getDecisionContext");
+          contextAttempts += 1;
+          if (contextAttempts > 20) {
+            return Response.json({ ok: false, error: "INVALID_REQUEST" }, { status: 400 });
+          }
+          throw new TypeError("context response permanently unknown");
+        },
+      });
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+
+  const status = await harness.service.executeTravelResearch(request);
+
+  assert.equal(status.phase, "failed");
+  assert.equal(status.errorCode, "AGENT_RUN_INACTIVE");
+  assert.equal(contextAttempts, 9);
+  assert.deepEqual(clock.delays, [100, 200, 400, 800, 1_600, 3_200, 5_000, 5_000, 3_700]);
+  assert.equal(harness.runner.createCount, 0);
+  assert.equal(harness.transport.claimedRun, undefined);
+  assert.equal(harness.store.state, undefined);
+});
+
+test("an expired uncertain resume context releases the run without deleting blocked recovery", async () => {
+  const request = await targetRequest();
+  const recovered = {
+    researchTaskId: "research-task-expired-context",
+    codexThreadId: "thread-expired-context",
+    targetCategory: "hotel",
+    targetScopeId: request.targetScopeId,
+    disclosureFingerprint: request.disclosureFingerprint,
+    aliasSalt: "alias-salt-expired-context",
+    blockedReason: "codex_auth_required",
+    blockedHostname: null,
+    activeRuntimeMs: 12_000,
+    phase: "needs_owner_action",
+    startedAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:01:00.000Z",
+  };
+  const clock = createAutoAdvanceClock();
+  let contextAttempts = 0;
+  const harness = createHarness({
+    clock,
+    initialState: recovered,
+    scripts: [{ codexThreadId: "must-not-run", output: completedOutput(), activeDurationMs: 1 }],
+    transportFactory(_events, runtimeClock) {
+      return new LocalAgentBridgeRuntime({
+        agentEndpoint: "https://api.public.org/api/agent",
+        now: runtimeClock,
+        fetch: async (_url, init) => {
+          const body = JSON.parse(init.body);
+          if (body.action === "claimAgentRun") {
+            return Response.json({
+              ok: true,
+              data: {
+                agentRunId: body.agentRunId,
+                claimedAt: "2026-09-01T00:00:00.000Z",
+                expiresAt: "2026-09-01T00:00:07.000Z",
+                nextSequence: 1,
+              },
+            });
+          }
+          assert.equal(body.action, "getDecisionContext");
+          contextAttempts += 1;
+          if (contextAttempts > 20) {
+            return Response.json({ ok: false, error: "INVALID_REQUEST" }, { status: 400 });
+          }
+          throw new TypeError("resume context response permanently unknown");
+        },
+      });
+    },
+  });
+  assert.equal((await harness.service.getResearchStatus()).phase, "needs_owner_action");
+  harness.service.prepare();
+  await harness.service.claim("agent-run-expired-context");
+
+  const status = await harness.service.resumeTravelResearch({
+    agentRunId: "agent-run-expired-context",
+    researchTaskId: recovered.researchTaskId,
+    resumeAction: "retry_codex_auth",
+  });
+
+  assert.deepEqual(status, {
+    phase: "needs_owner_action",
+    researchTaskId: recovered.researchTaskId,
+    startedAt: recovered.startedAt,
+    updatedAt: recovered.updatedAt,
+    blockedReason: "codex_auth_required",
+  });
+  assert.equal(contextAttempts, 7);
+  assert.deepEqual(harness.store.state, recovered);
+  assert.equal(harness.runner.createCount, 0);
+  assert.equal(harness.transport.claimedRun, undefined);
+});
+
+test("an expired uncertain cleanup revoke releases capability before persisting owner action", async () => {
+  const clock = createControlledClock();
+  const revokeBodies = [];
+  const harness = createHarness({
+    clock,
+    scripts: [{
+      codexThreadId: "thread-expired-revoke",
+      output: ownerAction("codex_auth_required"),
+      activeDurationMs: 10,
+    }],
+    transportFactory(_events, runtimeClock) {
+      return new LocalAgentBridgeRuntime({
+        agentEndpoint: "https://api.public.org/api/agent",
+        now: runtimeClock,
+        fetch: async (_url, init) => {
+          const body = JSON.parse(init.body);
+          if (body.action === "claimAgentRun") {
+            return Response.json({
+              ok: true,
+              data: {
+                agentRunId: body.agentRunId,
+                claimedAt: "2026-09-01T00:00:00.000Z",
+                expiresAt: "2026-09-01T00:00:07.000Z",
+                nextSequence: 1,
+              },
+            });
+          }
+          if (body.action === "getDecisionContext") {
+            return Response.json({ ok: true, action: body.action, data: contextFixture() });
+          }
+          assert.equal(body.action, "revokeAgentRunSelf");
+          revokeBodies.push(init.body);
+          if (revokeBodies.length > 20) {
+            return Response.json({ ok: false, error: "INVALID_REQUEST" }, { status: 400 });
+          }
+          throw new TypeError("revoke response permanently unknown");
+        },
+      });
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+  const execution = harness.service.executeTravelResearch(request);
+  while (revokeBodies.length === 0) await new Promise((resolve) => setImmediate(resolve));
+
+  for (const delay of [100, 200, 400, 800, 1_600, 3_200, 700]) {
+    while (clock.pendingTimers() === 0) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(clock.nextDelay(), delay);
+    assert.equal(clock.fireNext(), true);
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const status = await execution;
+
+  assert.equal(status.phase, "needs_owner_action");
+  assert.equal(revokeBodies.length, 7);
+  assert.equal(new Set(revokeBodies).size, 1);
+  assert.equal(harness.transport.claimedRun, undefined);
+  assert.equal(harness.store.state.phase, "needs_owner_action");
+});
+
+test("an expired uncertain submit stays pending and replays before authoritative completion", async () => {
+  const clock = createControlledClock();
+  const submitBodies = [];
+  const harness = createHarness({
+    clock,
+    scripts: [{ codexThreadId: "thread-expired-submit", output: completedOutput(), activeDurationMs: 10 }],
+    transportFactory(_events, runtimeClock) {
+      return new LocalAgentBridgeRuntime({
+        agentEndpoint: "https://api.public.org/api/agent",
+        now: runtimeClock,
+        fetch: async (_url, init) => {
+          const body = JSON.parse(init.body);
+          if (body.action === "claimAgentRun") {
+            return Response.json({
+              ok: true,
+              data: {
+                agentRunId: body.agentRunId,
+                claimedAt: "2026-09-01T00:00:00.000Z",
+                expiresAt: "2026-09-01T00:00:00.150Z",
+                nextSequence: 1,
+              },
+            });
+          }
+          if (body.action === "getDecisionContext") {
+            return Response.json({ ok: true, action: body.action, data: contextFixture() });
+          }
+          assert.equal(body.action, "submitProposalBatch");
+          submitBodies.push(init.body);
+          if (submitBodies.length <= 2) throw new TypeError("submit response unknown");
+          return Response.json({
+            ok: true,
+            action: body.action,
+            data: candidateBatchData(),
+            replayed: true,
+          });
+        },
+      });
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+  const execution = harness.service.executeTravelResearch(request);
+  while (submitBodies.length === 0) await new Promise((resolve) => setImmediate(resolve));
+
+  for (const delay of [100, 200]) {
+    while (clock.pendingTimers() === 0) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(clock.nextDelay(), delay);
+    assert.equal(clock.fireNext(), true);
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const status = await execution;
+
+  assert.equal(status.phase, "completed");
+  assert.equal(submitBodies.length, 3);
+  assert.equal(new Set(submitBodies).size, 1);
+  assert.equal(harness.transport.claimedRun, undefined);
+  assert.equal(harness.store.state, undefined);
 });
 
 test("cancelling during signed context recheck prevents runner creation and candidate writes", async () => {

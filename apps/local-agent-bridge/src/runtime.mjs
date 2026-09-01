@@ -425,7 +425,7 @@ export class LocalAgentBridgeRuntime {
         payload: safePayload,
       };
       const envelope = { ...signed, signature: signature(this.#prepared.privateKey, signed) };
-      this.#pendingCommand = { requested, firstSentAt, body: JSON.stringify(envelope) };
+      this.#pendingCommand = { action, requested, firstSentAt, body: JSON.stringify(envelope) };
     } else if (this.#pendingCommand.requested !== requested) {
       throw codedError("COMMAND_RETRY_REQUIRED");
     }
@@ -495,5 +495,13 @@ export class LocalAgentBridgeRuntime {
 
   async revokeSelf() {
     return this.#executeCommand("revokeAgentRunSelf", {});
+  }
+
+  releaseExpiredReadOnlyPending() {
+    if (this.#busy || !this.#claimed || !this.#pendingCommand) return false;
+    if (activeAgentRun(this.#claimed.expiresAt, currentTime(this.#now))) return false;
+    if (!["getDecisionContext", "revokeAgentRunSelf"].includes(this.#pendingCommand.action)) return false;
+    this.#clearCapability();
+    return true;
   }
 }

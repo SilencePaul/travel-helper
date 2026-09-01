@@ -30,7 +30,8 @@ const FAILURE_CODES = new Set([
 ]);
 const CONTINUE_EVIDENCE_PROMPT = "现有结果证据不足。请在原旅行研究任务和原授权范围内继续搜索公开来源，并按原固定 JSON Schema 输出完整结果。";
 const RETRY_AUTH_PROMPT = "Codex 登录已由设备所有者恢复。请继续原旅行研究任务，不得扩大范围，并按原固定 JSON Schema 输出完整结果。";
-const RECONCILIATION_BACKOFF_MS = 100;
+const RECONCILIATION_BACKOFF_INITIAL_MS = 100;
+const RECONCILIATION_BACKOFF_CAP_MS = 5_000;
 
 function codedError(code, uncertain = false) {
   return Object.assign(new Error(code), { code, uncertain });
@@ -386,13 +387,14 @@ export class TravelResearchService {
       this.#task.agentExpiresAt = this.#assertClaimed(input.agentRunId);
       this.#setStatus("researching");
       const context = await this.#getDecisionContext();
+      if (this.#cancelRequested) return this.#finishCancelled();
       const built = await this.#bounded(() => buildTravelResearchInput(context, {
         targetCategory: input.targetCategory,
         targetScopeId: input.targetScopeId,
         aliasSalt: this.#task.aliasSalt,
       }));
       if (built.disclosureFingerprint !== input.disclosureFingerprint) {
-        await this.#revokeStrict();
+        await this.#revokeStrict({ cleanup: true });
         await this.#store.clear();
         return this.#setStatus("superseded", { errorCode: "DISCLOSURE_CONTEXT_CHANGED" });
       }
@@ -467,9 +469,13 @@ export class TravelResearchService {
 
   async #resume(input) {
     let recovered;
+    const previousTask = this.#task;
+    const previousStatus = this.#status;
+    let claimedValidated = false;
     let resumeValidated = false;
     try {
       const agentExpiresAt = this.#assertClaimed(input.agentRunId);
+      claimedValidated = true;
       this.#task = {
         researchTaskId: input.researchTaskId,
         agentRunId: input.agentRunId,
@@ -540,15 +546,40 @@ export class TravelResearchService {
       );
       return await this.#consume(result, "resuming");
     } catch (error) {
+      if (!claimedValidated) {
+        this.#task = previousTask;
+        this.#status = previousStatus;
+        throw codedError(stableFailureCode(error));
+      }
       if (!resumeValidated && this.#task?.agentRunId === input.agentRunId) {
         try {
-          await this.#revokeStrict();
+          await this.#revokeStrict({ cleanup: true });
         } catch (revokeError) {
           throw codedError(stableFailureCode(revokeError));
         } finally {
-          this.#task = undefined;
+          this.#task = previousTask;
+          this.#status = previousStatus;
         }
         throw codedError("CODEX_RESEARCH_FAILED");
+      }
+      if (resumeValidated && !this.#cancelRequested
+        && stableFailureCode(error) === "AGENT_RUN_INACTIVE") {
+        this.#task = previousTask ?? {
+          researchTaskId: recovered.researchTaskId,
+          aliasSalt: recovered.aliasSalt,
+          targetCategory: recovered.targetCategory,
+          targetScopeId: recovered.targetScopeId,
+          disclosureFingerprint: recovered.disclosureFingerprint,
+          codexThreadId: recovered.codexThreadId,
+          activeRuntimeMs: recovered.activeRuntimeMs,
+          runnerRuntimeMs: recovered.activeRuntimeMs,
+          serviceRuntimeMs: 0,
+          startedAt: recovered.startedAt,
+        };
+        this.#status = previousStatus.phase === "needs_owner_action"
+          ? previousStatus
+          : safeResearchStatus(recovered);
+        return this.#status;
       }
       if (!this.#task) throw codedError(stableFailureCode(error));
       if (error?.code === "CODEX_NOT_AUTHENTICATED") {
@@ -565,7 +596,7 @@ export class TravelResearchService {
 
   async #supersedeCurrentRun() {
     try {
-      await this.#revokeStrict();
+      await this.#revokeStrict({ cleanup: true });
     } catch {
       return this.#finishFailure("AGENT_TRANSPORT_UNAVAILABLE", false);
     }
@@ -649,7 +680,7 @@ export class TravelResearchService {
   async #block(blocked) {
     try {
       if (!this.#task.codexThreadId) throw codedError("CODEX_RESEARCH_FAILED");
-      await this.#revokeStrict();
+      await this.#revokeStrict({ cleanup: true });
       const updatedAt = this.#now();
       const record = {
         researchTaskId: this.#task.researchTaskId,
@@ -680,18 +711,55 @@ export class TravelResearchService {
     return this.#reconcileSigned("submitProposalBatch", submit, { terminal: true });
   }
 
-  async #revokeStrict() {
-    return this.#reconcileSigned("revokeAgentRunSelf", () => this.#transport.revokeSelf(), { terminal: true });
+  async #revokeStrict({ cleanup = false } = {}) {
+    try {
+      return await this.#reconcileSigned(
+        "revokeAgentRunSelf",
+        () => this.#transport.revokeSelf(),
+        { terminal: true, cleanup },
+      );
+    } catch (error) {
+      if (cleanup && stableFailureCode(error) === "AGENT_RUN_INACTIVE") return { ok: true };
+      throw error;
+    }
   }
 
   async #getDecisionContext() {
     return this.#reconcileSigned("getDecisionContext", () => this.#transport.getDecisionContext());
   }
 
-  async #reconcileSigned(action, operation, { terminal = false } = {}) {
+  #reconciliationState(startedAt) {
+    const now = this.#date().getTime();
+    const elapsed = Math.max(0, now - startedAt);
+    return {
+      activeExpired: this.#task.activeRuntimeMs + elapsed >= ACTIVE_BUDGET_MS,
+      agentExpired: this.#task.agentExpiresAt <= now,
+      agentRemainingMs: Math.max(0, this.#task.agentExpiresAt - now),
+      cancelled: this.#cancelRequested,
+    };
+  }
+
+  async #waitForReconciliation(delay) {
+    await new Promise((resolve, reject) => {
+      try {
+        this.#setTimer(resolve, delay);
+      } catch {
+        reject(codedError("CODEX_RESEARCH_FAILED"));
+      }
+    });
+  }
+
+  #releaseExpiredPending(action) {
+    if (action === "submitProposalBatch"
+      || typeof this.#transport.releaseExpiredReadOnlyPending !== "function") return false;
+    return this.#transport.releaseExpiredReadOnlyPending() === true;
+  }
+
+  async #reconcileSigned(action, operation, { terminal = false, cleanup = false } = {}) {
     const startedAt = this.#date().getTime();
+    let backoffMs = RECONCILIATION_BACKOFF_INITIAL_MS;
     if (terminal) {
-      this.#beginTerminalReconciliation(action);
+      this.#beginTerminalReconciliation(action, { cleanup });
     } else {
       if (this.#task.pendingSignedAction && this.#task.pendingSignedAction !== action) {
         throw codedError("AGENT_TRANSPORT_UNAVAILABLE", true);
@@ -703,16 +771,38 @@ export class TravelResearchService {
     }
     try {
       for (;;) {
+        let state = this.#reconciliationState(startedAt);
+        if (state.agentExpired && this.#releaseExpiredPending(action)) {
+          this.#task.pendingSignedAction = undefined;
+          if (action === "revokeAgentRunSelf") return { ok: true };
+          throw codedError(state.cancelled ? "CODEX_RESEARCH_CANCELLED" : "AGENT_RUN_INACTIVE");
+        }
         try {
           const result = await operation();
           this.#task.pendingSignedAction = undefined;
+          state = this.#reconciliationState(startedAt);
+          if (action === "getDecisionContext") {
+            if (state.cancelled) throw codedError("CODEX_RESEARCH_CANCELLED");
+            if (state.agentExpired) throw codedError("AGENT_RUN_INACTIVE");
+            if (state.activeExpired) throw codedError("CODEX_RESEARCH_TIMEOUT");
+          }
           return result;
         } catch (error) {
           if (!error?.uncertain) {
             this.#task.pendingSignedAction = undefined;
             throw error;
           }
-          await new Promise((resolve) => setTimeout(resolve, RECONCILIATION_BACKOFF_MS));
+          state = this.#reconciliationState(startedAt);
+          if (state.agentExpired && this.#releaseExpiredPending(action)) {
+            this.#task.pendingSignedAction = undefined;
+            if (action === "revokeAgentRunSelf") return { ok: true };
+            throw codedError(state.cancelled ? "CODEX_RESEARCH_CANCELLED" : "AGENT_RUN_INACTIVE");
+          }
+          const delay = action === "submitProposalBatch" || state.agentExpired
+            ? backoffMs
+            : Math.min(backoffMs, Math.max(1, state.agentRemainingMs));
+          await this.#waitForReconciliation(delay);
+          backoffMs = Math.min(RECONCILIATION_BACKOFF_CAP_MS, backoffMs * 2);
         }
       }
     } finally {
@@ -722,14 +812,19 @@ export class TravelResearchService {
     }
   }
 
-  #beginTerminalReconciliation(action) {
+  #beginTerminalReconciliation(action, { cleanup = false } = {}) {
     if (this.#task.pendingSignedAction && this.#task.pendingSignedAction !== action) {
       throw codedError("AGENT_TRANSPORT_UNAVAILABLE", true);
     }
     if (!this.#task.terminalStarted) {
-      this.#assertClaimed(this.#task.agentRunId);
-      const deadline = this.#deadline(false);
-      if (deadline.delay <= 0) throw codedError(deadline.code);
+      if (cleanup) {
+        const claimed = this.#transport.claimedRun;
+        if (!claimed || claimed.agentRunId !== this.#task.agentRunId) throw codedError("AGENT_RUN_INACTIVE");
+      } else {
+        this.#assertClaimed(this.#task.agentRunId);
+        const deadline = this.#deadline(false);
+        if (deadline.delay <= 0) throw codedError(deadline.code);
+      }
       this.#task.terminalStarted = true;
     }
     this.#task.pendingSignedAction = action;
@@ -748,7 +843,7 @@ export class TravelResearchService {
     let finalCode = FAILURE_CODES.has(code) ? code : "CODEX_RESEARCH_FAILED";
     if (revoke) {
       try {
-        await this.#revokeStrict();
+        await this.#revokeStrict({ cleanup: true });
       } catch (error) {
         if (error?.code !== "CODEX_RESEARCH_TIMEOUT" && error?.code !== "AGENT_RUN_INACTIVE") {
           finalCode = "AGENT_TRANSPORT_UNAVAILABLE";
@@ -767,7 +862,7 @@ export class TravelResearchService {
     if (this.#status.phase === "cancelled") return this.#status;
     if (this.#task.agentRunId && this.#transport.claimedRun?.agentRunId === this.#task.agentRunId) {
       try {
-        await this.#revokeStrict();
+        await this.#revokeStrict({ cleanup: true });
       } catch (error) {
         return this.#finishFailure(stableFailureCode(error), false);
       }

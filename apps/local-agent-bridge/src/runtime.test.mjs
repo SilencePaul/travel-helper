@@ -998,6 +998,60 @@ test("pending command and revoke envelopes reconcile byte-for-byte after local e
   }
 });
 
+test("only expired read-only or revoke pending envelopes can release the local capability", async () => {
+  for (const action of ["getDecisionContext", "revokeAgentRunSelf", "submitProposalBatch"]) {
+    let now = new Date("2026-08-31T00:05:00.000Z");
+    const commandBodies = [];
+    let commandAttempts = 0;
+    const runtime = new LocalAgentBridgeRuntime({
+      agentEndpoint: "https://api.example.test/api/agent",
+      now: () => now,
+      fetch: async (_url, init) => {
+        const body = JSON.parse(init.body);
+        if (body.action === "claimAgentRun") {
+          return Response.json({
+            ok: true,
+            data: claimedData(body.agentRunId, 1, "2026-08-31T00:06:00.000Z"),
+          });
+        }
+        commandBodies.push(init.body);
+        commandAttempts += 1;
+        if (commandAttempts === 1) throw new TypeError("response permanently unknown");
+        assert.equal(action, "submitProposalBatch");
+        return Response.json({
+          ok: true,
+          action,
+          data: candidateBatchData(),
+          replayed: true,
+        });
+      },
+    });
+    runtime.prepare();
+    await runtime.claim(`agent-run-release-${action}`);
+
+    const first = action === "getDecisionContext"
+      ? runtime.getDecisionContext()
+      : action === "revokeAgentRunSelf"
+        ? runtime.revokeSelf()
+        : runtime.submitProposalBatch({ round: 1, candidates: [] });
+    await assert.rejects(first, { code: "AGENT_TRANSPORT_UNAVAILABLE", uncertain: true });
+    now = new Date("2026-08-31T00:07:00.000Z");
+
+    const released = runtime.releaseExpiredReadOnlyPending();
+
+    assert.equal(released, action !== "submitProposalBatch", action);
+    if (action === "submitProposalBatch") {
+      assert.throws(() => runtime.prepare(), { code: "BRIDGE_BUSY" });
+      await runtime.submitProposalBatch({ round: 1, candidates: [] });
+      assert.equal(commandBodies[0], commandBodies[1]);
+    } else {
+      assert.equal(runtime.claimedRun, undefined, action);
+      assert.doesNotThrow(() => runtime.prepare(), action);
+      assert.equal(commandBodies.length, 1, action);
+    }
+  }
+});
+
 test("claim replays one envelope across truncated and structurally invalid 2xx responses", async () => {
   const bodies = [];
   let attempts = 0;
