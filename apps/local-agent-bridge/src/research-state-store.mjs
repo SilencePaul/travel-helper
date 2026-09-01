@@ -629,6 +629,27 @@ export function createResearchStateStore({
     throw lastError;
   }
 
+  async function safelyRemoveOwnerTemp(ownerTempPath, identity) {
+    if (!identity) return false;
+    let current;
+    for (let attempt = 0; attempt < OWNERSHIP_CHECK_ATTEMPTS; attempt += 1) {
+      try {
+        current = await fileSystem.lstat(ownerTempPath);
+        break;
+      } catch (error) {
+        if (error?.code === "ENOENT") return true;
+        if (attempt + 1 < OWNERSHIP_CHECK_ATTEMPTS) await Promise.resolve();
+      }
+    }
+    if (!current || !sameIdentity(current, identity)) return false;
+    try {
+      await fileSystem.unlink(ownerTempPath);
+      return true;
+    } catch (error) {
+      return error?.code === "ENOENT";
+    }
+  }
+
   async function detachLockByIdentity(identity, purpose) {
     let current;
     let lastError;
@@ -736,13 +757,16 @@ export function createResearchStateStore({
     const owner = { pid: ownerPid, nonce };
     if (!validLockOwner(owner)) throw codedError("RESEARCH_STATE_UNAVAILABLE");
     const serializedOwner = `${JSON.stringify(owner)}\n`;
+    const serializedOwnerBytes = Buffer.byteLength(serializedOwner, "utf8");
     const deadline = (await currentTime()) + lockWaitMs;
     while (true) {
+      const ownerTempPath = detachedPathFor(LOCK_FILE_NAME, "owner");
       let createdHandle;
       let createdIdentity;
+      let published = false;
       try {
         createdHandle = await fileSystem.open(
-          lockPath,
+          ownerTempPath,
           constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW,
           0o600,
         );
@@ -753,31 +777,39 @@ export function createResearchStateStore({
         await createdHandle.writeFile(serializedOwner, { encoding: "utf8" });
         await createdHandle.sync();
         const info = await statHandleWithRetry(createdHandle);
-        if (!info.isFile() || (info.mode & 0o777) !== 0o600) {
+        if (!sameIdentity(info, createdIdentity)
+          || (info.mode & 0o777) !== 0o600
+          || info.size !== serializedOwnerBytes) {
           throw codedError("RESEARCH_STATE_UNAVAILABLE");
         }
+        await fileSystem.link(ownerTempPath, lockPath);
+        published = true;
         const lock = { handle: createdHandle, dev: info.dev, ino: info.ino, owner };
         if (!await ownsLock(lock, OWNERSHIP_CHECK_ATTEMPTS)) {
           throw codedError("RESEARCH_STATE_UNAVAILABLE");
         }
+        await safelyRemoveOwnerTemp(ownerTempPath, createdIdentity);
         return lock;
       } catch (error) {
         if (createdHandle) {
           let removed = false;
-          if (createdIdentity) {
+          if (published && createdIdentity) {
             try {
               removed = await safelyRemoveCreatedLock(createdIdentity);
             } catch {
               // The recorded inode could not be safely detached from the fixed path.
             }
           }
+          await safelyRemoveOwnerTemp(ownerTempPath, createdIdentity);
           try {
             await createdHandle.close();
           } catch {
             // The creation failure remains authoritative.
           }
-          if (removed) ORPHANED_LOCK_NONCES.delete(owner.nonce);
-          else ORPHANED_LOCK_NONCES.add(owner.nonce);
+          if (published) {
+            if (removed) ORPHANED_LOCK_NONCES.delete(owner.nonce);
+            else ORPHANED_LOCK_NONCES.add(owner.nonce);
+          }
         }
         if (error?.code !== "EEXIST") {
           if (error?.code === "RESEARCH_STATE_UNAVAILABLE") throw error;

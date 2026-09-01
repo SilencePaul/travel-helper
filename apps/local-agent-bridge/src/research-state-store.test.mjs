@@ -314,7 +314,7 @@ test("a validation failure never removes a replacement lock", async (context) =>
     ...fs,
     async open(path, flags, mode) {
       const handle = await fs.open(path, flags, mode);
-      if (path !== lockPath) return handle;
+      if (path !== lockPath && !path.startsWith(`${lockPath}.owner.`)) return handle;
       return {
         async chmod(...args) { return handle.chmod(...args); },
         async writeFile(...args) { return handle.writeFile(...args); },
@@ -322,7 +322,11 @@ test("a validation failure never removes a replacement lock", async (context) =>
         async stat() {
           if (!replaced) {
             replaced = true;
-            await fs.unlink(lockPath);
+            try {
+              await fs.unlink(lockPath);
+            } catch (error) {
+              if (error?.code !== "ENOENT") throw error;
+            }
             await writeFile(lockPath, lockOwner(process.pid, "new-owner-nonce-1234"), {
               flag: "wx",
               mode: 0o600,
@@ -353,7 +357,7 @@ test("lock owner setup failures never leave a zero-byte or partial well-known lo
       ...fs,
       async open(path, flags, mode) {
         const handle = await fs.open(path, flags, mode);
-        if (path !== lockPath) return handle;
+        if (path !== lockPath && !path.startsWith(`${lockPath}.owner.`)) return handle;
         return {
           async chmod(...args) {
             if (failure === "chmod") throw new Error("raw chmod failure");
@@ -384,6 +388,92 @@ test("lock owner setup failures never leave a zero-byte or partial well-known lo
     await assert.rejects(store.save(recoverableState()), { code: "RESEARCH_STATE_UNAVAILABLE" });
     await assert.rejects(stat(lockPath), { code: "ENOENT" }, failure);
   }
+});
+
+test("a partial owner temp with transient cleanup faults never publishes or blocks the next store", async (context) => {
+  const { directory } = await temporaryStore(context);
+  const lockPath = join(directory, LOCK_FILE);
+  let partialWriteAttempted = false;
+  let cleanupFaults = 3;
+  const fileSystem = {
+    ...fs,
+    async open(path, flags, mode) {
+      const handle = await fs.open(path, flags, mode);
+      const ownerTemp = path.startsWith(`${lockPath}.owner.`);
+      if (path !== lockPath && !ownerTemp) return handle;
+      return {
+        async chmod(...args) { return handle.chmod(...args); },
+        async writeFile(value) {
+          partialWriteAttempted = true;
+          await handle.write(String(value).slice(0, 5));
+          throw new Error("partial owner write failure");
+        },
+        async read(...args) { return handle.read(...args); },
+        async stat(...args) { return handle.stat(...args); },
+        async sync(...args) { return handle.sync(...args); },
+        async close() { return handle.close(); },
+      };
+    },
+    async lstat(path) {
+      if (partialWriteAttempted
+        && cleanupFaults > 0
+        && (path === lockPath || path.startsWith(`${lockPath}.owner.`))) {
+        cleanupFaults -= 1;
+        throw new Error("transient cleanup lstat failure");
+      }
+      return fs.lstat(path);
+    },
+  };
+  const first = createResearchStateStore({ directory, fileSystem, resolveHostname: PUBLIC_RESOLVER });
+
+  await assert.rejects(first.save(recoverableState()), { code: "RESEARCH_STATE_UNAVAILABLE" });
+  assert.equal(partialWriteAttempted, true);
+  assert.equal(cleanupFaults, 0);
+  await assert.rejects(stat(lockPath), { code: "ENOENT" });
+
+  const second = createResearchStateStore({ directory, resolveHostname: PUBLIC_RESOLVER });
+  const nextState = recoverableState({
+    researchTaskId: "after-owner-temp-failure",
+    updatedAt: "2026-09-01T01:10:11.000Z",
+  });
+  await second.save(nextState);
+  assert.deepEqual(await second.load(), nextState);
+});
+
+test("owner temp publication uses link EEXIST without overwriting a legal lock", async (context) => {
+  const { directory } = await temporaryStore(context);
+  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+  const lockPath = join(directory, LOCK_FILE);
+  const existingOwner = lockOwner(process.pid, "existing-live-owner-1234");
+  await writeFile(lockPath, existingOwner, { flag: "wx", mode: 0o600 });
+  await chmod(lockPath, 0o600);
+  let publishAttempts = 0;
+  const fileSystem = {
+    ...fs,
+    async link(from, to) {
+      if (to === lockPath) {
+        publishAttempts += 1;
+        assert.equal(await readFile(lockPath, "utf8"), existingOwner);
+      }
+      return fs.link(from, to);
+    },
+  };
+  const store = createResearchStateStore({
+    directory,
+    fileSystem,
+    isProcessAlive: () => true,
+    lockWaitMs: 20,
+    lockRetryMs: 2,
+    resolveHostname: PUBLIC_RESOLVER,
+  });
+
+  await assert.rejects(store.save(recoverableState()), { code: "RESEARCH_STATE_BUSY" });
+  assert.ok(publishAttempts > 0);
+  assert.equal(await readFile(lockPath, "utf8"), existingOwner);
+  assert.deepEqual(
+    (await fs.readdir(directory)).filter((name) => name.startsWith(`${LOCK_FILE}.owner.`)),
+    [],
+  );
 });
 
 test("load reads and validates through one no-follow file descriptor", async (context) => {
