@@ -32,7 +32,7 @@ const TEMP_DIRECTORY_PREFIX = "travel-research-";
 const QUARANTINE_DIRECTORY_PREFIX = ".travel-research-quarantine-";
 const ACTIVE_RESEARCH_PHASES = new Set(["researching", "resuming", "validating", "writing", "cancelling"]);
 const SUCCESSFUL_SHUTDOWN_PHASES = new Set(["completed", "cancelled", "superseded"]);
-const PASSIVE_RESEARCH_PHASES = new Set(["idle", "needs_owner_action", "completed", "failed", "cancelled", "superseded"]);
+const PASSIVE_RESEARCH_PHASES = new Set(["idle", "needs_owner_action", "completed", "cancelled", "superseded"]);
 const DEFAULT_STATE_DIRECTORY = join(
   homedir(),
   "Library",
@@ -378,32 +378,41 @@ function fixedLoopbackRuntime(service, runner) {
 
 function createServiceAwareShutdown(service, runner) {
   let shutdownPromise;
+  let businessFailure;
+  let businessFailureLatched = false;
   return () => {
     if (shutdownPromise) return shutdownPromise;
     const attempt = Promise.resolve().then(async () => {
-      let shutdownError;
-      try {
-        const status = await service.getResearchStatus();
-        if (ACTIVE_RESEARCH_PHASES.has(status?.phase)) {
-          if (typeof status.researchTaskId !== "string" || status.researchTaskId.length === 0) {
+      let shutdownError = businessFailureLatched ? businessFailure : undefined;
+      if (!businessFailureLatched) {
+        try {
+          const status = await service.getResearchStatus();
+          if (status?.phase === "failed") {
+            throw codedError(status.errorCode || "CODEX_RESEARCH_FAILED");
+          }
+          if (ACTIVE_RESEARCH_PHASES.has(status?.phase)) {
+            if (typeof status.researchTaskId !== "string" || status.researchTaskId.length === 0) {
+              throw codedError("CODEX_RESEARCH_FAILED");
+            }
+            const terminal = await service.cancelResearch({ researchTaskId: status.researchTaskId });
+            if (!SUCCESSFUL_SHUTDOWN_PHASES.has(terminal?.phase)) {
+              throw codedError(terminal?.phase === "failed"
+                ? terminal.errorCode || "CODEX_RESEARCH_FAILED"
+                : "CODEX_RESEARCH_FAILED");
+            }
+          } else if (!PASSIVE_RESEARCH_PHASES.has(status?.phase)) {
             throw codedError("CODEX_RESEARCH_FAILED");
           }
-          const terminal = await service.cancelResearch({ researchTaskId: status.researchTaskId });
-          if (!SUCCESSFUL_SHUTDOWN_PHASES.has(terminal?.phase)) {
-            throw codedError(terminal?.phase === "failed"
-              ? terminal.errorCode || "CODEX_RESEARCH_FAILED"
-              : "CODEX_RESEARCH_FAILED");
-          }
-        } else if (!PASSIVE_RESEARCH_PHASES.has(status?.phase)) {
-          throw codedError("CODEX_RESEARCH_FAILED");
+        } catch (error) {
+          businessFailure = error || codedError("CODEX_RESEARCH_FAILED");
+          businessFailureLatched = true;
+          shutdownError = businessFailure;
         }
-      } catch (error) {
-        shutdownError = error;
       }
       try {
         await runner.close();
       } catch (error) {
-        shutdownError ??= error;
+        shutdownError ??= error || codedError("CODEX_RESEARCH_FAILED");
       }
       if (shutdownError) throw shutdownError;
     });

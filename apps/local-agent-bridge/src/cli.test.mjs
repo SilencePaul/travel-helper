@@ -297,6 +297,14 @@ test("shutdown preserves owner-action state and propagates active cancellation f
     ["service.cancel", { researchTaskId: "research-task-terminal-failure" }],
     "runner.close",
   ]);
+
+  const alreadyFailed = await createHarness({
+    phase: "failed",
+    researchTaskId: "research-task-failed",
+    errorCode: "AGENT_TRANSPORT_UNAVAILABLE",
+  }, () => { throw new Error("must not cancel a terminal task"); });
+  await assert.rejects(alreadyFailed.bridge.close(), { code: "AGENT_TRANSPORT_UNAVAILABLE" });
+  assert.deepEqual(alreadyFailed.events, ["service.status:failed", "runner.close"]);
 });
 
 test("the real bridge and service-aware shutdown both retry a rejected runner cleanup end to end", async () => {
@@ -396,6 +404,74 @@ test("SIGTERM retries one transient cleanup failure and exits successfully", asy
   ]);
 });
 
+test("SIGTERM cannot wash a failed cancellation into success while retrying resource cleanup", async () => {
+  const signalTarget = new EventEmitter();
+  let phase = "researching";
+  let statusCalls = 0;
+  let cancelCalls = 0;
+  let runnerCalls = 0;
+  const runner = {
+    async cleanupIdle() {},
+    async close() {
+      runnerCalls += 1;
+      if (runnerCalls === 1) throw Object.assign(new Error("busy"), { code: "EBUSY" });
+    },
+  };
+  const service = {
+    prepare() { return {}; },
+    async claim() { return {}; },
+    async executeTravelResearch() { return {}; },
+    async getResearchStatus() {
+      statusCalls += 1;
+      return {
+        phase,
+        researchTaskId: "research-task-1",
+        ...(phase === "failed" ? { errorCode: "AGENT_TRANSPORT_UNAVAILABLE" } : {}),
+      };
+    },
+    async resumeTravelResearch() { return {}; },
+    async cancelResearch() {
+      cancelCalls += 1;
+      phase = "failed";
+      return {
+        phase,
+        researchTaskId: "research-task-1",
+        errorCode: "AGENT_TRANSPORT_UNAVAILABLE",
+      };
+    },
+  };
+  let bridgeOptions;
+  let resolveExit;
+  const exited = new Promise((resolve) => { resolveExit = resolve; });
+  await runCli([
+    "--app-url", "https://trip.example/decisions",
+    "--agent-endpoint", "https://api.example/api/agent",
+    "--port", "0",
+  ], { write() {} }, {
+    createTransport: () => ({}),
+    createRunnerFactory: () => runner,
+    createStore: () => ({}),
+    createNotifier: () => ({}),
+    createService: () => service,
+    async startBridge(options) {
+      bridgeOptions = options;
+      return {
+        connectionUrl: "https://trip.example/#agentBridge=http://127.0.0.1:43120",
+        close: () => bridgeOptions.onClose(),
+      };
+    },
+    signalTarget,
+    setExitCode: resolveExit,
+  });
+
+  signalTarget.emit("SIGTERM");
+  assert.equal(await exited, 1);
+  assert.equal(cancelCalls, 1);
+  assert.equal(runnerCalls, 2);
+  assert.equal(statusCalls, 1);
+  assert.equal(phase, "failed");
+});
+
 test("SIGTERM reports exit failure when active terminal reconciliation cannot finish", async () => {
   const events = [];
   const signalTarget = new EventEmitter();
@@ -443,7 +519,6 @@ test("SIGTERM reports exit failure when active terminal reconciliation cannot fi
   assert.deepEqual(events, [
     "service.cancel",
     "runner.close",
-    "service.cancel",
     "runner.close",
   ]);
 });
