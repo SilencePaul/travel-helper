@@ -164,6 +164,7 @@ function createBrowserTestDecisionRepository(): DecisionWorkspaceRepository | un
   });
   return {
     load: async (tripId) => workspace(tripId),
+    refresh: async (tripId) => workspace(tripId),
     subscribe: () => () => undefined,
     events: async (_tripId, afterCursor) => ({ events: [], cursor: afterCursor }),
     command: async (input): Promise<DecisionCommandResult> => {

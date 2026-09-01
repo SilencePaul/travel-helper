@@ -50,12 +50,12 @@ export function DecisionAgentPanel({ repository, bridge, tripId, newIdempotencyK
   const [createdRunId, setCreatedRunId] = useState<string>();
   const [reconcileRunId, setReconcileRunId] = useState<string>();
   const [message, setMessage] = useState<PanelMessage>();
-  const abortRef = useRef<AbortController>();
+  const abortRef = useRef<AbortController | undefined>(undefined);
   const generationRef = useRef(0);
   const lifecycleRef = useRef(0);
   const retryRef = useRef<HTMLButtonElement>(null);
-  const createKeyRef = useRef<string>();
-  const pendingCreateRef = useRef<CreateAgentRunCommand>();
+  const createKeyRef = useRef<string | undefined>(undefined);
+  const pendingCreateRef = useRef<CreateAgentRunCommand | undefined>(undefined);
 
   useEffect(() => {
     lifecycleRef.current += 1;
