@@ -344,6 +344,48 @@ test("a validation failure never removes a replacement lock", async (context) =>
   assert.equal(await readFile(lockPath, "utf8"), lockOwner(process.pid, "new-owner-nonce-1234"));
 });
 
+test("lock owner setup failures never leave a zero-byte or partial well-known lock", async (context) => {
+  for (const failure of ["zero", "partial", "chmod", "sync", "validation-stat"]) {
+    const { directory } = await temporaryStore(context);
+    const lockPath = join(directory, LOCK_FILE);
+    let statCalls = 0;
+    const fileSystem = {
+      ...fs,
+      async open(path, flags, mode) {
+        const handle = await fs.open(path, flags, mode);
+        if (path !== lockPath) return handle;
+        return {
+          async chmod(...args) {
+            if (failure === "chmod") throw new Error("raw chmod failure");
+            return handle.chmod(...args);
+          },
+          async writeFile(value) {
+            if (failure === "partial") await handle.write(String(value).slice(0, 5));
+            throw new Error("raw owner write failure");
+          },
+          async read(...args) { return handle.read(...args); },
+          async stat(...args) {
+            statCalls += 1;
+            if (failure === "validation-stat" && statCalls > 1) {
+              throw new Error("raw validation stat failure");
+            }
+            return handle.stat(...args);
+          },
+          async sync(...args) {
+            if (failure === "sync") throw new Error("raw owner sync failure");
+            return handle.sync(...args);
+          },
+          async close() { return handle.close(); },
+        };
+      },
+    };
+    const store = createResearchStateStore({ directory, fileSystem, resolveHostname: PUBLIC_RESOLVER });
+
+    await assert.rejects(store.save(recoverableState()), { code: "RESEARCH_STATE_UNAVAILABLE" });
+    await assert.rejects(stat(lockPath), { code: "ENOENT" }, failure);
+  }
+});
+
 test("load reads and validates through one no-follow file descriptor", async (context) => {
   const { directory, store } = await temporaryStore(context);
   await store.save(recoverableState());
@@ -538,6 +580,151 @@ test("direct save also owns and rechecks the lock before publishing", async (con
   await assert.rejects(store.save(recoverableState()), { code: "RESEARCH_STATE_UNAVAILABLE" });
   assert.equal(foundLock, true);
   assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), replacement);
+});
+
+test("losing the lock inside the publish rename window removes the old owner's published inode", async (context) => {
+  const { directory, filePath } = await temporaryStore(context);
+  const lockPath = join(directory, LOCK_FILE);
+  const replacement = recoverableState({
+    researchTaskId: "publish-window-replacement",
+    updatedAt: "2026-09-01T01:07:08.000Z",
+  });
+  let intercepted = false;
+  const fileSystem = {
+    ...fs,
+    async rename(from, to) {
+      if (!intercepted && from.endsWith(".tmp") && to === filePath) {
+        intercepted = true;
+        await fs.unlink(lockPath);
+        await writeFile(lockPath, lockOwner(process.pid, "publish-window-lock-1234"), {
+          flag: "wx",
+          mode: 0o600,
+        });
+        await chmod(lockPath, 0o600);
+        await writeFile(filePath, `${JSON.stringify(replacement)}\n`, { mode: 0o600 });
+        await chmod(filePath, 0o600);
+      }
+      return fs.rename(from, to);
+    },
+  };
+  const store = createResearchStateStore({ directory, fileSystem, resolveHostname: PUBLIC_RESOLVER });
+  const oldOwnerState = recoverableState();
+
+  await assert.rejects(
+    store.persistNeedsOwnerAction(oldOwnerState, { notifyOwnerAction: async () => true }),
+    { code: "RESEARCH_STATE_UNAVAILABLE" },
+  );
+  let persisted;
+  try {
+    persisted = JSON.parse(await readFile(filePath, "utf8"));
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  assert.notDeepEqual(persisted, oldOwnerState);
+  assert.equal(await readFile(lockPath, "utf8"), lockOwner(process.pid, "publish-window-lock-1234"));
+});
+
+test("publish rollback never deletes a state inode installed after the old owner publishes", async (context) => {
+  const { directory, filePath } = await temporaryStore(context);
+  const lockPath = join(directory, LOCK_FILE);
+  const replacement = recoverableState({
+    researchTaskId: "post-publish-replacement",
+    updatedAt: "2026-09-01T01:08:09.000Z",
+  });
+  let intercepted = false;
+  const fileSystem = {
+    ...fs,
+    async rename(from, to) {
+      const result = await fs.rename(from, to);
+      if (!intercepted && from.endsWith(".tmp") && to === filePath) {
+        intercepted = true;
+        await fs.unlink(lockPath);
+        await writeFile(lockPath, lockOwner(process.pid, "post-publish-lock-1234"), {
+          flag: "wx",
+          mode: 0o600,
+        });
+        await chmod(lockPath, 0o600);
+        await fs.unlink(filePath);
+        await writeFile(filePath, `${JSON.stringify(replacement)}\n`, { mode: 0o600 });
+        await chmod(filePath, 0o600);
+      }
+      return result;
+    },
+  };
+  const store = createResearchStateStore({ directory, fileSystem, resolveHostname: PUBLIC_RESOLVER });
+
+  await assert.rejects(store.save(recoverableState()), { code: "RESEARCH_STATE_UNAVAILABLE" });
+  assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), replacement);
+  assert.equal(await readFile(lockPath, "utf8"), lockOwner(process.pid, "post-publish-lock-1234"));
+});
+
+test("release retries one transient ownership stat failure and removes its own lock", async (context) => {
+  const { directory } = await temporaryStore(context);
+  const lockPath = join(directory, LOCK_FILE);
+  let failReleaseCheck = false;
+  let injected = false;
+  const fileSystem = {
+    ...fs,
+    async lstat(path) {
+      if (path === lockPath && failReleaseCheck && !injected) {
+        injected = true;
+        throw new Error("transient release lstat failure");
+      }
+      return fs.lstat(path);
+    },
+  };
+  const store = createResearchStateStore({ directory, fileSystem, resolveHostname: PUBLIC_RESOLVER });
+
+  await assert.doesNotReject(store.persistNeedsOwnerAction(recoverableState(), {
+    async notifyOwnerAction() {
+      failReleaseCheck = true;
+      return true;
+    },
+  }));
+  assert.equal(injected, true);
+  await assert.rejects(stat(lockPath), { code: "ENOENT" });
+});
+
+test("a same-process nonce marked orphaned after persistent release failure is recoverable", async (context) => {
+  const { directory } = await temporaryStore(context);
+  const lockPath = join(directory, LOCK_FILE);
+  let failReleaseChecks = false;
+  const failingFileSystem = {
+    ...fs,
+    async lstat(path) {
+      if (path === lockPath && failReleaseChecks) throw new Error("persistent release lstat failure");
+      return fs.lstat(path);
+    },
+  };
+  const first = createResearchStateStore({
+    directory,
+    fileSystem: failingFileSystem,
+    resolveHostname: PUBLIC_RESOLVER,
+  });
+
+  await assert.rejects(first.persistNeedsOwnerAction(recoverableState(), {
+    async notifyOwnerAction() {
+      failReleaseChecks = true;
+      return true;
+    },
+  }), { code: "RESEARCH_STATE_UNAVAILABLE" });
+  assert.equal((await stat(lockPath)).isFile(), true);
+
+  const second = createResearchStateStore({
+    directory,
+    lockWaitMs: 50,
+    lockRetryMs: 2,
+    isProcessAlive: () => true,
+    resolveHostname: PUBLIC_RESOLVER,
+  });
+  const nextState = recoverableState({
+    researchTaskId: "same-process-recovery",
+    updatedAt: "2026-09-01T01:09:10.000Z",
+  });
+  await second.save(nextState);
+
+  assert.deepEqual(await second.load(), nextState);
+  await assert.rejects(stat(lockPath), { code: "ENOENT" });
 });
 
 test("explicit fd chmod preserves state and lock mode under a restrictive umask", async (context) => {
