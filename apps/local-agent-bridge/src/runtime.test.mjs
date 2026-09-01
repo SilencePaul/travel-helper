@@ -170,6 +170,44 @@ test("releaseUnboundClaim refuses to clear a matching capability while runtime i
   await context;
 });
 
+test("releaseUnboundClaim preserves an uncertain signed command until its exact replay settles", async () => {
+  const commandBodies = [];
+  let contextAttempts = 0;
+  const runtime = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.example.test/api/agent",
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.action === "claimAgentRun") {
+        return Response.json({ ok: true, data: claimedData(body.agentRunId) });
+      }
+      commandBodies.push(init.body);
+      contextAttempts += 1;
+      if (contextAttempts === 1) throw new TypeError("response lost");
+      return Response.json({
+        ok: true,
+        action: "getDecisionContext",
+        data: { tripId: "trip-1", preferences: [], candidates: [] },
+      });
+    },
+  });
+  runtime.prepare();
+  await runtime.claim("agent-run-pending-context");
+
+  await assert.rejects(runtime.getDecisionContext(), {
+    code: "AGENT_TRANSPORT_UNAVAILABLE",
+    uncertain: true,
+  });
+  assert.equal(runtime.releaseUnboundClaim("agent-run-pending-context"), false);
+  assert.equal(runtime.claimedRun?.agentRunId, "agent-run-pending-context");
+  assert.throws(() => runtime.prepare(), /BRIDGE_BUSY/);
+
+  await assert.doesNotReject(runtime.getDecisionContext());
+  assert.equal(commandBodies.length, 2);
+  assert.equal(commandBodies[0], commandBodies[1]);
+  assert.equal(runtime.releaseUnboundClaim("agent-run-pending-context"), true);
+  assert.doesNotThrow(() => runtime.prepare());
+});
+
 test("submitProposalBatch is a fixed runtime wrapper and uncertain retries reuse the pending envelope", async () => {
   const bodies = [];
   let attempt = 0;

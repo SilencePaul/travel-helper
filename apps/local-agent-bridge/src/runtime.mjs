@@ -269,7 +269,8 @@ export class LocalAgentBridgeRuntime {
   }
 
   releaseUnboundClaim(agentRunId) {
-    if (this.#busy || typeof agentRunId !== "string" || !agentRunId
+    if (this.#busy || this.#pendingClaim || this.#pendingCommand
+      || typeof agentRunId !== "string" || !agentRunId
       || this.#claimed?.agentRunId !== agentRunId) return false;
     this.#clearCapability();
     return true;
