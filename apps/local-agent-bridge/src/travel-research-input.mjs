@@ -13,6 +13,8 @@ const MIN_ALIAS_SALT_BYTES = 16;
 const MAX_ALIAS_SALT_BYTES = 1_024;
 const MAX_INPUT_BYTES = 256 * 1_024;
 const MAX_INSPECTION_VIEWS = 64;
+const MAX_INSPECTION_CANDIDATES = 128;
+const MAX_JOINED_FRAGMENTS = 16;
 const NON_PUBLIC_HOST_SUFFIXES = [
   "localhost", "local", "internal", "lan", "home", "home.arpa", "localdomain", "corp", "intranet",
   "private", "test", "invalid", "example", "onion",
@@ -33,6 +35,9 @@ const NON_HIERARCHICAL_URL_PATTERN = /(?:data|javascript|mailto):[^\s"'<>\u3001\
 const PROTOCOL_RELATIVE_URL_PATTERN = /(?<!:)\/\/[^\s"'<>\u3001\uff0c\u3002\uff1b]+/gu;
 const BASE_TOKEN_PATTERN = /(?<![A-Za-z0-9_+-])[A-Za-z0-9][A-Za-z0-9_+\/-]{11,4095}={0,2}(?![A-Za-z0-9_=+\/-])/gu;
 const HEX_TOKEN_PATTERN = /(?<![A-Fa-f0-9])[A-Fa-f0-9]{16,8192}(?![A-Fa-f0-9])/gu;
+const BASE_FRAGMENT_PATTERN = /^[A-Za-z0-9_+\/-]+={0,2}$/u;
+const HEX_FRAGMENT_PATTERN = /^[A-Fa-f0-9]+$/u;
+const DEFAULT_IGNORABLE_PATTERN = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
 const IP_TOKEN_PATTERN = /(?<![A-Za-z0-9])(?:\[[0-9A-Fa-f:.%]+\]|(?:\d{1,3}\.){3}\d{1,3}|[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]+)(?::\d{1,5})?(?:\/[^\s"'<>]*)?(?![A-Za-z0-9])/gu;
 const TRAILING_SENTENCE_PUNCTUATION = new Set([
   ".", ",", ";", "!", "?", ")", "]", "}", "，", "。", "；", "！", "？", "、", "）", "】", "》", "」", "』",
@@ -231,14 +236,26 @@ export function researchInspectionViews(value) {
   if (typeof value !== "string") {
     return Object.freeze({ views: Object.freeze([]), malformed: true, truncated: false });
   }
+  if (Buffer.byteLength(value, "utf8") > MAX_INPUT_BYTES) {
+    return Object.freeze({ views: Object.freeze([]), malformed: false, truncated: true });
+  }
   const views = [];
   const seen = new Set();
   let truncated = false;
-  function add(view) {
+  let candidateCount = 0;
+  function consumeCandidate() {
+    candidateCount += 1;
+    if (candidateCount > MAX_INSPECTION_CANDIDATES) {
+      truncated = true;
+      return false;
+    }
+    return true;
+  }
+  function addOne(view) {
     const normalized = view.normalize("NFKC");
     if (views.length >= MAX_INSPECTION_VIEWS && !seen.has(normalized)) {
       truncated = true;
-      return;
+      return false;
     }
     if (!seen.has(normalized)) {
       seen.add(normalized);
@@ -249,35 +266,87 @@ export function researchInspectionViews(value) {
   }
   let malformed = false;
   function addUriViews(seed) {
-    let current = seed.normalize("NFKC");
-    add(current);
-    for (let pass = 0; pass < 3 && /%[0-9A-Fa-f]{2}/u.test(current); pass += 1) {
+    const pending = [{ pass: 0, value: seed.normalize("NFKC") }];
+    const processed = new Set();
+    while (pending.length > 0 && !truncated) {
+      const currentEntry = pending.pop();
+      const current = currentEntry.value.normalize("NFKC");
+      const processKey = `${currentEntry.pass}\0${current}`;
+      if (processed.has(processKey)) continue;
+      processed.add(processKey);
+      addOne(current);
+      const compact = current.replace(DEFAULT_IGNORABLE_PATTERN, "");
+      if (compact !== current) pending.push({ pass: currentEntry.pass, value: compact });
+      if (!/%[0-9A-Fa-f]{2}/u.test(current)) continue;
+      if (currentEntry.pass >= 3) {
+        malformed = true;
+        continue;
+      }
+      if (!consumeCandidate()) {
+        continue;
+      }
       let decoded;
       try {
         decoded = decodeURIComponent(current).normalize("NFKC");
       } catch {
         malformed = true;
+        continue;
+      }
+      if (decoded !== current) pending.push({ pass: currentEntry.pass + 1, value: decoded });
+    }
+  }
+  function decodedFragmentToken(rawToken, pattern, maxLength) {
+    const candidates = rawToken.startsWith("/")
+      ? [rawToken.replace(/^\/+/, ""), rawToken]
+      : [rawToken];
+    return candidates.find((candidate) => candidate.length > 0
+      && candidate.length <= maxLength
+      && pattern.test(candidate));
+  }
+  function inspectJoinedFragments(view, pattern, minimumLength, maximumLength, decoder) {
+    const run = [];
+    for (const match of view.matchAll(/\S+/gu)) {
+      const token = decodedFragmentToken(match[0], pattern, maximumLength);
+      if (!token) {
+        run.length = 0;
+        continue;
+      }
+      run.push(token);
+      if (run.length > MAX_JOINED_FRAGMENTS) {
+        truncated = true;
         return;
       }
-      if (decoded === current) break;
-      add(decoded);
-      current = decoded;
+      let joined = token;
+      for (let start = run.length - 2; start >= 0; start -= 1) {
+        joined = `${run[start]}${joined}`;
+        if (joined.length > maximumLength) break;
+        if (joined.length < minimumLength) continue;
+        if (!consumeCandidate()) return;
+        const decoded = decoder(joined);
+        if (decoded !== undefined) addUriViews(decoded);
+      }
     }
-    if (/%[0-9A-Fa-f]{2}/u.test(current)) malformed = true;
   }
   addUriViews(value);
-  for (let index = 0; index < views.length; index += 1) {
+  for (let index = 0; index < views.length && !truncated; index += 1) {
     const view = views[index];
     BASE_TOKEN_PATTERN.lastIndex = 0;
     for (const match of view.matchAll(BASE_TOKEN_PATTERN)) {
+      if (!consumeCandidate()) break;
       const decoded = decodeBaseToken(match[0]);
       if (decoded !== undefined) addUriViews(decoded);
     }
+    if (truncated) break;
     HEX_TOKEN_PATTERN.lastIndex = 0;
     for (const match of view.matchAll(HEX_TOKEN_PATTERN)) {
+      if (!consumeCandidate()) break;
       const decoded = decodeHexToken(match[0]);
       if (decoded !== undefined) addUriViews(decoded);
     }
+    if (truncated) break;
+    inspectJoinedFragments(view, BASE_FRAGMENT_PATTERN, 12, 4_098, decodeBaseToken);
+    if (truncated) break;
+    inspectJoinedFragments(view, HEX_FRAGMENT_PATTERN, 16, 8_192, decodeHexToken);
   }
   return Object.freeze({ views: Object.freeze(views), malformed, truncated });
 }

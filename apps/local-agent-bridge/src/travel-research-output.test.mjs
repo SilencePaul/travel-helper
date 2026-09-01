@@ -14,7 +14,7 @@ const aliasFixture = await buildTravelResearchInput({
   },
   workspace: {
     preferences: [{
-      id: "preference-raw-1",
+      id: "preference-secret",
       revision: 4,
       answers: { pace: "慢" },
       status: "completed",
@@ -128,7 +128,7 @@ test("valid completed output maps current aliases and adds only trusted round/ca
   assert.deepEqual(result.payload.candidates[0].recommendation, {
     round: 4,
     reason: "靠近行程段",
-    preferenceRevisionIds: ["preference-raw-1"],
+    preferenceRevisionIds: ["preference-secret"],
     feedbackIds: ["feedback-raw-1"],
   });
   assert.equal(result.payload.candidates[0].evidence[0].capturedAt, "2026-09-01T02:03:04.567Z");
@@ -231,13 +231,15 @@ test("normalizes origins and rejects duplicate, credential-bearing, fragmented, 
 });
 
 test("canonical URL inspection rejects encoded paths and search data before removing the query", async () => {
-  const encodedRawId = Buffer.from("preference-raw-1", "utf8").toString("base64url");
+  const encodedRawId = Buffer.from("preference-secret", "utf8").toString("base64url");
   const layeredCredential = Buffer.from("access%5Ftoken%3Dopaque-secret", "utf8").toString("base64url");
   for (const sourceUrl of [
     "https://hotel1.com/%2FUsers%2Falice%2Fsecret",
     "https://hotel1.com/access%5Ftoken%3Dopaque-secret",
+    "https://hotel1.com/access%E2%80%8Btoken%3Dopaque-secret",
     "https://hotel1.com/%3Cscript%3Ealert(1)%3C%2Fscript%3E",
     `https://hotel1.com/${encodedRawId}`,
+    "https://hotel1.com/cHJl%20ZmVy%20ZW5j%20ZS1z%20ZWNy%20ZXQ=",
     `https://hotel1.com/${layeredCredential}`,
     "https://hotel1.com/%68%74%74%70%73%3A%2F%2Fother.example.com%2Fa",
     "https://hotel1.com/rooms?access%5Ftoken=opaque-secret",
@@ -246,6 +248,8 @@ test("canonical URL inspection rejects encoded paths and search data before remo
     "https://hotel1.com/rooms?markup=%253Cscript%253E",
     `https://hotel1.com/rooms?reference=${encodedRawId}`,
     `https://hotel1.com/rooms?reference=${layeredCredential}`,
+    "https://hotel1.com/%ZZ",
+    "https://hotel1.com/abc%2",
   ]) {
     const output = completedOutput();
     output.candidates[0].evidence[0].sourceUrl = sourceUrl;
@@ -253,6 +257,11 @@ test("canonical URL inspection rejects encoded paths and search data before remo
       message: "CODEX_OUTPUT_INVALID",
     }, sourceUrl);
   }
+
+  const safe = completedOutput();
+  safe.candidates[0].evidence[0].sourceUrl = "https://HOTEL1.com:443/%E6%B7%B1%E5%9C%B3?public=value";
+  const result = await validateTravelResearchOutput(safe, options());
+  assert.equal(result.payload.candidates[0].evidence[0].sourceUrl, "https://hotel1.com/%E6%B7%B1%E5%9C%B3");
 });
 
 test("requires a branded immutable alias map and rejects forged map-shaped options", async () => {
@@ -358,7 +367,7 @@ test("recursively rejects secret keys, token values, HTML, local paths, and over
     (value) => { value.candidates[0].entity.address = "-----BEGIN PRIVATE KEY-----"; },
     (value) => { value.candidates[0].sequence = 12; },
     (value) => { value.candidates[0].idempotencyKey = "idem-secret"; },
-    (value) => { value.candidates[0].recommendation.reason = "leaked preference-raw-1"; },
+    (value) => { value.candidates[0].recommendation.reason = "leaked preference-secret"; },
     (value) => { value.candidates[0].recommendation.reason = layeredCredential; },
     (value) => { value.candidates[0].recommendation.reason = "access%5Ftoken%3Dopaque-secret%E0%A4%A"; },
     (value) => { value.candidates[0].evidence[0].facts["%70reference-raw-1%E0%A4%A"] = "opaque"; },

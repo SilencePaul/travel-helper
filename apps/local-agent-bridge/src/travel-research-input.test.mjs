@@ -6,6 +6,7 @@ import {
   buildTravelResearchInput,
   hmacAlias,
   isResearchAliasMap,
+  researchInspectionViews,
   resolveResearchAlias,
 } from "./travel-research-input.mjs";
 
@@ -256,6 +257,8 @@ test("input inspection catches normalized, URI and encoded private or credential
     "access%5Ftoken%3Dopaque-secret-value",
     Buffer.from("%70reference-secret", "utf8").toString("base64url"),
     Buffer.from("access%5Ftoken%3Dopaque-secret-value", "utf8").toString("hex"),
+    "access\u200Btoken=opaque-secret-value",
+    "cHJl ZmVy ZW5j ZS1z ZWNy ZXQ=",
     "_https://alice:password@publicsite.com/private",
     "ａｃｃｅｓｓＫｅｙ＝opaque-secret-value",
     "%E0%A4%A",
@@ -294,6 +297,8 @@ test("input inspection catches normalized, URI and encoded private or credential
     safeBase64Like: "Q2hpbmVzZVRyYXZlbEluZm8=",
     safeFullwidth: "安全全角，。ＡＢＣ",
     safePercent: "公开优惠 50%",
+    safeIgnorable: "行程\u200B说明",
+    safeFragmentedBase64Like: "Q2hp bmVz ZVRy YXZl bElu Zm8=",
   };
   safeContext.workspace.preferences[0].freeText = { note: "普通说明" };
   const safeBuilt = await buildTravelResearchInput(safeContext, {
@@ -304,7 +309,19 @@ test("input inspection catches normalized, URI and encoded private or credential
   assert.equal(safeBuilt.codexInput.preferences[0].answers.safeBase64Like, "Q2hpbmVzZVRyYXZlbEluZm8=");
   assert.equal(safeBuilt.codexInput.preferences[0].answers.safeFullwidth, "安全全角，。ＡＢＣ");
   assert.equal(safeBuilt.codexInput.preferences[0].answers.safePercent, "公开优惠 50%");
+  assert.equal(safeBuilt.codexInput.preferences[0].answers.safeIgnorable, "行程\u200B说明");
+  assert.equal(safeBuilt.codexInput.preferences[0].answers.safeFragmentedBase64Like, "Q2hp bmVz ZVRy YXZl bElu Zm8=");
   assert.equal(safeBuilt.codexInput.preferences[0].answers["安全，键"], "保留原键");
+});
+
+test("inspection view expansion fails closed at bounded input and fragment limits", () => {
+  const fragmented = researchInspectionViews(`${"QUJD ".repeat(20)}RA==`);
+  assert.equal(fragmented.truncated, true);
+  assert.ok(fragmented.views.length <= 64);
+
+  const oversized = researchInspectionViews("x".repeat((256 * 1_024) + 1));
+  assert.equal(oversized.truncated, true);
+  assert.deepEqual(oversized.views, []);
 });
 
 test("IP redaction preserves sentence punctuation without mistaking times or short tuples for IPv6", async () => {

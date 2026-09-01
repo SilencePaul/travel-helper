@@ -173,6 +173,7 @@ function normalizedHttpsOrigin(value) {
 }
 
 function unsafeUrlComponent(value, aliasMap) {
+  if (/%(?![0-9A-Fa-f]{2})/u.test(value)) return true;
   const inspection = researchInspectionViews(value);
   if (inspection.malformed || inspection.truncated) return true;
   return inspection.views.some((view) => (
