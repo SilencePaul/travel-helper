@@ -9,6 +9,25 @@ import { canonicalJson } from "@travel/contracts/decision-research";
 
 const FIXED_AGENT_SCOPE = ["submitProposalBatch"];
 const CONTROL_ACTIONS = new Set(["getDecisionContext", "revokeAgentRunSelf"]);
+const PUBLIC_AGENT_ERRORS = new Set([
+  "AUTH_REQUIRED",
+  "MEMBERSHIP_REQUIRED",
+  "ADMIN_REQUIRED",
+  "FORBIDDEN",
+  "INVALID_REQUEST",
+  "VERSION_CONFLICT",
+  "IDEMPOTENCY_KEY_REUSED",
+  "SUMMARY_NOT_READY",
+  "AGENT_RUN_EXPIRED",
+  "AGENT_SCOPE_FORBIDDEN",
+  "INVALID_AGENT_CLAIM",
+  "INVALID_CONFIRMATION_STATE",
+  "INVALID_PLACEMENT",
+  "INVALID_PLACEMENT_STATE",
+  "VERIFICATION_INCOMPLETE",
+  "CURSOR_EXPIRED",
+]);
+const UNCERTAIN_HTTP_STATUSES = new Set([408, 425, 429]);
 const BRIDGE_ERROR = Symbol("bridgeError");
 
 export { canonicalJson };
@@ -53,16 +72,45 @@ function utcDateTimeMilliseconds(value) {
     : Number.NaN;
 }
 
-function currentTime(now) {
-  const value = now();
-  const time = value instanceof Date ? value.getTime() : Number.NaN;
-  return Number.isFinite(time) ? time : Number.NaN;
+function currentTime(now, uncertain = false) {
+  try {
+    const value = now();
+    const time = value instanceof Date ? value.getTime() : Number.NaN;
+    if (Number.isFinite(time)) return time;
+  } catch {
+    // Sanitized below.
+  }
+  throw codedError("INVALID_CLOCK", uncertain);
 }
 
-function activeAgentRun(expiresAt, now) {
+function activeAgentRun(expiresAt, time) {
   const expiry = utcDateTimeMilliseconds(expiresAt);
-  const current = currentTime(now);
-  return Number.isFinite(expiry) && Number.isFinite(current) && expiry > current;
+  return Number.isFinite(expiry) && expiry > time;
+}
+
+function publicMaterial(prepared) {
+  return {
+    publicKeyJwk: { ...prepared.publicKeyJwk },
+    pairingCodeHash: prepared.pairingCodeHash,
+    pairingCodeFingerprint: prepared.pairingCodeFingerprint,
+  };
+}
+
+function requestSnapshot(action, payload) {
+  try {
+    const payloadJson = canonicalJson(payload);
+    const safePayload = JSON.parse(payloadJson);
+    return {
+      payload: safePayload,
+      requested: canonicalJson({ action, payload: safePayload }),
+    };
+  } catch {
+    throw codedError("INVALID_REQUEST");
+  }
+}
+
+function safeRemoteError(value) {
+  return PUBLIC_AGENT_ERRORS.has(value) ? value : "INVALID_AGENT_RESPONSE";
 }
 
 export class LocalAgentBridgeRuntime {
@@ -101,31 +149,32 @@ export class LocalAgentBridgeRuntime {
   }
 
   prepare() {
-    if (this.#busy) throw codedError("BRIDGE_BUSY");
+    if (this.#busy || this.#pendingClaim || this.#pendingCommand || this.#claimed) throw codedError("BRIDGE_BUSY");
+    if (this.#prepared) return publicMaterial(this.#prepared);
     const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
     const pairingCode = randomBytes(32).toString("base64url");
     const pairingCodeHash = createHash("sha256").update(pairingCode).digest("base64url");
     const fingerprintHex = createHash("sha256").update(pairingCode).digest("hex").slice(0, 8).toUpperCase();
     const publicKeyJwk = publicKey.export({ format: "jwk" });
-    this.#prepared = { privateKey, publicKeyJwk, pairingCode, scope: [...FIXED_AGENT_SCOPE] };
-    this.#claimed = undefined;
-    this.#pendingClaim = undefined;
-    this.#pendingCommand = undefined;
-    return {
-      publicKeyJwk,
+    this.#prepared = {
+      privateKey,
+      publicKeyJwk: { ...publicKeyJwk },
+      pairingCode,
       pairingCodeHash,
       pairingCodeFingerprint: `${fingerprintHex.slice(0, 4)} · ${fingerprintHex.slice(4)}`,
+      scope: [...FIXED_AGENT_SCOPE],
     };
+    return publicMaterial(this.#prepared);
   }
 
-  async #post(envelope) {
+  async #post(body) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);
     try {
       const response = await this.#fetch(this.#agentEndpoint, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(envelope),
+        body,
         redirect: "error",
         signal: controller.signal,
       });
@@ -133,22 +182,27 @@ export class LocalAgentBridgeRuntime {
       try {
         value = await response.json();
       } catch {
-        throw codedError(
-          response.status >= 500 ? "AGENT_TRANSPORT_UNAVAILABLE" : "INVALID_AGENT_RESPONSE",
-          true,
-        );
+        const definiteClientFailure = response.status >= 400
+          && response.status < 500
+          && !UNCERTAIN_HTTP_STATUSES.has(response.status);
+        if (definiteClientFailure) throw codedError("INVALID_AGENT_RESPONSE");
+        const unavailable = UNCERTAIN_HTTP_STATUSES.has(response.status) || response.status >= 500;
+        throw codedError(unavailable ? "AGENT_TRANSPORT_UNAVAILABLE" : "INVALID_AGENT_RESPONSE", true);
       }
       const explicitFailure = value
         && typeof value === "object"
         && value.ok === false
         && typeof value.error === "string";
       if (!response.ok) {
-        const unavailable = response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500;
+        const unavailable = UNCERTAIN_HTTP_STATUSES.has(response.status) || response.status >= 500;
         if (unavailable) throw codedError("AGENT_TRANSPORT_UNAVAILABLE", true);
-        if (explicitFailure) throw codedError(value.error);
+        const definiteClientFailure = response.status >= 400 && response.status < 500;
+        if (definiteClientFailure) {
+          throw codedError(explicitFailure ? safeRemoteError(value.error) : "INVALID_AGENT_RESPONSE");
+        }
         throw codedError("INVALID_AGENT_RESPONSE", true);
       }
-      if (explicitFailure) throw codedError(value.error);
+      if (explicitFailure) throw codedError(safeRemoteError(value.error));
       if (!value || typeof value !== "object" || value.ok !== true) throw codedError("INVALID_AGENT_RESPONSE", true);
       return value;
     } catch (error) {
@@ -164,30 +218,38 @@ export class LocalAgentBridgeRuntime {
     if (this.#busy) throw codedError("BRIDGE_BUSY");
     if (this.#claimed) {
       if (this.#claimed.agentRunId !== agentRunId) throw codedError("AGENT_RUN_MISMATCH");
-      if (!activeAgentRun(this.#claimed.expiresAt, this.#now)) throw codedError("AGENT_RUN_EXPIRED");
+      if (!activeAgentRun(this.#claimed.expiresAt, currentTime(this.#now))) throw codedError("AGENT_RUN_EXPIRED");
       return { agentRunId, status: "claimed" };
     }
     if (!this.#pendingClaim) {
+      const firstSentAt = currentTime(this.#now);
       const signed = {
         agentRunId,
         pairingCode: this.#prepared.pairingCode,
         clientNonce: randomBytes(32).toString("base64url"),
       };
-      this.#pendingClaim = { ...signed, action: "claimAgentRun", signature: signature(this.#prepared.privateKey, signed) };
+      const envelope = { ...signed, action: "claimAgentRun", signature: signature(this.#prepared.privateKey, signed) };
+      this.#pendingClaim = { agentRunId, firstSentAt, body: JSON.stringify(envelope) };
     } else if (this.#pendingClaim.agentRunId !== agentRunId) {
       throw codedError("AGENT_RUN_MISMATCH");
     }
     this.#busy = "claim";
     try {
-      const response = await this.#post(this.#pendingClaim);
+      const pending = this.#pendingClaim;
+      const response = await this.#post(pending.body);
+      const responseAt = currentTime(this.#now, true);
       const data = response.data;
+      const claimedAt = utcDateTimeMilliseconds(data?.claimedAt);
+      const expiresAt = utcDateTimeMilliseconds(data?.expiresAt);
       if (
         !data
         || typeof data !== "object"
         || data.agentRunId !== agentRunId
-        || typeof data.claimedAt !== "string"
-        || !Number.isFinite(utcDateTimeMilliseconds(data.claimedAt))
-        || !activeAgentRun(data.expiresAt, this.#now)
+        || !Number.isFinite(claimedAt)
+        || !Number.isFinite(expiresAt)
+        || expiresAt <= pending.firstSentAt
+        || claimedAt >= expiresAt
+        || claimedAt > responseAt
         || !Number.isSafeInteger(data.nextSequence)
         || data.nextSequence < 1
       ) {
@@ -205,29 +267,37 @@ export class LocalAgentBridgeRuntime {
   }
 
   async command(action, payload) {
+    if (CONTROL_ACTIONS.has(action)) throw codedError("ACTION_NOT_ALLOWED");
+    return this.#executeCommand(action, payload);
+  }
+
+  async #executeCommand(action, payload) {
     if (!this.#prepared || !this.#claimed) throw codedError("BRIDGE_NOT_CLAIMED");
     if (this.#busy) throw codedError("BRIDGE_BUSY");
-    if (!activeAgentRun(this.#claimed.expiresAt, this.#now)) throw codedError("AGENT_RUN_EXPIRED");
     if (!CONTROL_ACTIONS.has(action) && !this.#prepared.scope.includes(action)) throw codedError("ACTION_NOT_ALLOWED");
-    if (!Number.isSafeInteger(this.#claimed.nextSequence) || this.#claimed.nextSequence >= Number.MAX_SAFE_INTEGER) {
-      throw codedError("SEQUENCE_EXHAUSTED");
-    }
-    const requested = canonicalJson({ action, payload });
+    const { payload: safePayload, requested } = requestSnapshot(action, payload);
     if (!this.#pendingCommand) {
+      const firstSentAt = currentTime(this.#now);
+      if (!activeAgentRun(this.#claimed.expiresAt, firstSentAt)) throw codedError("AGENT_RUN_EXPIRED");
+      if (!Number.isSafeInteger(this.#claimed.nextSequence) || this.#claimed.nextSequence >= Number.MAX_SAFE_INTEGER) {
+        throw codedError("SEQUENCE_EXHAUSTED");
+      }
       const signed = {
         agentRunId: this.#claimed.agentRunId,
         sequence: this.#claimed.nextSequence,
         idempotencyKey: randomUUID(),
         action,
-        payload,
+        payload: safePayload,
       };
-      this.#pendingCommand = { requested, envelope: { ...signed, signature: signature(this.#prepared.privateKey, signed) } };
+      const envelope = { ...signed, signature: signature(this.#prepared.privateKey, signed) };
+      this.#pendingCommand = { requested, firstSentAt, body: JSON.stringify(envelope) };
     } else if (this.#pendingCommand.requested !== requested) {
       throw codedError("COMMAND_RETRY_REQUIRED");
     }
     this.#busy = "command";
     try {
-      const response = await this.#post(this.#pendingCommand.envelope);
+      const response = await this.#post(this.#pendingCommand.body);
+      currentTime(this.#now, true);
       if (
         response.action !== action
         || !Object.hasOwn(response, "data")
@@ -235,8 +305,22 @@ export class LocalAgentBridgeRuntime {
       ) {
         throw codedError("INVALID_AGENT_RESPONSE", true);
       }
+      if (action === "revokeAgentRunSelf") {
+        const data = response.data;
+        if (!data
+          || typeof data !== "object"
+          || data.agentRunId !== this.#claimed.agentRunId
+          || !Number.isFinite(utcDateTimeMilliseconds(data.revokedAt))) {
+          throw codedError("INVALID_AGENT_RESPONSE", true);
+        }
+      }
       this.#claimed.nextSequence += 1;
       this.#pendingCommand = undefined;
+      if (action === "revokeAgentRunSelf") {
+        this.#prepared = undefined;
+        this.#claimed = undefined;
+        this.#pendingClaim = undefined;
+      }
       return response;
     } catch (error) {
       if (!error?.uncertain) this.#pendingCommand = undefined;
@@ -247,11 +331,11 @@ export class LocalAgentBridgeRuntime {
   }
 
   async getDecisionContext() {
-    const response = await this.command("getDecisionContext", {});
+    const response = await this.#executeCommand("getDecisionContext", {});
     return response.data;
   }
 
   async revokeSelf() {
-    return this.command("revokeAgentRunSelf", {});
+    return this.#executeCommand("revokeAgentRunSelf", {});
   }
 }
