@@ -22,6 +22,12 @@ function fakeSpawn(outcomes = []) {
       child.kill = (signal) => {
         child.signals.push(signal);
         if (outcome.killThrows) throw new Error("raw kill failure");
+        if (outcome.closeSynchronouslyOnKillSignal === signal) {
+          child.emit("close", null, signal);
+        }
+        if (outcome.closeOnKillSignal === signal) {
+          queueMicrotask(() => child.emit("close", null, signal));
+        }
         return true;
       };
       calls.push({ executable, args, options, child });
@@ -85,9 +91,13 @@ test("synchronous, asynchronous, and non-zero notification failures are isolated
   assert.equal(fake.calls.length, 2);
 });
 
-test("a hanging notification is terminated and resolves false within a bounded timeout", async () => {
-  const fake = fakeSpawn([{ hang: true }]);
-  const notifier = createMacosNotifier({ spawnImpl: fake.spawnImpl, timeoutMs: 10 });
+test("a hanging notification escalates TERM to KILL and cleans all pending listeners", async () => {
+  const fake = fakeSpawn([{ hang: true, closeOnKillSignal: "SIGKILL" }]);
+  const notifier = createMacosNotifier({
+    spawnImpl: fake.spawnImpl,
+    timeoutMs: 10,
+    terminationGraceMs: 10,
+  });
 
   const result = await Promise.race([
     notifier.notifyOwnerAction("hanging-transition"),
@@ -95,6 +105,23 @@ test("a hanging notification is terminated and resolves false within a bounded t
   ]);
 
   assert.equal(result, false);
+  assert.deepEqual(fake.calls[0].child.signals, ["SIGTERM", "SIGKILL"]);
+  assert.equal(fake.calls[0].child.listenerCount("error"), 0);
+  assert.equal(fake.calls[0].child.listenerCount("close"), 0);
+});
+
+test("a synchronous close during termination cancels later escalation", async () => {
+  const fake = fakeSpawn([{ hang: true, closeSynchronouslyOnKillSignal: "SIGTERM" }]);
+  const notifier = createMacosNotifier({
+    spawnImpl: fake.spawnImpl,
+    timeoutMs: 5,
+    terminationGraceMs: 5,
+  });
+
+  assert.equal(await notifier.notifyOwnerAction("synchronous-close"), false);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
   assert.deepEqual(fake.calls[0].child.signals, ["SIGTERM"]);
-  fake.calls[0].child.emit("close", 0, null);
+  assert.equal(fake.calls[0].child.listenerCount("error"), 0);
+  assert.equal(fake.calls[0].child.listenerCount("close"), 0);
 });

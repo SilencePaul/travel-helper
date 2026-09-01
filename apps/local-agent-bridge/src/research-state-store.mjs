@@ -24,9 +24,9 @@ export const RECOVERY_STATE_FIELDS = Object.freeze([
 const STATE_FILE_NAME = "travel-research-state.json";
 const LOCK_FILE_NAME = ".travel-research-state.lock";
 const MAX_STATE_BYTES = 32 * 1_024;
+const MAX_LOCK_BYTES = 512;
 const DEFAULT_LOCK_WAIT_MS = 7_000;
 const DEFAULT_LOCK_RETRY_MS = 10;
-const DEFAULT_LOCK_STALE_MS = 30_000;
 const DEFAULT_DNS_TIMEOUT_MS = 250;
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 const TARGET_CATEGORIES = new Set(["hotel", "restaurant", "attraction"]);
@@ -83,7 +83,7 @@ for (const [network, prefix] of [
 ]) NON_GLOBAL_IPV4.addSubnet(network, prefix, "ipv4");
 for (const [network, prefix] of [
   ["::", 96], ["::ffff:0:0", 96], ["64:ff9b::", 96], ["64:ff9b:1::", 48],
-  ["100::", 64], ["2001::", 23], ["2001:db8::", 32], ["2002::", 16], ["3fff::", 20],
+  ["100::", 64], ["2001::", 23], ["2001:db8::", 32], ["2002::", 16], ["3fff::", 20], ["5f00::", 16],
   ["fc00::", 7], ["fe80::", 10], ["fec0::", 10], ["ff00::", 8],
 ]) NON_GLOBAL_IPV6.addSubnet(network, prefix, "ipv6");
 
@@ -146,6 +146,29 @@ function dedicatedDirectory(value) {
 
 function validDuration(value, maximum) {
   return Number.isSafeInteger(value) && value > 0 && value <= maximum;
+}
+
+function validLockOwner(value) {
+  return plainObject(value)
+    && Reflect.ownKeys(value).length === 2
+    && Object.hasOwn(value, "pid")
+    && Object.hasOwn(value, "nonce")
+    && Number.isSafeInteger(value.pid)
+    && value.pid > 0
+    && value.pid <= 2_147_483_647
+    && typeof value.nonce === "string"
+    && /^[A-Za-z0-9_-]{16,128}$/u.test(value.nonce);
+}
+
+function defaultIsProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    if (error?.code === "EPERM") return true;
+    throw error;
+  }
 }
 
 function validateStateShape(value) {
@@ -230,9 +253,11 @@ export function createResearchStateStore({
   directory,
   fileSystem = defaultFileSystem,
   tempToken = randomUUID,
+  lockToken = randomUUID,
+  ownerPid = process.pid,
+  isProcessAlive = defaultIsProcessAlive,
   lockWaitMs = DEFAULT_LOCK_WAIT_MS,
   lockRetryMs = DEFAULT_LOCK_RETRY_MS,
-  lockStaleMs = DEFAULT_LOCK_STALE_MS,
   resolveHostname = defaultResolveHostname,
   dnsTimeoutMs = DEFAULT_DNS_TIMEOUT_MS,
 } = {}) {
@@ -241,12 +266,16 @@ export function createResearchStateStore({
   }
   if (!fileSystem || typeof fileSystem !== "object"
     || typeof tempToken !== "function"
+    || typeof lockToken !== "function"
+    || typeof isProcessAlive !== "function"
     || typeof resolveHostname !== "function") {
+    throw codedError("RESEARCH_STATE_INVALID");
+  }
+  if (!Number.isSafeInteger(ownerPid) || ownerPid <= 0 || ownerPid > 2_147_483_647) {
     throw codedError("RESEARCH_STATE_INVALID");
   }
   if (!validDuration(lockWaitMs, 60_000)
     || !validDuration(lockRetryMs, 1_000)
-    || !validDuration(lockStaleMs, 300_000)
     || !validDuration(dnsTimeoutMs, 5_000)
     || lockRetryMs > lockWaitMs) {
     throw codedError("RESEARCH_STATE_INVALID");
@@ -325,12 +354,13 @@ export function createResearchStateStore({
     }
   }
 
-  async function writeState(state) {
+  async function writeState(state, lock) {
     const serialized = `${JSON.stringify(state)}\n`;
     if (Buffer.byteLength(serialized, "utf8") > MAX_STATE_BYTES) {
       throw codedError("RESEARCH_STATE_INVALID");
     }
     await ensureDirectory();
+    if (lock && !await ownsLock(lock)) throw codedError("RESEARCH_STATE_UNAVAILABLE");
 
     let token;
     try {
@@ -351,8 +381,14 @@ export function createResearchStateStore({
         0o600,
       );
       temporaryCreated = true;
+      await handle.chmod(0o600);
+      const info = await handle.stat();
+      if (!info.isFile() || (info.mode & 0o777) !== 0o600) {
+        throw codedError("RESEARCH_STATE_UNAVAILABLE");
+      }
       await handle.writeFile(serialized, { encoding: "utf8" });
       await handle.sync();
+      if (lock && !await ownsLock(lock)) throw codedError("RESEARCH_STATE_UNAVAILABLE");
       await handle.close();
       handle = undefined;
       await fileSystem.rename(temporaryPath, filePath);
@@ -380,7 +416,22 @@ export function createResearchStateStore({
   }
 
   async function save(value) {
-    return writeState(await validateState(value));
+    const state = await validateState(value);
+    const lock = await acquireLock();
+    let result;
+    let failure;
+    try {
+      result = await writeState(state, lock);
+    } catch (error) {
+      failure = error;
+    }
+    try {
+      await releaseLock(lock);
+    } catch (error) {
+      failure ??= error;
+    }
+    if (failure) throw failure;
+    return result;
   }
 
   async function clear() {
@@ -399,29 +450,42 @@ export function createResearchStateStore({
     return value;
   }
 
-  async function detachLock(expected, purpose) {
-    let token;
+  async function readLockOwner(handle, existingInfo) {
+    const info = existingInfo ?? await handle.stat();
+    if (!info.isFile() || (info.mode & 0o777) !== 0o600
+      || !Number.isSafeInteger(info.size) || info.size <= 0 || info.size > MAX_LOCK_BYTES) {
+      throw codedError("RESEARCH_STATE_UNAVAILABLE");
+    }
+    const buffer = Buffer.alloc(info.size);
+    const result = await handle.read(buffer, 0, buffer.length, 0);
+    if (!result || result.bytesRead !== buffer.length) throw codedError("RESEARCH_STATE_UNAVAILABLE");
+    let owner;
     try {
-      token = randomUUID();
+      owner = JSON.parse(buffer.toString("utf8"));
     } catch {
       throw codedError("RESEARCH_STATE_UNAVAILABLE");
     }
-    const detachedPath = join(directory, `${LOCK_FILE_NAME}.${purpose}.${token}`);
+    if (!validLockOwner(owner)) throw codedError("RESEARCH_STATE_UNAVAILABLE");
+    return Object.freeze({ pid: owner.pid, nonce: owner.nonce });
+  }
+
+  function sameOwner(left, right) {
+    return left.pid === right.pid && left.nonce === right.nonce;
+  }
+
+  async function ownsLock(lock) {
     try {
-      await fileSystem.rename(lockPath, detachedPath);
-      const moved = await fileSystem.lstat(detachedPath);
-      return {
-        detachedPath,
-        matches: moved.isFile()
-          && !moved.isSymbolicLink()
-          && moved.dev === expected.dev
-          && moved.ino === expected.ino
-          && (moved.mode & 0o777) === 0o600,
-        moved,
-      };
-    } catch (error) {
-      if (error?.code === "ENOENT") return undefined;
-      throw codedError("RESEARCH_STATE_UNAVAILABLE");
+      const held = await lock.handle.stat();
+      const current = await fileSystem.lstat(lockPath);
+      if (!held.isFile() || !current.isFile() || current.isSymbolicLink()
+        || (held.mode & 0o777) !== 0o600 || (current.mode & 0o777) !== 0o600
+        || held.dev !== lock.dev || held.ino !== lock.ino
+        || current.dev !== lock.dev || current.ino !== lock.ino) {
+        return false;
+      }
+      return sameOwner(await readLockOwner(lock.handle, held), lock.owner);
+    } catch {
+      return false;
     }
   }
 
@@ -443,7 +507,48 @@ export function createResearchStateStore({
     }
   }
 
-  async function removeStaleLock() {
+  async function detachOwnedLock(lock, purpose) {
+    if (!await ownsLock(lock)) throw codedError("RESEARCH_STATE_UNAVAILABLE");
+    let token;
+    try {
+      token = randomUUID();
+    } catch {
+      throw codedError("RESEARCH_STATE_UNAVAILABLE");
+    }
+    const detachedPath = join(directory, `${LOCK_FILE_NAME}.${purpose}.${token}`);
+    let renamed = false;
+    try {
+      await fileSystem.rename(lockPath, detachedPath);
+      renamed = true;
+      const moved = await fileSystem.lstat(detachedPath);
+      const owner = await readLockOwner(lock.handle);
+      if (!moved.isFile() || moved.isSymbolicLink()
+        || (moved.mode & 0o777) !== 0o600
+        || moved.dev !== lock.dev || moved.ino !== lock.ino
+        || !sameOwner(owner, lock.owner)) {
+        throw codedError("RESEARCH_STATE_UNAVAILABLE");
+      }
+      return detachedPath;
+    } catch {
+      if (renamed) {
+        try {
+          await restoreDetachedLock(detachedPath);
+        } catch {
+          // Recovery was attempted; fail closed without touching the fixed lock path again.
+        }
+      }
+      throw codedError("RESEARCH_STATE_UNAVAILABLE");
+    }
+  }
+
+  async function safelyRemoveOwnedLock(lock, purpose) {
+    if (!await ownsLock(lock)) return false;
+    const detachedPath = await detachOwnedLock(lock, purpose);
+    await discardDetachedLock(detachedPath);
+    return true;
+  }
+
+  async function recoverDeadLock() {
     let handle;
     try {
       handle = await fileSystem.open(lockPath, constants.O_RDONLY | NO_FOLLOW);
@@ -451,32 +556,29 @@ export function createResearchStateStore({
       if (!info.isFile() || (info.mode & 0o777) !== 0o600) {
         throw codedError("RESEARCH_STATE_UNAVAILABLE");
       }
-      if (!Number.isFinite(info.mtimeMs)) throw codedError("RESEARCH_STATE_UNAVAILABLE");
-      if ((await currentTime()) - info.mtimeMs < lockStaleMs) return false;
+      let owner;
+      try {
+        owner = await readLockOwner(handle, info);
+      } catch {
+        return false;
+      }
       const current = await fileSystem.lstat(lockPath);
       if (!current.isFile() || current.isSymbolicLink()
         || current.dev !== info.dev || current.ino !== info.ino
-        || (current.mode & 0o777) !== 0o600
-        || !Number.isFinite(current.mtimeMs)
-        || (await currentTime()) - current.mtimeMs < lockStaleMs) {
+        || (current.mode & 0o777) !== 0o600) {
         return false;
       }
-      const detached = await detachLock(info, "stale");
-      if (!detached) return true;
-      const stillStale = detached.matches
-        && Number.isFinite(detached.moved.mtimeMs)
-        && (await currentTime()) - detached.moved.mtimeMs >= lockStaleMs;
-      if (stillStale) {
-        await discardDetachedLock(detached.detachedPath);
-        return true;
+      let alive = true;
+      try {
+        alive = await isProcessAlive(owner.pid);
+      } catch {
+        return false;
       }
-      if (detached.moved.isFile() && !detached.moved.isSymbolicLink()
-        && (detached.moved.mode & 0o777) === 0o600) {
-        await restoreDetachedLock(detached.detachedPath);
-      } else {
-        await discardDetachedLock(detached.detachedPath);
-      }
-      return false;
+      if (alive !== false) return false;
+      const lock = { handle, dev: info.dev, ino: info.ino, owner };
+      const detachedPath = await detachOwnedLock(lock, "stale");
+      await discardDetachedLock(detachedPath);
+      return true;
     } catch (error) {
       if (error?.code === "ENOENT") return true;
       if (error?.code === "RESEARCH_STATE_UNAVAILABLE") throw error;
@@ -486,98 +588,59 @@ export function createResearchStateStore({
         try {
           await handle.close();
         } catch {
-          // Lock validation already fails closed on observable errors.
+          // The lock operation already fails closed on observable errors.
         }
       }
     }
   }
 
-  function startLease(handle, info) {
-    const lease = {
-      handle,
-      dev: info.dev,
-      ino: info.ino,
-      lost: false,
-      stopped: false,
-      timer: undefined,
-      renewal: Promise.resolve(),
-    };
-    const intervalMs = Math.max(1, Math.floor(lockStaleMs / 3));
-
-    const schedule = () => {
-      if (lease.stopped || lease.lost) return;
-      lease.timer = setTimeout(() => {
-        lease.renewal = (async () => {
-          try {
-            await handle.utimes(new Date(), new Date());
-            const current = await fileSystem.lstat(lockPath);
-            if (!current.isFile() || current.isSymbolicLink()
-              || current.dev !== lease.dev || current.ino !== lease.ino) {
-              lease.lost = true;
-            }
-          } catch {
-            lease.lost = true;
-          }
-        })().finally(schedule);
-      }, intervalMs);
-      lease.timer.unref?.();
-    };
-    schedule();
-    return lease;
-  }
-
-  async function stopLease(lease) {
-    lease.stopped = true;
-    if (lease.timer !== undefined) clearTimeout(lease.timer);
-    await lease.renewal;
-  }
-
-  async function ownsLock(lease) {
-    if (lease.lost) return false;
-    try {
-      const [held, current] = await Promise.all([
-        lease.handle.stat(),
-        fileSystem.lstat(lockPath),
-      ]);
-      return held.isFile()
-        && current.isFile()
-        && !current.isSymbolicLink()
-        && held.dev === lease.dev
-        && held.ino === lease.ino
-        && current.dev === lease.dev
-        && current.ino === lease.ino;
-    } catch {
-      return false;
-    }
-  }
-
   async function acquireLock() {
     await ensureDirectory();
+    let nonce;
+    try {
+      nonce = lockToken();
+    } catch {
+      throw codedError("RESEARCH_STATE_UNAVAILABLE");
+    }
+    const owner = { pid: ownerPid, nonce };
+    if (!validLockOwner(owner)) throw codedError("RESEARCH_STATE_UNAVAILABLE");
+    const serializedOwner = `${JSON.stringify(owner)}\n`;
     const deadline = (await currentTime()) + lockWaitMs;
     while (true) {
       let createdHandle;
       try {
         createdHandle = await fileSystem.open(
           lockPath,
-          constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW,
+          constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW,
           0o600,
         );
+        await createdHandle.chmod(0o600);
+        await createdHandle.writeFile(serializedOwner, { encoding: "utf8" });
+        await createdHandle.sync();
         const info = await createdHandle.stat();
         if (!info.isFile() || (info.mode & 0o777) !== 0o600) {
           throw codedError("RESEARCH_STATE_UNAVAILABLE");
         }
-        return startLease(createdHandle, info);
+        const lock = { handle: createdHandle, dev: info.dev, ino: info.ino, owner };
+        if (!await ownsLock(lock)) throw codedError("RESEARCH_STATE_UNAVAILABLE");
+        return lock;
       } catch (error) {
         if (createdHandle) {
           try {
-            await fileSystem.unlink(lockPath);
+            const info = await createdHandle.stat();
+            await safelyRemoveOwnedLock({
+              handle: createdHandle,
+              dev: info.dev,
+              ino: info.ino,
+              owner,
+            }, "invalid");
           } catch {
-            // The validation failure remains authoritative.
+            // Never unlink a fixed path whose inode and owner nonce cannot both be proven.
           }
           try {
             await createdHandle.close();
           } catch {
-            // The validation failure remains authoritative.
+            // The creation failure remains authoritative.
           }
         }
         if (error?.code !== "EEXIST") {
@@ -586,45 +649,22 @@ export function createResearchStateStore({
         }
       }
 
-      if (await removeStaleLock()) continue;
+      if (await recoverDeadLock()) continue;
       const remaining = deadline - (await currentTime());
       if (remaining <= 0) throw codedError("RESEARCH_STATE_BUSY");
       await new Promise((resolveDelay) => setTimeout(resolveDelay, Math.min(lockRetryMs, remaining)));
     }
   }
 
-  async function releaseLock(lease) {
+  async function releaseLock(lock) {
     let failed = false;
     try {
-      await stopLease(lease);
-    } catch {
-      failed = true;
-    }
-    const owned = await ownsLock(lease);
-    try {
-      if (!owned) {
-        failed = true;
-      } else {
-        const detached = await detachLock(lease, "release");
-        if (!detached || !detached.matches) {
-          failed = true;
-          if (detached) {
-            if (detached.moved.isFile() && !detached.moved.isSymbolicLink()
-              && (detached.moved.mode & 0o777) === 0o600) {
-              await restoreDetachedLock(detached.detachedPath);
-            } else {
-              await discardDetachedLock(detached.detachedPath);
-            }
-          }
-        } else {
-          await discardDetachedLock(detached.detachedPath);
-        }
-      }
+      if (!await safelyRemoveOwnedLock(lock, "release")) failed = true;
     } catch {
       failed = true;
     }
     try {
-      await lease.handle.close();
+      await lock.handle.close();
     } catch {
       failed = true;
     }
@@ -639,7 +679,7 @@ export function createResearchStateStore({
     try {
       const previous = await load();
       const isNewTransition = !sameTransition(previous, state);
-      await writeState(state);
+      await writeState(state, lock);
       if (!await ownsLock(lock)) throw codedError("RESEARCH_STATE_UNAVAILABLE");
       if (isNewTransition && notifier && typeof notifier.notifyOwnerAction === "function") {
         try {

@@ -12,7 +12,12 @@ import {
 import { createMacosNotifier } from "./macos-notifier.mjs";
 
 const STATE_FILE = "travel-research-state.json";
+const LOCK_FILE = ".travel-research-state.lock";
 const PUBLIC_RESOLVER = async () => [{ address: "8.8.8.8", family: 4 }];
+
+function lockOwner(pid = process.pid, nonce = "replacement-owner-nonce-1234") {
+  return `${JSON.stringify({ pid, nonce })}\n`;
+}
 
 function recoverableState(overrides = {}) {
   return {
@@ -72,7 +77,9 @@ test("writes through a same-directory temporary file and atomic rename", async (
     async open(path, flags, mode) {
       const handle = await fs.open(path, flags, mode);
       return {
+        async chmod(...args) { return handle.chmod(...args); },
         async writeFile(...args) { return handle.writeFile(...args); },
+        async read(...args) { return handle.read(...args); },
         async readFile(...args) { return handle.readFile(...args); },
         async stat(...args) { return handle.stat(...args); },
         async sync() { synced.push(path); return handle.sync(); },
@@ -91,13 +98,13 @@ test("writes through a same-directory temporary file and atomic rename", async (
 
   await store.save(recoverableState());
 
-  assert.equal(renames.length, 1);
-  assert.equal(dirname(renames[0].from), directory);
-  assert.equal(dirname(renames[0].to), directory);
-  assert.equal(renames[0].to, filePath);
-  assert.notEqual(renames[0].from, filePath);
-  await assert.rejects(stat(renames[0].from), { code: "ENOENT" });
-  assert.equal(synced.includes(renames[0].from), true);
+  const stateRenames = renames.filter(({ to }) => to === filePath);
+  assert.equal(stateRenames.length, 1);
+  assert.equal(dirname(stateRenames[0].from), directory);
+  assert.equal(dirname(stateRenames[0].to), directory);
+  assert.notEqual(stateRenames[0].from, filePath);
+  await assert.rejects(stat(stateRenames[0].from), { code: "ENOENT" });
+  assert.equal(synced.includes(stateRenames[0].from), true);
   assert.equal(synced.includes(directory), true);
 });
 
@@ -109,6 +116,8 @@ test("cleans an exclusively-created temporary file when writing fails", async (c
       const handle = await fs.open(path, flags, mode);
       if (!path.endsWith(".tmp")) return handle;
       return {
+        async chmod(...args) { return handle.chmod(...args); },
+        async stat(...args) { return handle.stat(...args); },
         async writeFile() { throw new Error("raw write failure"); },
         async sync() { return handle.sync(); },
         async close() { return handle.close(); },
@@ -218,6 +227,7 @@ test("a hanging macOS notification cannot keep a persisted transition pending", 
   const notifier = createMacosNotifier({
     spawnImpl: () => child,
     timeoutMs: 10,
+    terminationGraceMs: 10,
   });
   const state = recoverableState();
 
@@ -228,7 +238,7 @@ test("a hanging macOS notification cannot keep a persisted transition pending", 
 
   assert.deepEqual(result, state);
   assert.deepEqual(await store.load(), state);
-  assert.deepEqual(child.signals, ["SIGTERM"]);
+  assert.deepEqual(child.signals, ["SIGTERM", "SIGKILL"]);
 });
 
 test("two independent stores serialize the same transition and notify only once", async (context) => {
@@ -240,7 +250,7 @@ test("two independent stores serialize the same transition and notify only once"
   const notifier = {
     async notifyOwnerAction() {
       notificationCalls += 1;
-      observedLockContents.push(await readFile(join(directory, ".travel-research-state.lock"), "utf8"));
+      observedLockContents.push(await readFile(join(directory, LOCK_FILE), "utf8"));
       await new Promise((resolve) => setTimeout(resolve, 20));
       return true;
     },
@@ -252,34 +262,40 @@ test("two independent stores serialize the same transition and notify only once"
   ]);
 
   assert.equal(notificationCalls, 1);
-  assert.deepEqual(observedLockContents, [""]);
-  await assert.rejects(stat(join(directory, ".travel-research-state.lock")), { code: "ENOENT" });
+  assert.equal(observedLockContents.length, 1);
+  const owner = JSON.parse(observedLockContents[0]);
+  assert.deepEqual(Object.keys(owner), ["pid", "nonce"]);
+  assert.equal(owner.pid, process.pid);
+  assert.match(owner.nonce, /^[A-Za-z0-9_-]{16,128}$/u);
+  assert.equal(/name|city|prompt|output|credential|private|pairing/iu.test(observedLockContents[0]), false);
+  await assert.rejects(stat(join(directory, LOCK_FILE)), { code: "ENOENT" });
 });
 
-test("recovers an owner-only stale lock but bounds waiting on a live lock", async (context) => {
+test("recovers a dead-PID lock despite a future mtime but bounds waiting on a live PID", async (context) => {
   const { directory } = await temporaryStore(context);
   await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-  const lockPath = join(directory, ".travel-research-state.lock");
-  await writeFile(lockPath, "", { flag: "wx", mode: 0o600 });
+  const lockPath = join(directory, LOCK_FILE);
+  await writeFile(lockPath, lockOwner(424_242), { flag: "wx", mode: 0o600 });
   await chmod(lockPath, 0o600);
-  await utimes(lockPath, new Date(0), new Date(0));
+  await utimes(lockPath, new Date("2099-01-01T00:00:00.000Z"), new Date("2099-01-01T00:00:00.000Z"));
 
   const recovered = createResearchStateStore({
     directory,
     lockWaitMs: 100,
     lockRetryMs: 2,
-    lockStaleMs: 10,
+    isProcessAlive: (pid) => pid !== 424_242,
     resolveHostname: PUBLIC_RESOLVER,
   });
   await recovered.persistNeedsOwnerAction(recoverableState(), { notifyOwnerAction: async () => true });
   await assert.rejects(stat(lockPath), { code: "ENOENT" });
 
-  await writeFile(lockPath, "", { flag: "wx", mode: 0o600 });
+  await writeFile(lockPath, lockOwner(process.pid, "live-owner-nonce-1234"), { flag: "wx", mode: 0o600 });
+  await utimes(lockPath, new Date(0), new Date(0));
   const bounded = createResearchStateStore({
     directory,
     lockWaitMs: 20,
     lockRetryMs: 2,
-    lockStaleMs: 60_000,
+    isProcessAlive: () => true,
     resolveHostname: PUBLIC_RESOLVER,
   });
   await assert.rejects(
@@ -290,16 +306,31 @@ test("recovers an owner-only stale lock but bounds waiting on a live lock", asyn
   );
 });
 
-test("cleans a newly-created lock when lock validation fails", async (context) => {
+test("a validation failure never removes a replacement lock", async (context) => {
   const { directory } = await temporaryStore(context);
-  const lockPath = join(directory, ".travel-research-state.lock");
+  const lockPath = join(directory, LOCK_FILE);
+  let replaced = false;
   const fileSystem = {
     ...fs,
     async open(path, flags, mode) {
       const handle = await fs.open(path, flags, mode);
       if (path !== lockPath) return handle;
       return {
-        async stat() { throw new Error("raw lock stat failure"); },
+        async chmod(...args) { return handle.chmod(...args); },
+        async writeFile(...args) { return handle.writeFile(...args); },
+        async sync(...args) { return handle.sync(...args); },
+        async stat() {
+          if (!replaced) {
+            replaced = true;
+            await fs.unlink(lockPath);
+            await writeFile(lockPath, lockOwner(process.pid, "new-owner-nonce-1234"), {
+              flag: "wx",
+              mode: 0o600,
+            });
+            await chmod(lockPath, 0o600);
+          }
+          throw new Error("raw lock stat failure");
+        },
         async close() { return handle.close(); },
       };
     },
@@ -310,7 +341,7 @@ test("cleans a newly-created lock when lock validation fails", async (context) =
     store.persistNeedsOwnerAction(recoverableState(), { notifyOwnerAction: async () => true }),
     { code: "RESEARCH_STATE_UNAVAILABLE" },
   );
-  await assert.rejects(stat(lockPath), { code: "ENOENT" });
+  assert.equal(await readFile(lockPath, "utf8"), lockOwner(process.pid, "new-owner-nonce-1234"));
 });
 
 test("load reads and validates through one no-follow file descriptor", async (context) => {
@@ -361,7 +392,7 @@ test("rejects local, private, reserved, and IP-literal blocked sources", async (
   await assert.doesNotReject(store.save(recoverableState({ blockedHostname: "login.booking.com" })));
 });
 
-test("renews a short lock lease throughout a slow write so a second store cannot steal it", async (context) => {
+test("an active PID lock is never stolen during a slow write", async (context) => {
   const { directory } = await temporaryStore(context);
   let slowWriteReached;
   const reachedSlowWrite = new Promise((resolve) => { slowWriteReached = resolve; });
@@ -380,7 +411,6 @@ test("renews a short lock lease throughout a slow write so a second store cannot
   const lockOptions = {
     lockWaitMs: 250,
     lockRetryMs: 2,
-    lockStaleMs: 15,
     resolveHostname: PUBLIC_RESOLVER,
   };
   const first = createResearchStateStore({ directory, fileSystem: slowFileSystem, ...lockOptions });
@@ -397,14 +427,12 @@ test("renews a short lock lease throughout a slow write so a second store cannot
 });
 
 test("an old owner never removes a replacement lock it does not own", async (context) => {
-  const { directory, store } = await temporaryStore(context, {
-    lockStaleMs: 1_000,
-  });
-  const lockPath = join(directory, ".travel-research-state.lock");
+  const { directory, store } = await temporaryStore(context);
+  const lockPath = join(directory, LOCK_FILE);
   const notifier = {
     async notifyOwnerAction() {
       await fs.unlink(lockPath);
-      await writeFile(lockPath, "", { flag: "wx", mode: 0o600 });
+      await writeFile(lockPath, lockOwner(process.pid, "replacement-owner-nonce-1234"), { flag: "wx", mode: 0o600 });
       await chmod(lockPath, 0o600);
       return true;
     },
@@ -415,6 +443,157 @@ test("an old owner never removes a replacement lock it does not own", async (con
     { code: "RESEARCH_STATE_UNAVAILABLE" },
   );
   assert.equal((await stat(lockPath)).isFile(), true);
+});
+
+test("a replaced owner cannot publish over the replacement owner's state", async (context) => {
+  const { directory, filePath } = await temporaryStore(context);
+  const lockPath = join(directory, LOCK_FILE);
+  const replacement = recoverableState({
+    researchTaskId: "replacement-task",
+    updatedAt: "2026-09-01T01:05:06.000Z",
+  });
+  let replaced = false;
+  const fileSystem = {
+    ...fs,
+    async open(path, flags, mode) {
+      const handle = await fs.open(path, flags, mode);
+      if (!path.endsWith(".tmp")) return handle;
+      return {
+        async chmod(...args) { return handle.chmod(...args); },
+        async writeFile(...args) { return handle.writeFile(...args); },
+        async stat(...args) { return handle.stat(...args); },
+        async sync(...args) {
+          await handle.sync(...args);
+          if (!replaced) {
+            replaced = true;
+            await fs.unlink(lockPath);
+            await writeFile(lockPath, lockOwner(process.pid, "replacement-owner-nonce-5678"), {
+              flag: "wx",
+              mode: 0o600,
+            });
+            await chmod(lockPath, 0o600);
+            await writeFile(filePath, `${JSON.stringify(replacement)}\n`, { mode: 0o600 });
+            await chmod(filePath, 0o600);
+          }
+        },
+        async close() { return handle.close(); },
+      };
+    },
+  };
+  const store = createResearchStateStore({ directory, fileSystem, resolveHostname: PUBLIC_RESOLVER });
+
+  await assert.rejects(
+    store.persistNeedsOwnerAction(recoverableState(), { notifyOwnerAction: async () => true }),
+    { code: "RESEARCH_STATE_UNAVAILABLE" },
+  );
+  assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), replacement);
+  assert.equal(await readFile(lockPath, "utf8"), lockOwner(process.pid, "replacement-owner-nonce-5678"));
+});
+
+test("direct save also owns and rechecks the lock before publishing", async (context) => {
+  const { directory, filePath } = await temporaryStore(context);
+  const lockPath = join(directory, LOCK_FILE);
+  const replacement = recoverableState({
+    researchTaskId: "replacement-save-task",
+    updatedAt: "2026-09-01T01:06:07.000Z",
+  });
+  let foundLock = false;
+  let intercepted = false;
+  const fileSystem = {
+    ...fs,
+    async open(path, flags, mode) {
+      const handle = await fs.open(path, flags, mode);
+      if (!path.endsWith(".tmp")) return handle;
+      return {
+        async chmod(...args) { return handle.chmod(...args); },
+        async writeFile(...args) { return handle.writeFile(...args); },
+        async stat(...args) { return handle.stat(...args); },
+        async sync(...args) {
+          await handle.sync(...args);
+          if (!intercepted) {
+            intercepted = true;
+            try {
+              await fs.unlink(lockPath);
+              foundLock = true;
+            } catch (error) {
+              if (error?.code !== "ENOENT") throw error;
+            }
+            if (foundLock) {
+              await writeFile(lockPath, lockOwner(process.pid, "replacement-save-nonce-1234"), {
+                flag: "wx",
+                mode: 0o600,
+              });
+              await chmod(lockPath, 0o600);
+            }
+            await writeFile(filePath, `${JSON.stringify(replacement)}\n`, { mode: 0o600 });
+            await chmod(filePath, 0o600);
+          }
+        },
+        async close() { return handle.close(); },
+      };
+    },
+  };
+  const store = createResearchStateStore({ directory, fileSystem, resolveHostname: PUBLIC_RESOLVER });
+
+  await assert.rejects(store.save(recoverableState()), { code: "RESEARCH_STATE_UNAVAILABLE" });
+  assert.equal(foundLock, true);
+  assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), replacement);
+});
+
+test("explicit fd chmod preserves state and lock mode under a restrictive umask", async (context) => {
+  const { directory, filePath, store } = await temporaryStore(context);
+  const lockModes = [];
+  const previousMask = process.umask(0o777);
+  try {
+    await store.save(recoverableState());
+    assert.equal((await stat(filePath)).mode & 0o777, 0o600);
+    assert.deepEqual(await store.load(), recoverableState());
+    await store.persistNeedsOwnerAction(
+      recoverableState({ updatedAt: "2026-09-01T01:05:06.000Z" }),
+      {
+        async notifyOwnerAction() {
+          lockModes.push((await stat(join(directory, LOCK_FILE))).mode & 0o777);
+          return true;
+        },
+      },
+    );
+  } finally {
+    process.umask(previousMask);
+  }
+
+  assert.deepEqual(lockModes, [0o600]);
+});
+
+test("a failed detached-lock inspection restores the lock without orphan files", async (context) => {
+  const { directory } = await temporaryStore(context);
+  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+  const lockPath = join(directory, LOCK_FILE);
+  const serializedOwner = lockOwner(424_242, "dead-owner-nonce-1234");
+  await writeFile(lockPath, serializedOwner, { flag: "wx", mode: 0o600 });
+  await chmod(lockPath, 0o600);
+  await utimes(lockPath, new Date(0), new Date(0));
+  const fileSystem = {
+    ...fs,
+    async lstat(path) {
+      if (path.includes(`${LOCK_FILE}.stale.`)) throw new Error("raw detached stat failure");
+      return fs.lstat(path);
+    },
+  };
+  const store = createResearchStateStore({
+    directory,
+    fileSystem,
+    isProcessAlive: () => false,
+    resolveHostname: PUBLIC_RESOLVER,
+    lockWaitMs: 20,
+    lockRetryMs: 2,
+  });
+
+  await assert.rejects(
+    store.persistNeedsOwnerAction(recoverableState(), { notifyOwnerAction: async () => true }),
+    { code: "RESEARCH_STATE_UNAVAILABLE" },
+  );
+  assert.equal(await readFile(lockPath, "utf8"), serializedOwner);
+  assert.deepEqual((await fs.readdir(directory)).filter((name) => name.includes(`${LOCK_FILE}.stale.`)), []);
 });
 
 test("DNS validation rejects hostnames resolving to any non-global address on save and load", async (context) => {
@@ -433,6 +612,7 @@ test("DNS validation rejects hostnames resolving to any non-global address on sa
     "fc00::1",
     "fe80::1",
     "2001:db8::1",
+    "5f00::1",
     "ff00::1",
   ];
   for (const address of privateAnswers) {
