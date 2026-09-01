@@ -8,3 +8,4 @@ export * from "./trip";
 export * from "./environment";
 export * from "./membership";
 export * from "./decision";
+export * from "./decision-research.mjs";

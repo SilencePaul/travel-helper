@@ -3,7 +3,11 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./decision-research": {
+      "types": "./src/decision-research.d.mts",
+      "import": "./src/decision-research.mjs"
+    }
   },
   "scripts": {
     "build": "tsc --noEmit",
