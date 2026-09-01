@@ -521,7 +521,10 @@ export function createCodexRunner(options) {
       return await Promise.race([
         promise,
         new Promise((_, reject) => {
-          timer = setTimeout(() => reject(codedError("CODEX_RESEARCH_TIMEOUT")), remaining);
+          timer = setTimeout(() => {
+            operation.abortController.abort();
+            reject(codedError("CODEX_RESEARCH_TIMEOUT"));
+          }, remaining);
         }),
         new Promise((_, reject) => {
           cancelHandler = () => reject(codedError("CODEX_RESEARCH_CANCELLED"));
@@ -532,6 +535,23 @@ export function createCodexRunner(options) {
     } finally {
       clearTimeout(timer);
       operation.cancelHandlers.delete(cancelHandler);
+    }
+  }
+
+  async function awaitProbeSettlement(probePromise) {
+    let timer;
+    try {
+      return await Promise.race([
+        probePromise.then(
+          () => ({ settled: true }),
+          (error) => ({ settled: true, error }),
+        ),
+        new Promise((resolve) => {
+          timer = setTimeout(() => resolve({ settled: false }), teardownTimeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -550,10 +570,11 @@ export function createCodexRunner(options) {
   }
 
   async function verifyIsolation(operation) {
+    let probePromise;
     try {
       const remaining = remainingMs(operation);
       if (remaining <= 0) throw codedError("CODEX_RESEARCH_TIMEOUT");
-      const report = await withinBudget(Promise.resolve().then(() => probeIsolation({
+      probePromise = Promise.resolve().then(() => probeIsolation({
         codexPath,
         isolatedDir,
         projectDir,
@@ -564,7 +585,9 @@ export function createCodexRunner(options) {
         sourceEnv: environment,
         permissionOverrides: buildPermissionOverrides(),
         probeTotalTimeoutMs: Math.max(1, Math.floor(remaining)),
-      })), operation);
+        signal: operation.abortController.signal,
+      }));
+      const report = await withinBudget(probePromise, operation);
       const required = [
         "isolatedDirectoryReadable",
         "outsideDirectoryUnreadable",
@@ -577,6 +600,11 @@ export function createCodexRunner(options) {
         throw new Error("incomplete isolation evidence");
       }
     } catch (error) {
+      if ((error?.code === "CODEX_RESEARCH_TIMEOUT" || error?.code === "CODEX_RESEARCH_CANCELLED") && probePromise) {
+        operation.abortController.abort();
+        const teardown = await awaitProbeSettlement(probePromise);
+        if (!teardown.settled || teardown.error?.processTreeUnconfirmed === true) poisoned = true;
+      }
       if (error?.processTreeUnconfirmed === true) poisoned = true;
       if (error?.code === "CODEX_RESEARCH_TIMEOUT" || error?.code === "CODEX_RESEARCH_CANCELLED") throw error;
       throw codedError(CODEX_ISOLATION_ERROR);
@@ -791,11 +819,13 @@ export function createCodexRunner(options) {
       activeBefore: activeDurationMs,
       startedAt,
       cancelled: false,
+      abortController: new AbortController(),
       cancelHandlers: new Set(),
       settled: new Promise((resolve) => { settleOperation = resolve; }),
       cancel() {
         if (operation.cancelled) return;
         operation.cancelled = true;
+        operation.abortController.abort();
         for (const handler of [...operation.cancelHandlers]) handler();
       },
     };

@@ -373,6 +373,99 @@ test("runner awaits a complete isolation probe before every Codex spawn", async 
   assert.equal(fake.calls.length, 1);
 });
 
+test("runner cancellation aborts and settles the isolation probe before returning", async () => {
+  const fake = createFakeSpawn([{ stdout: jsonl("thread-1") }]);
+  let releaseProbe;
+  let probeEnded = false;
+  let laterCheckStarted = false;
+  let probeSignal;
+  const runner = makeRunner(fake, {
+    probeIsolation: async (request) => {
+      probeSignal = request.signal;
+      await new Promise((resolve) => { releaseProbe = resolve; });
+      probeEnded = true;
+      if (!request.signal?.aborted) laterCheckStarted = true;
+      return COMPLETE_ISOLATION_REPORT;
+    },
+  });
+  const running = runner.runInitial({ prompt: "private" });
+  const runningRejected = assert.rejects(running, { code: "CODEX_RESEARCH_CANCELLED" });
+  while (!releaseProbe) await new Promise((resolve) => setImmediate(resolve));
+
+  let cancelReturned = false;
+  const cancelling = runner.cancel().then((value) => {
+    cancelReturned = true;
+    return value;
+  });
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(probeSignal?.aborted, true);
+    assert.equal(cancelReturned, false);
+  } finally {
+    releaseProbe();
+  }
+
+  await runningRejected;
+  assert.equal(await cancelling, true);
+  assert.equal(probeEnded, true);
+  assert.equal(laterCheckStarted, false);
+  assert.equal(fake.calls.length, 0);
+});
+
+test("an isolation probe that ignores cancellation is bounded and poisons the runner", async () => {
+  const fake = createFakeSpawn([]);
+  let probeCalls = 0;
+  const runner = makeRunner(fake, {
+    teardownTimeoutMs: 5,
+    probeIsolation: async () => {
+      probeCalls += 1;
+      return new Promise(() => {});
+    },
+  });
+  const running = runner.runInitial({ prompt: "private" });
+  const runningRejected = assert.rejects(running, { code: "CODEX_RESEARCH_CANCELLED" });
+  while (probeCalls === 0) await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(await runner.cancel(), true);
+  await runningRejected;
+  const resumed = runner.resume({ codexThreadId: "thread-1", prompt: "must not probe again" });
+  const resumedOutcome = await Promise.race([
+    resumed.then(
+      () => "resolved",
+      (error) => error?.code,
+    ),
+    new Promise((resolve) => setTimeout(() => resolve("still-running"), 20)),
+  ]);
+  if (resumedOutcome === "still-running") {
+    await runner.cancel();
+    await resumed.catch(() => {});
+  }
+  assert.equal(resumedOutcome, "CODEX_RESEARCH_FAILED");
+  assert.equal(probeCalls, 1);
+  assert.equal(fake.calls.length, 0);
+});
+
+test("the active timeout aborts and settles the isolation probe before failing", async () => {
+  const fake = createFakeSpawn([]);
+  let probeEnded = false;
+  let probeSignal;
+  const runner = makeRunner(fake, {
+    activeTimeoutMs: 5,
+    teardownTimeoutMs: 20,
+    probeIsolation: async (request) => {
+      probeSignal = request.signal;
+      await new Promise((resolve) => request.signal.addEventListener("abort", resolve, { once: true }));
+      probeEnded = true;
+      return COMPLETE_ISOLATION_REPORT;
+    },
+  });
+
+  await assert.rejects(runner.runInitial({ prompt: "private" }), { code: "CODEX_RESEARCH_TIMEOUT" });
+  assert.equal(probeSignal.aborted, true);
+  assert.equal(probeEnded, true);
+  assert.equal(fake.calls.length, 0);
+});
+
 test("runner fails closed when isolation evidence is missing, failed or uncertain", async () => {
   for (const probeIsolation of [
     undefined,

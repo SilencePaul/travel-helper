@@ -160,7 +160,7 @@ function markProcessTreeUnconfirmed(error) {
   return error;
 }
 
-function runProbeProcess({ executable, args, cwd, env, spawnImpl, processKillImpl, timeoutMs, killGraceMs }) {
+function runProbeProcess({ executable, args, cwd, env, spawnImpl, processKillImpl, timeoutMs, killGraceMs, signal }) {
   return new Promise((resolve, reject) => {
     let child;
     let stdout = "";
@@ -174,11 +174,13 @@ function runProbeProcess({ executable, args, cwd, env, spawnImpl, processKillImp
     let timeoutTimer;
     let killTimer;
     let finalTimer;
+    let abortHandler;
 
     const cleanup = () => {
       clearTimeout(timeoutTimer);
       clearTimeout(killTimer);
       clearTimeout(finalTimer);
+      signal?.removeEventListener?.("abort", abortHandler);
       stdout = "";
       stderr = "";
     };
@@ -227,12 +229,19 @@ function runProbeProcess({ executable, args, cwd, env, spawnImpl, processKillImp
     };
 
     try {
+      if (signal?.aborted) {
+        finish(new Error("probe aborted"));
+        return;
+      }
       child = spawnImpl(executable, args, { shell: false, detached: true, cwd, env });
       processGroupId = Number.isSafeInteger(child.pid) && child.pid > 0 ? -child.pid : undefined;
     } catch {
       finish(new Error("probe spawn failed"));
       return;
     }
+    abortHandler = () => terminate(new Error("probe aborted"));
+    signal?.addEventListener?.("abort", abortHandler, { once: true });
+    if (signal?.aborted) abortHandler();
     child.stdout?.on("data", (chunk) => collect("stdout", chunk));
     child.stderr?.on("data", (chunk) => collect("stderr", chunk));
     child.stdout?.on("error", () => terminate(new Error("probe stdout failed")));
@@ -333,6 +342,7 @@ function createDefaultProbeAdapter(options) {
       processKillImpl,
       timeoutMs: Math.min(stepTimeoutMs, remainingMs - teardownReserveMs),
       killGraceMs,
+      signal: request.signal,
     });
   };
   const doctor = async (request) => {
@@ -404,6 +414,7 @@ export function buildPermissionOverrides() {
 export async function probeCodexIsolation(options) {
   try {
     if (!options) throw new Error("invalid probe");
+    if (options.signal?.aborted) throw new Error("probe aborted");
     if (!normalizedAbsolutePath(options.codexPath)) throw new Error("invalid executable");
     if (!normalizedAbsolutePath(options.isolatedDir) || !normalizedAbsolutePath(options.projectDir)) throw new Error("invalid boundary");
     if (containsPath(options.projectDir, options.isolatedDir) || containsPath(options.isolatedDir, options.projectDir)) throw new Error("overlapping boundary");
@@ -427,6 +438,7 @@ export async function probeCodexIsolation(options) {
     };
     const canonical = await pathVerifier(requestedPaths);
     if (!validCanonicalProbeReport(canonical, requestedPaths)) throw new Error("invalid canonical paths");
+    if (options.signal?.aborted) throw new Error("probe aborted");
     if (containsPath(canonical.projectDir, canonical.isolatedDir) || containsPath(canonical.isolatedDir, canonical.projectDir)) {
       throw new Error("overlapping canonical boundary");
     }
@@ -448,13 +460,16 @@ export async function probeCodexIsolation(options) {
     const probeAdapter = options.probeAdapter ?? createDefaultProbeAdapter(options);
     if (typeof probeAdapter !== "function") throw new Error("invalid probe adapter");
     for (const check of checks) {
+      if (options.signal?.aborted) throw new Error("probe aborted");
       const response = await probeAdapter({
         executable: canonical.codexPath,
         cwd: canonical.isolatedDir,
         env,
         permissionOverrides: buildPermissionOverrides(),
         check,
+        signal: options.signal,
       });
+      if (options.signal?.aborted) throw new Error("probe aborted");
       parseProbeEvidence(response, check);
     }
     return Object.fromEntries(REQUIRED_PROBE_CHECKS.map((check) => [check, true]));

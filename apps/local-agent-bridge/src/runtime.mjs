@@ -119,6 +119,120 @@ function hasExactOwnKeys(value, keys) {
   return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
 }
 
+function hasAllowedOwnKeys(value, required, optional = []) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const allowed = new Set([...required, ...optional]);
+  return required.every((key) => Object.hasOwn(value, key))
+    && Reflect.ownKeys(value).every((key) => typeof key === "string" && allowed.has(key));
+}
+
+function nonEmptyString(value) {
+  return typeof value === "string" && value.length > 0;
+}
+
+function validDate(value) {
+  const match = typeof value === "string" ? /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value) : undefined;
+  if (!match) return false;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(date.getTime())
+    && date.getUTCFullYear() === Number(match[1])
+    && date.getUTCMonth() + 1 === Number(match[2])
+    && date.getUTCDate() === Number(match[3]);
+}
+
+function validDateTime(value) {
+  const match = typeof value === "string"
+    ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/u.exec(value)
+    : undefined;
+  if (!match) return false;
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return false;
+  const date = new Date(time);
+  return date.getUTCFullYear() === Number(match[1])
+    && date.getUTCMonth() + 1 === Number(match[2])
+    && date.getUTCDate() === Number(match[3])
+    && date.getUTCHours() === Number(match[4])
+    && date.getUTCMinutes() === Number(match[5])
+    && date.getUTCSeconds() === Number(match[6]);
+}
+
+function safeCandidate(value) {
+  const candidateKeys = [
+    "id", "tripId", "revision", "updatedAt", "category", "entity", "applicability",
+    "recommendation", "verificationState", "decisionState",
+  ];
+  if (!hasAllowedOwnKeys(value, candidateKeys, ["currentEvidenceId", "verificationBlockReason"])
+    || !nonEmptyString(value.id) || !nonEmptyString(value.tripId)
+    || !Number.isSafeInteger(value.revision) || value.revision < 0
+    || !validDateTime(value.updatedAt)
+    || !["hotel", "restaurant", "attraction"].includes(value.category)
+    || !hasAllowedOwnKeys(value.entity, ["name"], ["address", "latitude", "longitude"])
+    || !nonEmptyString(value.entity.name)
+    || (Object.hasOwn(value.entity, "address") && typeof value.entity.address !== "string")
+    || (Object.hasOwn(value.entity, "latitude") && (typeof value.entity.latitude !== "number" || !Number.isFinite(value.entity.latitude)))
+    || (Object.hasOwn(value.entity, "longitude") && (typeof value.entity.longitude !== "number" || !Number.isFinite(value.entity.longitude)))
+    || !hasAllowedOwnKeys(value.applicability, [], ["dates", "travelers"])
+    || (Object.hasOwn(value.applicability, "dates")
+      && (!hasExactOwnKeys(value.applicability.dates, ["start", "end"])
+        || !validDate(value.applicability.dates.start) || !validDate(value.applicability.dates.end)))
+    || (Object.hasOwn(value.applicability, "travelers")
+      && (!Number.isSafeInteger(value.applicability.travelers) || value.applicability.travelers <= 0))
+    || !hasExactOwnKeys(value.recommendation, [
+      "round", "reason", "preferenceRevisionIds", "feedbackIds",
+    ])
+    || !Number.isSafeInteger(value.recommendation.round) || value.recommendation.round <= 0
+    || !nonEmptyString(value.recommendation.reason)
+    || !Array.isArray(value.recommendation.preferenceRevisionIds)
+    || !value.recommendation.preferenceRevisionIds.every((item) => typeof item === "string")
+    || !Array.isArray(value.recommendation.feedbackIds)
+    || !value.recommendation.feedbackIds.every((item) => typeof item === "string")
+    || !["candidate", "web_verified", "needs_takeover", "stale"].includes(value.verificationState)
+    || !["none", "tentative", "confirmed"].includes(value.decisionState)
+    || (Object.hasOwn(value, "currentEvidenceId") && !nonEmptyString(value.currentEvidenceId))
+    || (Object.hasOwn(value, "verificationBlockReason")
+      && !["login", "captcha", "risk_control", "load_failed", "field_missing"].includes(value.verificationBlockReason))
+    || (value.verificationState !== "needs_takeover" && Object.hasOwn(value, "verificationBlockReason"))) {
+    return undefined;
+  }
+  return {
+    id: value.id,
+    tripId: value.tripId,
+    revision: value.revision,
+    updatedAt: value.updatedAt,
+    category: value.category,
+    entity: {
+      name: value.entity.name,
+      ...(Object.hasOwn(value.entity, "address") ? { address: value.entity.address } : {}),
+      ...(Object.hasOwn(value.entity, "latitude") ? { latitude: value.entity.latitude } : {}),
+      ...(Object.hasOwn(value.entity, "longitude") ? { longitude: value.entity.longitude } : {}),
+    },
+    applicability: {
+      ...(Object.hasOwn(value.applicability, "dates")
+        ? { dates: { start: value.applicability.dates.start, end: value.applicability.dates.end } }
+        : {}),
+      ...(Object.hasOwn(value.applicability, "travelers") ? { travelers: value.applicability.travelers } : {}),
+    },
+    recommendation: {
+      round: value.recommendation.round,
+      reason: value.recommendation.reason,
+      preferenceRevisionIds: [...value.recommendation.preferenceRevisionIds],
+      feedbackIds: [...value.recommendation.feedbackIds],
+    },
+    verificationState: value.verificationState,
+    decisionState: value.decisionState,
+    ...(Object.hasOwn(value, "currentEvidenceId") ? { currentEvidenceId: value.currentEvidenceId } : {}),
+    ...(Object.hasOwn(value, "verificationBlockReason")
+      ? { verificationBlockReason: value.verificationBlockReason }
+      : {}),
+  };
+}
+
+function safeCandidateBatch(value) {
+  if (!Array.isArray(value) || value.length < 2 || value.length > 4) return undefined;
+  const candidates = value.map(safeCandidate);
+  return candidates.every(Boolean) ? candidates : undefined;
+}
+
 export class LocalAgentBridgeRuntime {
   #agentEndpoint;
   #fetch;
@@ -296,7 +410,10 @@ export class LocalAgentBridgeRuntime {
     const { payload: safePayload, requested } = requestSnapshot(action, payload);
     if (!this.#pendingCommand) {
       const firstSentAt = currentTime(this.#now);
-      if (!activeAgentRun(this.#claimed.expiresAt, firstSentAt)) throw codedError("AGENT_RUN_EXPIRED");
+      if (!activeAgentRun(this.#claimed.expiresAt, firstSentAt)) {
+        if (action === "revokeAgentRunSelf") this.#clearCapability();
+        throw codedError("AGENT_RUN_EXPIRED");
+      }
       if (!Number.isSafeInteger(this.#claimed.nextSequence) || this.#claimed.nextSequence >= Number.MAX_SAFE_INTEGER) {
         throw codedError("SEQUENCE_EXHAUSTED");
       }
@@ -324,7 +441,20 @@ export class LocalAgentBridgeRuntime {
         throw codedError("INVALID_AGENT_RESPONSE", true);
       }
       let safeResponse = response;
-      if (action === "revokeAgentRunSelf") {
+      if (action === "submitProposalBatch") {
+        const hasReplayed = Object.hasOwn(response, "replayed");
+        const data = safeCandidateBatch(response.data);
+        if (!hasExactOwnKeys(response, hasReplayed ? ["ok", "action", "data", "replayed"] : ["ok", "action", "data"])
+          || response.ok !== true || !data) {
+          throw codedError("INVALID_AGENT_RESPONSE", true);
+        }
+        safeResponse = {
+          ok: true,
+          action: "submitProposalBatch",
+          data,
+          ...(hasReplayed ? { replayed: response.replayed } : {}),
+        };
+      } else if (action === "revokeAgentRunSelf") {
         const data = response.data;
         const hasReplayed = Object.hasOwn(response, "replayed");
         if (!hasExactOwnKeys(response, hasReplayed ? ["ok", "action", "data", "replayed"] : ["ok", "action", "data"])

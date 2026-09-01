@@ -19,6 +19,34 @@ function claimedData(agentRunId, nextSequence = 1, expiresAt = FUTURE_EXPIRES_AT
   };
 }
 
+function candidateData(index = 1) {
+  return {
+    id: `candidate-${index}`,
+    tripId: "trip-1",
+    revision: 0,
+    updatedAt: "2026-09-01T00:01:00.000Z",
+    category: "hotel",
+    entity: { name: `Hotel ${index}`, address: "Shenzhen" },
+    applicability: {
+      dates: { start: "2026-10-03", end: "2026-10-04" },
+      travelers: 2,
+    },
+    recommendation: {
+      round: 1,
+      reason: "Near the itinerary",
+      preferenceRevisionIds: [],
+      feedbackIds: [],
+    },
+    verificationState: "web_verified",
+    decisionState: "tentative",
+    currentEvidenceId: `evidence-${index}`,
+  };
+}
+
+function candidateBatchData() {
+  return [candidateData(1), candidateData(2)];
+}
+
 function createTransaction(runs) {
   const idempotency = new Map();
   return {
@@ -81,7 +109,7 @@ test("prepare always constrains caller input to submitProposalBatch", async () =
       if (body.action === "claimAgentRun") {
         return Response.json({ ok: true, data: claimedData(body.agentRunId) });
       }
-      return Response.json({ ok: true, action: body.action, data: {} });
+      return Response.json({ ok: true, action: body.action, data: candidateBatchData() });
     },
   });
 
@@ -108,7 +136,7 @@ test("submitProposalBatch is a fixed runtime wrapper and uncertain retries reuse
       bodies.push(init.body);
       attempt += 1;
       if (attempt === 1) throw new TypeError("response lost");
-      return Response.json({ ok: true, action: "submitProposalBatch", data: { count: 2 } });
+      return Response.json({ ok: true, action: "submitProposalBatch", data: candidateBatchData() });
     },
   });
   runtime.prepare();
@@ -124,6 +152,62 @@ test("submitProposalBatch is a fixed runtime wrapper and uncertain retries reuse
   assert.equal(bodies.length, 2);
   assert.equal(bodies[0], bodies[1]);
   assert.equal(JSON.parse(bodies[1]).payload.round, 1);
+});
+
+test("submitProposalBatch rejects unsafe success bodies without advancing or replacing its pending envelope", async () => {
+  for (const unsafeResponse of [
+    { ok: true, action: "submitProposalBatch", data: null },
+    { ok: true, action: "submitProposalBatch", data: candidateBatchData(), serverSecret: "private" },
+    {
+      ok: true,
+      action: "submitProposalBatch",
+      data: [{ ...candidateData(1), unexpected: true }, candidateData(2)],
+    },
+    {
+      ok: true,
+      action: "submitProposalBatch",
+      data: [
+        { ...candidateData(1), applicability: { dates: { start: "not-a-date", end: "2026-10-04" } } },
+        candidateData(2),
+      ],
+    },
+  ]) {
+    const bodies = [];
+    let attempts = 0;
+    const runtime = new LocalAgentBridgeRuntime({
+      agentEndpoint: "https://api.example.test/api/agent",
+      fetch: async (_url, init) => {
+        const body = JSON.parse(init.body);
+        if (body.action === "claimAgentRun") {
+          return Response.json({ ok: true, data: claimedData(body.agentRunId) });
+        }
+        bodies.push(init.body);
+        attempts += 1;
+        return Response.json(attempts === 1
+          ? unsafeResponse
+          : { ok: true, action: "submitProposalBatch", data: candidateBatchData(), replayed: true });
+      },
+    });
+    runtime.prepare();
+    await runtime.claim("agent-run-strict-submit");
+    const payload = { round: 1, candidates: [{ id: "safe" }] };
+
+    await assert.rejects(runtime.submitProposalBatch(payload), {
+      code: "INVALID_AGENT_RESPONSE",
+      uncertain: true,
+    });
+    assert.equal(runtime.nextSequence, 1);
+    const replay = await runtime.submitProposalBatch(structuredClone(payload));
+
+    assert.deepEqual(replay, {
+      ok: true,
+      action: "submitProposalBatch",
+      data: candidateBatchData(),
+      replayed: true,
+    });
+    assert.equal(runtime.nextSequence, 2);
+    assert.equal(bodies[0], bodies[1]);
+  }
 });
 
 test("an aborted submit is uncertain and replays the byte-identical pending envelope", async () => {
@@ -149,7 +233,7 @@ test("an aborted submit is uncertain and replays the byte-identical pending enve
       return Response.json({
         ok: true,
         action: "submitProposalBatch",
-        data: { count: 1 },
+        data: candidateBatchData(),
         replayed: true,
       });
     },
@@ -486,7 +570,7 @@ test("a new command fails closed without creating an envelope when the request c
           data: claimedData(body.agentRunId, 1, "2026-08-31T00:15:00.000Z"),
         });
       }
-      return Response.json({ ok: true, action: body.action, data: {} });
+      return Response.json({ ok: true, action: body.action, data: candidateBatchData() });
     },
   });
   runtime.prepare();
@@ -563,7 +647,7 @@ test("response-time clock failures are uncertain and retain claim and command en
         commandBodies.push(init.body);
         commandAttempts += 1;
         if (commandAttempts === 1) throwOnClock = true;
-        return Response.json({ ok: true, action: body.action, data: {} });
+        return Response.json({ ok: true, action: body.action, data: candidateBatchData() });
       },
     });
     runtime.prepare();
@@ -895,7 +979,7 @@ test("pending command and revoke envelopes reconcile byte-for-byte after local e
             action,
             data: { agentRunId: body.agentRunId, revokedAt: "2026-08-31T00:07:00.000Z" },
           })
-          : Response.json({ ok: true, action, data: { accepted: true } });
+          : Response.json({ ok: true, action, data: candidateBatchData() });
       },
     });
     runtime.prepare();
@@ -967,9 +1051,9 @@ test("command replays one envelope across truncated and structurally invalid 2xx
         return new Response("{", { status: 200, headers: { "content-type": "application/json" } });
       }
       if (attempts === 3) {
-        return Response.json({ ok: true, action: body.action, data: {}, replayed: "yes" });
+        return Response.json({ ok: true, action: body.action, data: candidateBatchData(), replayed: "yes" });
       }
-      return Response.json({ ok: true, action: body.action, data: { accepted: true }, replayed: true });
+      return Response.json({ ok: true, action: body.action, data: candidateBatchData(), replayed: true });
     },
   });
   runtime.prepare();
@@ -1000,7 +1084,7 @@ test("command rejects non-JSON payloads before creating a pending envelope", asy
         return Response.json({ ok: true, data: claimedData(body.agentRunId) });
       }
       commandBodies.push(init.body);
-      return Response.json({ ok: true, action: body.action, data: {} });
+      return Response.json({ ok: true, action: body.action, data: candidateBatchData() });
     },
   });
   runtime.prepare();
@@ -1044,7 +1128,7 @@ test("pending command owns an immutable payload snapshot and raw request body", 
       commandBodies.push(init.body);
       attempts += 1;
       if (attempts === 1) throw new TypeError("response lost");
-      return Response.json({ ok: true, action: body.action, data: {} });
+      return Response.json({ ok: true, action: body.action, data: candidateBatchData() });
     },
   });
   runtime.prepare();
@@ -1147,7 +1231,7 @@ test("malformed HTTP responses clear only definite non-transient 4xx envelopes",
         if (attempts === 1) {
           return new Response("{", { status, headers: { "content-type": "application/json" } });
         }
-        return Response.json({ ok: true, action: body.action, data: {} });
+        return Response.json({ ok: true, action: body.action, data: candidateBatchData() });
       },
     });
     runtime.prepare();
@@ -1190,7 +1274,7 @@ test("prepare, claim and commands are mutually exclusive", async () => {
   const originalFetch = runtime.command("submitProposalBatch", { proposals: [] });
   await assert.rejects(runtime.command("submitProposalBatch", { proposals: [] }), /BRIDGE_BUSY/);
   assert.throws(() => runtime.prepare(), /BRIDGE_BUSY/);
-  releaseCommand(Response.json({ ok: true, action: "submitProposalBatch", data: [] }));
+  releaseCommand(Response.json({ ok: true, action: "submitProposalBatch", data: candidateBatchData() }));
   await originalFetch;
 });
 
@@ -1210,7 +1294,7 @@ test("explicit non-transient 4xx failures clear pending claim and command envelo
       }
       commandAttempts += 1;
       if (commandAttempts === 1) return Response.json({ ok: false, error: "INVALID_REQUEST" }, { status: 400 });
-      return Response.json({ ok: true, action: body.action, data: {} });
+      return Response.json({ ok: true, action: body.action, data: candidateBatchData() });
     },
   });
   runtime.prepare();
@@ -1290,7 +1374,7 @@ test("scope, response shape and sequence boundary are enforced before advancing"
       }
       commandAttempts += 1;
       if (commandAttempts === 1) return Response.json({ ok: true, action: body.action });
-      return Response.json({ ok: true, action: body.action, data: {} });
+      return Response.json({ ok: true, action: body.action, data: candidateBatchData() });
     },
   });
   runtime.prepare();

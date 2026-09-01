@@ -250,6 +250,36 @@ test("the isolation probe executes and parses evidence for synthetic file, HTTPS
   }
 });
 
+test("an aborted custom probe settles its active check without starting later checks", async () => {
+  const controller = new AbortController();
+  const startedChecks = [];
+  let releaseCheck;
+  let activeCheckEnded = false;
+  let activeSignal;
+  const probing = isolation.probeCodexIsolation({
+    ...PROBE_OPTIONS,
+    signal: controller.signal,
+    probeAdapter: async (request) => {
+      startedChecks.push(request.check.name);
+      activeSignal = request.signal;
+      if (startedChecks.length === 1) {
+        await new Promise((resolve) => { releaseCheck = resolve; });
+        activeCheckEnded = true;
+      }
+      return successfulProbeResponse(request);
+    },
+  });
+  while (!releaseCheck) await new Promise((resolve) => setImmediate(resolve));
+
+  controller.abort();
+  releaseCheck();
+
+  await assert.rejects(probing, { code: "CODEX_ISOLATION_UNAVAILABLE" });
+  assert.equal(activeSignal, controller.signal);
+  assert.equal(activeCheckEnded, true);
+  assert.deepEqual(startedChecks, ["isolatedDirectoryReadable"]);
+});
+
 test("low-level probe evidence fails closed when it is mismatched, incomplete or raw-invalid", async () => {
   const base = {
     codexPath: "/controlled/codex",
@@ -518,6 +548,32 @@ test("the default probe adapter times out with TERM then KILL and fails closed",
     { groupPid: -fake.calls[0].child.pid, signal: "SIGTERM" },
     { groupPid: -fake.calls[0].child.pid, signal: "SIGKILL" },
   ]);
+});
+
+test("aborting the default probe terminates and confirms its real fake process group", async (context) => {
+  const paths = await createDefaultProbeFixture(context, "codex-default-probe-abort-test-");
+  const fake = createProbeSpawn([{
+    hang: true,
+    closeOnSignal: "SIGKILL",
+    groupGoneOnSignal: "SIGKILL",
+  }]);
+  const controller = new AbortController();
+  const probing = isolation.probeCodexIsolation({
+    ...paths,
+    signal: controller.signal,
+    spawnImpl: fake.spawnImpl,
+    processKillImpl: fake.processKillImpl,
+    probeTimeoutMs: 50,
+    probeKillGraceMs: 1,
+  });
+  while (fake.calls.length === 0) await new Promise((resolve) => setImmediate(resolve));
+
+  controller.abort();
+  assert.deepEqual(fake.calls[0].child.signals, ["SIGTERM"]);
+
+  await assert.rejects(probing, { code: "CODEX_ISOLATION_UNAVAILABLE" });
+  assert.deepEqual(fake.calls[0].child.signals, ["SIGTERM", "SIGKILL"]);
+  assert.ok(fake.calls[0].groupProbes.length >= 1);
 });
 
 test("doctor has its own timeout while sandbox probes keep the shorter timeout", async (context) => {
