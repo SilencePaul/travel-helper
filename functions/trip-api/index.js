@@ -48,7 +48,7 @@ const decisionMutationActions = new Set([
   "recordFeedback", "placeTentative", "attachTentativeToLegacyTrip", "detachTentativeFromLegacyTrip",
   "setConfirmationReceipt", "createAgentRun", "revokeAgentRun",
 ]);
-const agentActions = new Set(["claimAgentRun", "submitProposalBatch", "appendEvidenceSnapshot", "reportVerificationBlocked", "generatePreferenceSummary", "getDecisionContext"]);
+const agentActions = new Set(["claimAgentRun", "submitProposalBatch", "appendEvidenceSnapshot", "reportVerificationBlocked", "generatePreferenceSummary", "getDecisionContext", "revokeAgentRunSelf"]);
 
 function isAgentEnvelope(payload) {
   const nonempty = (value) => typeof value === "string" && value.length > 0;
@@ -97,7 +97,7 @@ function createAgentHttpHandler({ handler, maxBodyBytes = 64 * 1024 } = {}) {
       const statusCode = result?.ok === true ? 200
         : result?.error === "AGENT_RUN_EXPIRED" ? 410
           : result?.error === "TRIP_API_UNAVAILABLE" ? 503
-            : ["INVALID_AGENT_CLAIM", "AGENT_SCOPE_FORBIDDEN", "FORBIDDEN"].includes(result?.error) ? 403
+            : ["INVALID_AGENT_CLAIM", "AGENT_SCOPE_FORBIDDEN", "ADMIN_REQUIRED", "FORBIDDEN"].includes(result?.error) ? 403
               : 400;
       return json(statusCode, result?.ok === true || result?.ok === false ? result : { ok: false, error: "TRIP_API_UNAVAILABLE" });
     } catch {
@@ -123,7 +123,8 @@ function agentSuccess(action, result) {
   const data = action === "submitProposalBatch" ? result.candidates
     : action === "generatePreferenceSummary" ? result.summary
       : action === "getDecisionContext" ? result.context
-      : result.candidate;
+        : action === "revokeAgentRunSelf" ? { agentRunId: result.agentRunId, revokedAt: result.revokedAt }
+          : result.candidate;
   return {
     ok: true,
     action,

@@ -80,7 +80,7 @@ test("returns stable decision state errors", async () => {
 
 test("the local bridge can claim an agent run without a browser identity", async () => {
   const calls = [];
-  const claimed = { agentRunId: "agent-run-1", claimedAt: "2026-08-28T00:00:00.000Z", nextSequence: 1 };
+  const claimed = { agentRunId: "agent-run-1", claimedAt: "2026-08-28T00:00:00.000Z", expiresAt: "2026-08-28T00:15:00.000Z", nextSequence: 1 };
   const handler = createTripHandler({
     getUserInfo: () => undefined,
     commands: { executeAgent: async (payload) => { calls.push(payload); return claimed; } },
@@ -102,6 +102,26 @@ test("agent command results use their dedicated success envelope", async () => {
     ok: true,
     action: "submitProposalBatch",
     data: candidates,
+    replayed: false,
+  });
+});
+
+test("self-revoke returns only its fixed control result in the Agent success envelope", async () => {
+  const handler = createTripHandler({
+    getUserInfo: () => undefined,
+    commands: {
+      executeAgent: async () => ({
+        agentRunId: "agent-run-1",
+        revokedAt: "2026-08-28T00:05:00.000Z",
+        replayed: false,
+      }),
+    },
+  });
+
+  assert.deepEqual(await handler({ action: "revokeAgentRunSelf", agentRunId: "agent-run-1", sequence: 1 }), {
+    ok: true,
+    action: "revokeAgentRunSelf",
+    data: { agentRunId: "agent-run-1", revokedAt: "2026-08-28T00:05:00.000Z" },
     replayed: false,
   });
 });
@@ -129,16 +149,16 @@ test("agent decision context and incomplete verification warning use stable enve
   });
 });
 
-test("an authenticated member can read an agent run safe status", async () => {
+test("an authenticated administrator can read an agent run safe status", async () => {
   const status = { agentRunId: "agent-run-1", tripId: "trip-1", status: "claimed", revision: 2 };
   const calls = [];
   const handler = createTripHandler({
-    getUserInfo: () => ({ customUserId: "fs_member" }),
+    getUserInfo: () => ({ customUserId: "fs_admin" }),
     commands: { execute: async (payload, actorUid) => { calls.push({ payload, actorUid }); return status; } },
   });
 
   assert.deepEqual(await handler({ action: "getAgentRunStatus", tripId: "trip-1", agentRunId: "agent-run-1" }), status);
-  assert.deepEqual(calls, [{ payload: { action: "getAgentRunStatus", tripId: "trip-1", agentRunId: "agent-run-1" }, actorUid: "fs_member" }]);
+  assert.deepEqual(calls, [{ payload: { action: "getAgentRunStatus", tripId: "trip-1", agentRunId: "agent-run-1" }, actorUid: "fs_admin" }]);
 });
 
 test("an authenticated member summary request is not mistaken for an agent command", async () => {
@@ -162,7 +182,7 @@ test("the public Agent HTTP transport accepts only signed Agent actions", async 
   const transport = createAgentHttpHandler({
     handler: createTripHandler({
       getUserInfo: () => undefined,
-      commands: { executeAgent: async (payload) => { calls.push(payload); return { agentRunId: payload.agentRunId, claimedAt: "2026-08-31T00:00:00.000Z", nextSequence: 1 }; } },
+      commands: { executeAgent: async (payload) => { calls.push(payload); return { agentRunId: payload.agentRunId, claimedAt: "2026-08-31T00:00:00.000Z", expiresAt: "2026-08-31T00:15:00.000Z", nextSequence: 1 }; } },
     }),
   });
   const claim = { action: "claimAgentRun", agentRunId: "agent-run-1", pairingCode: "secret", clientNonce: "nonce-001", signature: "signature" };
@@ -170,8 +190,60 @@ test("the public Agent HTTP transport accepts only signed Agent actions", async 
   const response = await transport({ httpMethod: "POST", path: "/api/agent", headers: { "content-type": "application/json" }, body: JSON.stringify(claim) });
 
   assert.equal(response.statusCode, 200);
-  assert.deepEqual(JSON.parse(response.body), { ok: true, data: { agentRunId: "agent-run-1", claimedAt: "2026-08-31T00:00:00.000Z", nextSequence: 1 } });
+  assert.deepEqual(JSON.parse(response.body), { ok: true, data: { agentRunId: "agent-run-1", claimedAt: "2026-08-31T00:00:00.000Z", expiresAt: "2026-08-31T00:15:00.000Z", nextSequence: 1 } });
   assert.deepEqual(calls, [claim]);
+});
+
+test("the public Agent transport accepts the signed self-revoke control action", async () => {
+  const transport = createAgentHttpHandler({ handler: async () => ({
+    ok: true,
+    action: "revokeAgentRunSelf",
+    data: { agentRunId: "agent-run-1", revokedAt: "2026-08-31T00:05:00.000Z" },
+    replayed: false,
+  }) });
+  const command = {
+    action: "revokeAgentRunSelf",
+    agentRunId: "agent-run-1",
+    sequence: 1,
+    idempotencyKey: "self-revoke-001",
+    payload: {},
+    signature: "signature",
+  };
+
+  const response = await transport({
+    httpMethod: "POST",
+    path: "/api/agent",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(command),
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(JSON.parse(response.body), {
+    ok: true,
+    action: "revokeAgentRunSelf",
+    data: { agentRunId: "agent-run-1", revokedAt: "2026-08-31T00:05:00.000Z" },
+    replayed: false,
+  });
+});
+
+test("the public Agent transport maps lost administrator authority to forbidden", async () => {
+  const transport = createAgentHttpHandler({ handler: async () => ({ ok: false, error: "ADMIN_REQUIRED" }) });
+  const response = await transport({
+    httpMethod: "POST",
+    path: "/api/agent",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      action: "getDecisionContext",
+      agentRunId: "agent-run-1",
+      sequence: 1,
+      idempotencyKey: "context-001",
+      payload: {},
+      signature: "signature",
+    }),
+  });
+
+  assert.equal(response.statusCode, 403);
+  assert.deepEqual(JSON.parse(response.body), { ok: false, error: "ADMIN_REQUIRED" });
 });
 
 test("the public Agent HTTP transport rejects member commands before data access", async () => {

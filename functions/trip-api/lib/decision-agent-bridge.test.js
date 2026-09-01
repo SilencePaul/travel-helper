@@ -48,7 +48,12 @@ test("a valid P-256 claim consumes the pairing code and activates the run", asyn
 
   const result = await bridge.claim(state.transaction, { ...claim, signature: signature(privateKey, claim) });
 
-  assert.equal(result.agentRunId, "agent-run-1");
+  assert.deepEqual(result, {
+    agentRunId: "agent-run-1",
+    claimedAt: "2026-08-28T00:05:00.000Z",
+    expiresAt: "2026-08-28T00:15:00.000Z",
+    nextSequence: 1,
+  });
   assert.equal(state.runs.get("agent-run-1").status, "claimed");
   assert.equal(state.runs.get("agent-run-1").pairingCodeHash, undefined);
   assert.equal(state.runs.get("agent-run-1").clientNonce, "nonce-001");
@@ -69,6 +74,77 @@ test("agent commands require the next sequence and replay the original result on
   assert.deepEqual(replay, { result: { candidates: ["candidate-1"] }, replayed: true });
   assert.equal(calls, 1);
   assert.equal(state.runs.get("agent-run-1").lastSequence, 1);
+});
+
+test("authorization is rechecked after signature verification before returning an idempotent replay", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const state = createTransaction(pendingRun(publicKey.export({ format: "jwk" }), {
+    status: "claimed",
+    pairingCodeHash: undefined,
+  }));
+  const bridge = createDecisionAgentBridge({ now: () => new Date("2026-08-28T00:05:00.000Z") });
+  const command = { agentRunId: "agent-run-1", sequence: 1, idempotencyKey: "context-001", action: "getDecisionContext", payload: {} };
+  const input = { ...command, signature: signature(privateKey, command) };
+  let authorized = true;
+  let authorizationCalls = 0;
+  const authorize = async () => {
+    authorizationCalls += 1;
+    if (!authorized) {
+      const error = new Error("ADMIN_REQUIRED");
+      error.code = "ADMIN_REQUIRED";
+      throw error;
+    }
+  };
+
+  await bridge.run(state.transaction, input, async () => ({ context: "safe" }), authorize);
+  authorized = false;
+
+  await assert.rejects(
+    () => bridge.run(state.transaction, input, async () => ({ context: "must-not-return" }), authorize),
+    { code: "ADMIN_REQUIRED" },
+  );
+  assert.equal(authorizationCalls, 2);
+});
+
+test("self-revoke is a signed unscoped control action with transactional sequence and replay", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const state = createTransaction(pendingRun(publicKey.export({ format: "jwk" }), {
+    status: "claimed",
+    pairingCodeHash: undefined,
+    revision: 2,
+  }));
+  const bridge = createDecisionAgentBridge({ now: () => new Date("2026-08-28T00:05:00.000Z") });
+  const command = {
+    agentRunId: "agent-run-1",
+    sequence: 1,
+    idempotencyKey: "self-revoke-001",
+    action: "revokeAgentRunSelf",
+    payload: {},
+  };
+  const input = { ...command, signature: signature(privateKey, command) };
+  let operationCalls = 0;
+
+  const authorize = async () => { throw new Error("self revoke must not require current admin"); };
+  const first = await bridge.run(state.transaction, input, async () => { operationCalls += 1; return { leaked: true }; }, authorize);
+  const replay = await bridge.run(state.transaction, input, async () => { operationCalls += 1; return { leaked: true }; }, authorize);
+
+  assert.deepEqual(first, {
+    result: { agentRunId: "agent-run-1", revokedAt: "2026-08-28T00:05:00.000Z" },
+    replayed: false,
+  });
+  assert.deepEqual(replay, { result: first.result, replayed: true });
+  assert.equal(operationCalls, 0);
+  assert.equal(state.runs.get("agent-run-1").status, "revoked");
+  assert.equal(state.runs.get("agent-run-1").revokedAt, "2026-08-28T00:05:00.000Z");
+  assert.equal(state.runs.get("agent-run-1").lastSequence, 1);
+  assert.equal(state.runs.get("agent-run-1").revision, 3);
+  assert.equal(state.idempotency.size, 1);
+
+  const newEnvelope = { ...command, sequence: 2, idempotencyKey: "self-revoke-002" };
+  await assert.rejects(
+    () => bridge.run(state.transaction, { ...newEnvelope, signature: signature(privateKey, newEnvelope) }, async () => ({})),
+    { code: "INVALID_AGENT_CLAIM" },
+  );
 });
 
 test("a tampered command signature and an ungranted scope are rejected", async () => {
@@ -125,6 +201,31 @@ test("a claim retry accepts a fresh valid ECDSA signature but still verifies eve
   assert.deepEqual(replay, first);
   await assert.rejects(
     () => bridge.claim(state.transaction, { ...claim, signature: "not-a-valid-signature" }),
+    { code: "INVALID_AGENT_CLAIM" },
+  );
+});
+
+test("an exact claim replay rechecks authorization after verifying its signature", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const state = createTransaction(pendingRun(publicKey.export({ format: "jwk" })));
+  const bridge = createDecisionAgentBridge({ now: () => new Date("2026-08-28T00:05:00.000Z") });
+  const claim = { agentRunId: "agent-run-1", pairingCode: "pairing-code", clientNonce: "nonce-001" };
+  const input = { ...claim, signature: signature(privateKey, claim) };
+  let authorized = true;
+  const authorize = async () => {
+    if (!authorized) {
+      const error = new Error("ADMIN_REQUIRED");
+      error.code = "ADMIN_REQUIRED";
+      throw error;
+    }
+  };
+
+  await bridge.claim(state.transaction, input, authorize);
+  authorized = false;
+
+  await assert.rejects(() => bridge.claim(state.transaction, input, authorize), { code: "ADMIN_REQUIRED" });
+  await assert.rejects(
+    () => bridge.claim(state.transaction, { ...claim, signature: "invalid-signature" }, authorize),
     { code: "INVALID_AGENT_CLAIM" },
   );
 });

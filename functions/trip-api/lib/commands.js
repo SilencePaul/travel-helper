@@ -61,7 +61,7 @@ const ActionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("attachTentativeToLegacyTrip"), tripId: z.string().min(1), placementId: z.string().min(1), legacyItemId: z.string().min(1), expectedPlacementRevision: z.number().int().nonnegative(), expectedTripVersion: z.number().int().nonnegative(), idempotencyKey: z.string().min(8).max(128) }),
   z.object({ action: z.literal("detachTentativeFromLegacyTrip"), tripId: z.string().min(1), placementId: z.string().min(1), expectedPlacementRevision: z.number().int().nonnegative(), expectedTripVersion: z.number().int().nonnegative(), idempotencyKey: z.string().min(8).max(128) }),
   z.object({ action: z.literal("setConfirmationReceipt"), tripId: z.string().min(1), candidateId: z.string().min(1), expectedCandidateRevision: z.number().int().nonnegative(), active: z.boolean(), reason: z.string().max(2000).optional(), idempotencyKey: z.string().min(8).max(128) }),
-  z.object({ action: z.literal("createAgentRun"), tripId: z.string().min(1), publicKeyJwk: z.object({ kty: z.literal("EC"), crv: z.literal("P-256"), x: z.string().min(1), y: z.string().min(1) }), pairingCodeHash: z.string().length(43), scope: z.array(z.enum(["submitProposalBatch", "appendEvidenceSnapshot", "reportVerificationBlocked", "generatePreferenceSummary"])).min(1).max(4), idempotencyKey: z.string().min(8).max(128) }),
+  z.object({ action: z.literal("createAgentRun"), tripId: z.string().min(1), publicKeyJwk: z.object({ kty: z.literal("EC"), crv: z.literal("P-256"), x: z.string().min(1), y: z.string().min(1) }), pairingCodeHash: z.string().length(43), scope: z.tuple([z.literal("submitProposalBatch")]), idempotencyKey: z.string().min(8).max(128) }),
   z.object({ action: z.literal("revokeAgentRun"), tripId: z.string().min(1), agentRunId: z.string().min(1), expectedRevision: z.number().int().nonnegative(), idempotencyKey: z.string().min(8).max(128) }),
   z.object({ action: z.literal("listMembers") }),
   z.object({ action: z.enum(["approveMember", "rejectMember", "removeMember"]), uid: z.string().min(4).max(32) }),
@@ -70,11 +70,10 @@ const ActionSchema = z.discriminatedUnion("action", [
 const ServerMemberUidsSchema = z.array(z.string().min(4).max(64)).min(1);
 
 const AgentDateRangeSchema = z.object({ start: z.string().date(), end: z.string().date() });
-const AgentFactsSchema = z.union([
-  z.object({ propertyName: z.string().min(1), address: z.string().min(1), checkInDate: z.string().date(), checkOutDate: z.string().date(), travelers: z.number().int().positive(), roomTypeOrBed: z.string().min(1), availability: z.enum(["available", "unavailable", "unknown"]), priceAmount: z.union([z.number().nonnegative(), z.literal("not_provided")]), currency: z.union([z.string().min(1), z.literal("not_provided")]), priceDisplay: z.enum(["total", "per_night", "per_person", "not_provided"]), cancellationPolicy: z.union([z.string().min(1), z.literal("not_provided")]) }),
-  z.object({ name: z.string().min(1), address: z.string().min(1), openInformation: z.union([z.string().min(1), z.literal("not_provided")]), priceSnapshot: z.union([z.string().min(1), z.literal("not_provided")]), ticketType: z.union([z.string().min(1), z.literal("not_provided")]) }),
-  z.object({ name: z.string().min(1), address: z.string().min(1), openInformation: z.union([z.string().min(1), z.literal("not_provided")]), priceSnapshot: z.union([z.string().min(1), z.literal("not_provided")]) }),
-]);
+const AgentHotelFactsSchema = z.object({ propertyName: z.string().min(1), address: z.string().min(1), checkInDate: z.string().date(), checkOutDate: z.string().date(), travelers: z.number().int().positive(), roomTypeOrBed: z.string().min(1), availability: z.enum(["available", "unavailable", "unknown"]), priceAmount: z.union([z.number().nonnegative(), z.literal("not_provided")]), currency: z.union([z.string().min(1), z.literal("not_provided")]), priceDisplay: z.enum(["total", "per_night", "per_person", "not_provided"]), cancellationPolicy: z.union([z.string().min(1), z.literal("not_provided")]) });
+const AgentAttractionFactsSchema = z.object({ name: z.string().min(1), address: z.string().min(1), openInformation: z.union([z.string().min(1), z.literal("not_provided")]), priceSnapshot: z.union([z.string().min(1), z.literal("not_provided")]), ticketType: z.union([z.string().min(1), z.literal("not_provided")]) });
+const AgentRestaurantFactsSchema = z.object({ name: z.string().min(1), address: z.string().min(1), openInformation: z.union([z.string().min(1), z.literal("not_provided")]), priceSnapshot: z.union([z.string().min(1), z.literal("not_provided")]) });
+const AgentFactsSchema = z.union([AgentHotelFactsSchema, AgentAttractionFactsSchema, AgentRestaurantFactsSchema]);
 const AgentEvidenceInputSchema = z.object({
   sourceKind: z.enum(["flyai", "amap", "web", "official", "manual"]),
   sourceName: z.string().min(1),
@@ -86,20 +85,45 @@ const AgentEvidenceInputSchema = z.object({
   supersedesEvidenceId: z.string().min(1).optional(),
   changeReason: z.string().optional(),
 });
+const AgentProposalHttpsUrlSchema = z.string().url().refine((value) => {
+  const parsed = new URL(value);
+  return parsed.protocol === "https:" && !parsed.username && !parsed.password && !parsed.hash;
+});
+const AgentProposalDateRangeSchema = AgentDateRangeSchema.strict();
+const AgentProposalEvidenceInputSchema = z.object({
+  sourceKind: z.enum(["flyai", "amap", "web", "official", "manual"]),
+  sourceName: z.string().min(1),
+  sourceUrl: AgentProposalHttpsUrlSchema,
+  capturedAt: z.string().datetime(),
+  queryContext: z.object({
+    dates: AgentProposalDateRangeSchema.optional(),
+    travelers: z.number().int().positive().optional(),
+    roomOrTicket: z.string().optional(),
+  }).strict(),
+  captureMethod: z.enum(["detail_page", "search_result", "api_result", "manual"]),
+  facts: z.union([
+    AgentHotelFactsSchema.strict(),
+    AgentAttractionFactsSchema.strict(),
+    AgentRestaurantFactsSchema.strict(),
+  ]),
+  supersedesEvidenceId: z.string().min(1).optional(),
+  changeReason: z.string().optional(),
+}).strict();
 const AgentProposalSchema = z.object({
   category: z.enum(["hotel", "restaurant", "attraction"]),
-  entity: z.object({ name: z.string().min(1), address: z.string().optional(), latitude: z.number().optional(), longitude: z.number().optional() }),
-  applicability: z.object({ dates: AgentDateRangeSchema.optional(), travelers: z.number().int().positive().optional() }),
-  recommendation: z.object({ round: z.number().int().positive(), reason: z.string().min(1), preferenceRevisionIds: z.array(z.string()), feedbackIds: z.array(z.string()) }),
-  evidence: z.array(AgentEvidenceInputSchema).min(1),
-});
+  entity: z.object({ name: z.string().min(1), address: z.string().optional(), latitude: z.number().optional(), longitude: z.number().optional() }).strict(),
+  applicability: z.object({ dates: AgentProposalDateRangeSchema.optional(), travelers: z.number().int().positive().optional() }).strict(),
+  recommendation: z.object({ round: z.number().int().positive(), reason: z.string().min(1), preferenceRevisionIds: z.array(z.string()), feedbackIds: z.array(z.string()) }).strict(),
+  evidence: z.array(AgentProposalEvidenceInputSchema).min(2),
+}).strict();
 const AgentApiSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("claimAgentRun"), agentRunId: z.string().min(1), pairingCode: z.string().min(1), clientNonce: z.string().min(8), signature: z.string().min(1) }),
-  z.object({ action: z.literal("submitProposalBatch"), agentRunId: z.string().min(1), sequence: z.number().int().positive(), idempotencyKey: z.string().min(8).max(128), signature: z.string().min(1), payload: z.object({ round: z.number().int().positive(), candidates: z.array(AgentProposalSchema).min(2).max(4) }) }),
+  z.object({ action: z.literal("submitProposalBatch"), agentRunId: z.string().min(1), sequence: z.number().int().positive(), idempotencyKey: z.string().min(8).max(128), signature: z.string().min(1), payload: z.object({ round: z.number().int().positive(), candidates: z.array(AgentProposalSchema).min(2).max(4) }).strict() }).strict(),
   z.object({ action: z.literal("appendEvidenceSnapshot"), agentRunId: z.string().min(1), sequence: z.number().int().positive(), idempotencyKey: z.string().min(8).max(128), signature: z.string().min(1), payload: z.object({ candidateId: z.string().min(1), expectedCandidateRevision: z.number().int().nonnegative(), evidence: AgentEvidenceInputSchema }) }),
   z.object({ action: z.literal("reportVerificationBlocked"), agentRunId: z.string().min(1), sequence: z.number().int().positive(), idempotencyKey: z.string().min(8).max(128), signature: z.string().min(1), payload: z.object({ candidateId: z.string().min(1), expectedCandidateRevision: z.number().int().nonnegative(), reason: z.enum(["login", "captcha", "risk_control", "load_failed", "field_missing"]) }) }),
   z.object({ action: z.literal("generatePreferenceSummary"), agentRunId: z.string().min(1), sequence: z.number().int().positive(), idempotencyKey: z.string().min(8).max(128), signature: z.string().min(1), payload: z.object({ sourcePreferenceRevisions: z.record(z.string(), z.number().int().nonnegative()) }) }),
   z.object({ action: z.literal("getDecisionContext"), agentRunId: z.string().min(1), sequence: z.number().int().positive(), idempotencyKey: z.string().min(8).max(128), signature: z.string().min(1), payload: z.object({}) }),
+  z.object({ action: z.literal("revokeAgentRunSelf"), agentRunId: z.string().min(1), sequence: z.number().int().positive(), idempotencyKey: z.string().min(8).max(128), signature: z.string().min(1), payload: z.object({}).strict() }).strict(),
 ]);
 
 function codedError(code, details = {}) { const error = new Error(code); error.code = code; Object.assign(error, details); return error; }
@@ -345,6 +369,22 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
     if (!current) throw codedError("TRIP_NOT_FOUND");
     if (!Array.isArray(current.memberUids) || !current.memberUids.includes(actorUid)) throw codedError("FORBIDDEN");
     return current;
+  }
+
+  async function assertTripAdmin(transaction, tripId, actorUid) {
+    const trip = await assertTripMember(transaction, tripId, actorUid);
+    const actor = await getActor(transaction, actorUid);
+    if (actor.role !== "admin") throw codedError("ADMIN_REQUIRED");
+    return { trip, actor };
+  }
+
+  function safeAgentTrip(trip) {
+    return {
+      version: trip.version,
+      days: trip.days.map(({ id, date, city }) => ({ id, date, city })),
+      travelerNames: trip.travelers.map(({ name }) => name),
+      travelerCount: trip.travelers.length,
+    };
   }
 
   async function readDecisionWorkspace(transaction, trip) {
@@ -778,7 +818,7 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
 
   async function getAgentRunStatus(input, actorUid) {
     return db.runTransaction(async (transaction) => {
-      await assertTripMember(transaction, input.tripId, actorUid);
+      await assertTripAdmin(transaction, input.tripId, actorUid);
       const run = one(await transaction.collection("trip_agent_runs").doc(input.agentRunId).get());
       if (!run || run.tripId !== input.tripId) throw codedError("FORBIDDEN");
       return safeAgentRun(run);
@@ -787,7 +827,7 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
 
   async function changeAgentRun(input, actorUid) {
     return db.runTransaction(async (transaction) => {
-      await assertTripMember(transaction, input.tripId, actorUid);
+      await assertTripAdmin(transaction, input.tripId, actorUid);
       return runIdempotentDecision(transaction, input, actorUid, async () => {
         const runs = transaction.collection("trip_agent_runs");
         const timestamp = now();
@@ -825,11 +865,23 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
   }
 
   async function submitProposalBatch(transaction, input, run) {
-    await assertTripMember(transaction, run.tripId, run.creatorUid);
+    for (const proposal of input.payload.candidates) {
+      if (proposal.recommendation.round !== input.payload.round) throw codedError("INVALID_REQUEST");
+      const origins = new Set();
+      for (const evidence of proposal.evidence) {
+        let source;
+        try { source = new URL(evidence.sourceUrl); } catch { throw codedError("INVALID_REQUEST"); }
+        if (source.protocol !== "https:" || source.username || source.password || source.hash) {
+          throw codedError("INVALID_REQUEST");
+        }
+        const effectivePort = source.port || "443";
+        origins.add(`https://${source.hostname.toLowerCase()}:${effectivePort}`);
+      }
+      if (origins.size < 2) throw codedError("INVALID_REQUEST");
+    }
     const timestamp = now().toISOString();
     const prepared = [];
     for (const proposal of input.payload.candidates) {
-      if (proposal.recommendation.round !== input.payload.round) throw codedError("INVALID_REQUEST");
       const candidateId = randomId();
       if (!candidateId || one(await transaction.collection("trip_candidates").doc(candidateId).get())) throw codedError("INVALID_REQUEST");
       const evidence = [];
@@ -988,9 +1040,13 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
     return { summary };
   }
 
-  async function getAgentDecisionContext(transaction, run) {
-    const trip = await assertTripMember(transaction, run.tripId, run.creatorUid);
-    return { context: await readDecisionWorkspace(transaction, trip) };
+  async function getAgentDecisionContext(transaction, trip) {
+    return {
+      context: {
+        workspace: await readDecisionWorkspace(transaction, trip),
+        trip: safeAgentTrip(trip),
+      },
+    };
   }
 
   async function getCurrentMember(actorUid) {
@@ -1009,19 +1065,22 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
         return db.runTransaction((transaction) => effectiveAgentBridge.claim(
           transaction,
           input,
-          (run) => assertTripMember(transaction, run.tripId, run.creatorUid),
+          (run) => assertTripAdmin(transaction, run.tripId, run.creatorUid),
         ));
       }
       const outcome = await db.runTransaction((transaction) => effectiveAgentBridge.run(
         transaction,
         input,
-        (run) => {
+        (run, authorization) => {
           if (input.action === "submitProposalBatch") return submitProposalBatch(transaction, input, run);
           if (input.action === "appendEvidenceSnapshot") return appendAgentEvidence(transaction, input, run);
           if (input.action === "reportVerificationBlocked") return reportAgentVerificationBlocked(transaction, input, run);
           if (input.action === "generatePreferenceSummary") return generateAgentPreferenceSummary(transaction, input, run);
-          return getAgentDecisionContext(transaction, run);
+          return getAgentDecisionContext(transaction, authorization.trip);
         },
+        ["submitProposalBatch", "getDecisionContext"].includes(input.action)
+          ? (run) => assertTripAdmin(transaction, run.tripId, run.creatorUid)
+          : undefined,
       ));
       return { ...outcome.result, replayed: outcome.replayed };
     },
