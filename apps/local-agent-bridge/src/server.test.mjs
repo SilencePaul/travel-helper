@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { request } from "node:http";
+import { connect } from "node:net";
 import test from "node:test";
 
 import { buildConnectionUrl, startLocalAgentBridge } from "./server.mjs";
@@ -64,6 +65,18 @@ function slowRequest(port) {
     });
     req.on("error", reject);
     req.write("{");
+  });
+}
+
+function rawSocketRequest(port, source) {
+  return new Promise((resolve, reject) => {
+    const socket = connect({ host: "127.0.0.1", port });
+    let response = "";
+    socket.setEncoding("utf8");
+    socket.on("connect", () => socket.end(source));
+    socket.on("data", (chunk) => { response += chunk; });
+    socket.on("end", () => resolve(response));
+    socket.on("error", reject);
   });
 }
 
@@ -222,7 +235,8 @@ test("unknown paths, wrong methods and arbitrary command surfaces never reach ru
 });
 
 test("CORS preflight is path-specific, supports GET status and preserves PNA", async (context) => {
-  const bridge = await startLocalAgentBridge({ appUrl: APP_ORIGIN, runtime: fakeRuntime() });
+  const events = [];
+  const bridge = await startLocalAgentBridge({ appUrl: APP_ORIGIN, runtime: fakeRuntime(events) });
   context.after(() => bridge.close());
 
   for (const [path, requestedMethod] of [
@@ -260,6 +274,46 @@ test("CORS preflight is path-specific, supports GET status and preserves PNA", a
     headers: { "access-control-request-method": "POST" },
   });
   assert.equal(wrong.status, 400);
+
+  const chunked = await rawSocketRequest(bridge.port, [
+    "OPTIONS /v1/agent-runs/prepare HTTP/1.1",
+    `Host: 127.0.0.1:${bridge.port}`,
+    `Origin: ${APP_ORIGIN}`,
+    "Access-Control-Request-Method: POST",
+    "Transfer-Encoding: chunked",
+    "Connection: close",
+    "",
+    "2",
+    "{}",
+    "0",
+    "",
+    "",
+  ].join("\r\n"));
+  assert.match(chunked, /^HTTP\/1\.1 400 /u);
+
+  const transferAndZeroLength = await rawSocketRequest(bridge.port, [
+    "OPTIONS /v1/agent-runs/prepare HTTP/1.1",
+    `Host: 127.0.0.1:${bridge.port}`,
+    `Origin: ${APP_ORIGIN}`,
+    "Access-Control-Request-Method: POST",
+    "Transfer-Encoding: chunked",
+    "Content-Length: 0",
+    "Connection: close",
+    "",
+    "0",
+    "",
+    "",
+  ].join("\r\n"));
+  assert.match(transferAndZeroLength, /^HTTP\/1\.1 400 /u);
+
+  const declaredBody = await rawRequest(bridge.port, {
+    method: "OPTIONS",
+    contentType: undefined,
+    body: "{}",
+    headers: { "access-control-request-method": "POST" },
+  });
+  assert.equal(declaredBody.status, 400);
+  assert.equal(events.length, 0);
 });
 
 test("loopback defenses reject Host, Origin, credentials, type, size and slow bodies before runtime", async (context) => {

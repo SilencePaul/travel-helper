@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 
 import { discoverCodexExecutable } from "./codex-isolation.mjs";
@@ -19,6 +19,8 @@ const DEFAULT_PROJECT_DIRECTORY = resolve(MODULE_DIRECTORY, "../../..");
 const DEFAULT_SCHEMA_PATH = join(MODULE_DIRECTORY, "codex-travel-output.schema.json");
 const DEFAULT_PROJECT_PROBE_PATH = join(DEFAULT_PROJECT_DIRECTORY, "package.json");
 const DEFAULT_OUTSIDE_PROBE_PATH = "/etc/hosts";
+const DEFAULT_TRUSTED_TEMP_ROOT = resolve(realpathSync(tmpdir()));
+const TEMP_DIRECTORY_PREFIX = "travel-research-";
 const DEFAULT_STATE_DIRECTORY = join(
   homedir(),
   "Library",
@@ -41,8 +43,8 @@ function normalizedAbsolutePath(value) {
   return typeof value === "string" && isAbsolute(value) && resolve(value) === value;
 }
 
-function defaultMakeTempDirectory() {
-  const directory = mkdtempSync(join(tmpdir(), "travel-agent-research-"));
+function defaultMakeTempDirectory(prefix) {
+  const directory = mkdtempSync(prefix);
   chmodSync(directory, 0o700);
   return directory;
 }
@@ -59,12 +61,23 @@ function defaultRemoveDirectorySync(path) {
   rmSync(path, { recursive: true, force: true });
 }
 
+function sameOrDescendant(parent, candidate) {
+  return candidate === parent || candidate.startsWith(`${parent}${sep}`);
+}
+
+function pathsOverlap(left, right) {
+  return sameOrDescendant(left, right) || sameOrDescendant(right, left);
+}
+
 export function createManagedCodexRunnerFactory({
   projectDir,
   schemaPath,
   projectProbePath,
   outsideProbePath,
+  trustedTempRoot = DEFAULT_TRUSTED_TEMP_ROOT,
   sourceEnv = process.env,
+  canonicalizePath = realpathSync,
+  inspectPath = lstatSync,
   discoverCodex = discoverCodexExecutable,
   makeTempDirectory = defaultMakeTempDirectory,
   writeProbeFile = defaultWriteProbeFile,
@@ -72,8 +85,10 @@ export function createManagedCodexRunnerFactory({
   removeDirectorySync = defaultRemoveDirectorySync,
   createRunner = createCodexRunner,
 } = {}) {
-  if (![projectDir, schemaPath, projectProbePath, outsideProbePath].every(normalizedAbsolutePath)
+  if (![projectDir, schemaPath, projectProbePath, outsideProbePath, trustedTempRoot].every(normalizedAbsolutePath)
     || typeof discoverCodex !== "function"
+    || typeof canonicalizePath !== "function"
+    || typeof inspectPath !== "function"
     || typeof makeTempDirectory !== "function"
     || typeof writeProbeFile !== "function"
     || typeof removeDirectory !== "function"
@@ -81,8 +96,72 @@ export function createManagedCodexRunnerFactory({
     || typeof createRunner !== "function") {
     throw codedError("CODEX_RESEARCH_FAILED");
   }
+  let canonicalTempRoot;
+  let canonicalProjectDir;
+  let canonicalHome;
+  try {
+    canonicalTempRoot = resolve(canonicalizePath(trustedTempRoot));
+    canonicalProjectDir = resolve(canonicalizePath(projectDir));
+    canonicalHome = resolve(canonicalizePath(homedir()));
+  } catch {
+    throw codedError("CODEX_RESEARCH_FAILED");
+  }
+  if (canonicalTempRoot !== trustedTempRoot
+    || canonicalProjectDir !== projectDir
+    || canonicalTempRoot === parse(canonicalTempRoot).root
+    || canonicalTempRoot === canonicalHome
+    || pathsOverlap(canonicalTempRoot, canonicalProjectDir)) {
+    throw codedError("CODEX_RESEARCH_FAILED");
+  }
   const managedSessions = new Set();
+  const ownedDirectories = new Map();
   let closed = false;
+
+  function inspectOwnedDirectory(path) {
+    if (!normalizedAbsolutePath(path)
+      || path === canonicalTempRoot
+      || dirname(path) !== canonicalTempRoot
+      || !new RegExp(`^${TEMP_DIRECTORY_PREFIX}[A-Za-z0-9][A-Za-z0-9_-]*$`, "u").test(basename(path))
+      || pathsOverlap(path, canonicalProjectDir)) {
+      return undefined;
+    }
+    try {
+      const info = inspectPath(path);
+      const canonical = resolve(canonicalizePath(path));
+      if (!info || typeof info.isDirectory !== "function" || typeof info.isSymbolicLink !== "function"
+        || !info.isDirectory() || info.isSymbolicLink()
+        || canonical !== path || dirname(canonical) !== canonicalTempRoot
+        || pathsOverlap(canonical, canonicalProjectDir)) {
+        return undefined;
+      }
+      return { dev: info.dev, ino: info.ino };
+    } catch {
+      return undefined;
+    }
+  }
+
+  function sameIdentity(path, identity) {
+    const current = inspectOwnedDirectory(path);
+    return Boolean(current && current.dev === identity.dev && current.ino === identity.ino);
+  }
+
+  function removeOwnedSync(path) {
+    const identity = ownedDirectories.get(path);
+    if (!identity) return false;
+    ownedDirectories.delete(path);
+    if (!sameIdentity(path, identity)) return false;
+    removeDirectorySync(path);
+    return true;
+  }
+
+  async function removeOwned(path) {
+    const identity = ownedDirectories.get(path);
+    if (!identity) return false;
+    ownedDirectories.delete(path);
+    if (!sameIdentity(path, identity)) return false;
+    await removeDirectory(path);
+    return true;
+  }
 
   function create(options) {
     const keys = options && Object.hasOwn(options, "initialState")
@@ -93,10 +172,12 @@ export function createManagedCodexRunnerFactory({
       || keys.some((key) => !Object.hasOwn(options, key))) {
       throw codedError("CODEX_RESEARCH_FAILED");
     }
-    const isolatedDir = makeTempDirectory();
-    if (!normalizedAbsolutePath(isolatedDir)) {
+    const isolatedDir = makeTempDirectory(join(canonicalTempRoot, TEMP_DIRECTORY_PREFIX));
+    const identity = inspectOwnedDirectory(isolatedDir);
+    if (!identity) {
       throw codedError("CODEX_ISOLATION_UNAVAILABLE");
     }
+    ownedDirectories.set(isolatedDir, identity);
     const isolatedFile = join(isolatedDir, "inside.txt");
     let session;
     try {
@@ -120,7 +201,7 @@ export function createManagedCodexRunnerFactory({
         throw codedError("CODEX_RESEARCH_FAILED");
       }
     } catch (error) {
-      try { removeDirectorySync(isolatedDir); } catch { /* preserve the original stable error */ }
+      try { removeOwnedSync(isolatedDir); } catch { /* preserve the original stable error */ }
       throw error;
     }
 
@@ -146,7 +227,7 @@ export function createManagedCodexRunnerFactory({
             result = await session.cancel();
           } finally {
             try {
-              await removeDirectory(isolatedDir);
+              await removeOwned(isolatedDir);
             } finally {
               managedSessions.delete(managed);
             }

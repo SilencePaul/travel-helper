@@ -10,6 +10,20 @@ import {
   runCli,
 } from "./cli.mjs";
 
+function trustedTempBoundary(overrides = {}) {
+  return {
+    trustedTempRoot: "/private/tmp",
+    canonicalizePath: (path) => path,
+    inspectPath: () => ({
+      dev: 10,
+      ino: 20,
+      isDirectory: () => true,
+      isSymbolicLink: () => false,
+    }),
+    ...overrides,
+  };
+}
+
 test("CLI accepts only app URL, Agent endpoint and port zero", () => {
   assert.deepEqual(parseCliArguments([
     "--app-url", "https://trip.example",
@@ -119,11 +133,12 @@ test("managed runner factory forwards Task7 options, isolates each session and c
   const events = [];
   const sessionOptions = [];
   const directories = [
-    "/private/tmp/travel-agent-task-a",
-    "/private/tmp/travel-agent-task-b",
-    "/private/tmp/travel-agent-task-c",
+    "/private/tmp/travel-research-task-a",
+    "/private/tmp/travel-research-task-b",
+    "/private/tmp/travel-research-task-c",
   ];
   const factory = createManagedCodexRunnerFactory({
+    ...trustedTempBoundary(),
     projectDir: "/safe/project",
     schemaPath: "/safe/project/schema.json",
     projectProbePath: "/safe/project/package.json",
@@ -156,22 +171,22 @@ test("managed runner factory forwards Task7 options, isolates each session and c
   assert.deepEqual(sessionOptions[1].initialState, { codexThreadId: "thread-1", correctionUsed: true, activeDurationMs: 100_000 });
   assert.notEqual(sessionOptions[0].isolatedDir, sessionOptions[1].isolatedDir);
   assert.deepEqual(sessionOptions.slice(0, 2).map((value) => value.probePaths), [
-    { isolatedFile: "/private/tmp/travel-agent-task-a/inside.txt", outsideFile: "/etc/hosts", projectFile: "/safe/project/package.json" },
-    { isolatedFile: "/private/tmp/travel-agent-task-b/inside.txt", outsideFile: "/etc/hosts", projectFile: "/safe/project/package.json" },
+    { isolatedFile: "/private/tmp/travel-research-task-a/inside.txt", outsideFile: "/etc/hosts", projectFile: "/safe/project/package.json" },
+    { isolatedFile: "/private/tmp/travel-research-task-b/inside.txt", outsideFile: "/etc/hosts", projectFile: "/safe/project/package.json" },
   ]);
   assert.equal(sessionOptions.every((value) => value.codexPath === "/Applications/ChatGPT.app/Contents/Resources/codex"), true);
 
   await first.cancel();
-  assert.equal(events.filter((event) => event === "rm:/private/tmp/travel-agent-task-a").length, 1);
+  assert.equal(events.filter((event) => event === "rm:/private/tmp/travel-research-task-a").length, 1);
   await first.cancel();
-  assert.equal(events.filter((event) => event === "rm:/private/tmp/travel-agent-task-a").length, 1);
+  assert.equal(events.filter((event) => event === "rm:/private/tmp/travel-research-task-a").length, 1);
 
   await factory.cleanupIdle();
-  assert.equal(events.filter((event) => event === "cancel:/private/tmp/travel-agent-task-b").length, 1);
-  assert.equal(events.filter((event) => event === "rm:/private/tmp/travel-agent-task-b").length, 1);
+  assert.equal(events.filter((event) => event === "cancel:/private/tmp/travel-research-task-b").length, 1);
+  assert.equal(events.filter((event) => event === "rm:/private/tmp/travel-research-task-b").length, 1);
   await factory.close();
-  assert.equal(events.filter((event) => event === "cancel:/private/tmp/travel-agent-task-c").length, 1);
-  assert.equal(events.filter((event) => event === "rm:/private/tmp/travel-agent-task-c").length, 1);
+  assert.equal(events.filter((event) => event === "cancel:/private/tmp/travel-research-task-c").length, 1);
+  assert.equal(events.filter((event) => event === "rm:/private/tmp/travel-research-task-c").length, 1);
   assert.throws(() => factory.create({ activeTimeoutMs: 1 }), /CODEX_RESEARCH_FAILED/);
   assert.equal(second.getState().activeDurationMs, 0);
   assert.equal(third.getState().activeDurationMs, 0);
@@ -180,24 +195,26 @@ test("managed runner factory forwards Task7 options, isolates each session and c
 test("managed runner factory removes a new directory if runner construction fails", () => {
   const removed = [];
   const factory = createManagedCodexRunnerFactory({
+    ...trustedTempBoundary(),
     projectDir: "/safe/project",
     schemaPath: "/safe/project/schema.json",
     projectProbePath: "/safe/project/package.json",
     outsideProbePath: "/etc/hosts",
     discoverCodex: () => "/Applications/ChatGPT.app/Contents/Resources/codex",
-    makeTempDirectory: () => "/private/tmp/travel-agent-task-failed",
+    makeTempDirectory: () => "/private/tmp/travel-research-task-failed",
     writeProbeFile() {},
     removeDirectory: async () => {},
     removeDirectorySync(path) { removed.push(path); },
     createRunner() { throw Object.assign(new Error("private construction detail"), { code: "CODEX_NOT_AVAILABLE" }); },
   });
   assert.throws(() => factory.create({ activeTimeoutMs: 1 }), { code: "CODEX_NOT_AVAILABLE" });
-  assert.deepEqual(removed, ["/private/tmp/travel-agent-task-failed"]);
+  assert.deepEqual(removed, ["/private/tmp/travel-research-task-failed"]);
 });
 
 test("managed runner factory never cleans an untrusted relative directory result", () => {
   const removed = [];
   const factory = createManagedCodexRunnerFactory({
+    ...trustedTempBoundary(),
     projectDir: "/safe/project",
     schemaPath: "/safe/project/schema.json",
     projectProbePath: "/safe/project/package.json",
@@ -211,6 +228,101 @@ test("managed runner factory never cleans an untrusted relative directory result
   });
 
   assert.throws(() => factory.create({ activeTimeoutMs: 1 }), { code: "CODEX_ISOLATION_UNAVAILABLE" });
+  assert.deepEqual(removed, []);
+});
+
+test("managed runner factory refuses unowned, colliding, project-related and symlink-escaped paths without deleting them", () => {
+  const unsafePaths = [
+    "/",
+    "/Users/owner",
+    "/private/tmp",
+    "/safe/project",
+    "/safe/project/child",
+    "/safe",
+    "relative-path",
+    "/private/tmp/travel-research-",
+    "/private/tmp/travel-researcher-collision",
+    "/private/tmp/travel-research-nested/child",
+  ];
+  for (const candidate of unsafePaths) {
+    const removed = [];
+    const factory = createManagedCodexRunnerFactory({
+      ...trustedTempBoundary(),
+      projectDir: "/safe/project",
+      schemaPath: "/safe/project/schema.json",
+      projectProbePath: "/safe/project/package.json",
+      outsideProbePath: "/etc/hosts",
+      makeTempDirectory: () => candidate,
+      writeProbeFile() { throw new Error("must not write"); },
+      removeDirectory: async (path) => { removed.push(path); },
+      removeDirectorySync(path) { removed.push(path); },
+      createRunner() { throw new Error("must not run"); },
+    });
+    assert.throws(() => factory.create({ activeTimeoutMs: 1 }), { code: "CODEX_ISOLATION_UNAVAILABLE" }, candidate);
+    assert.deepEqual(removed, [], candidate);
+  }
+
+  const removed = [];
+  const symlinkPath = "/private/tmp/travel-research-symlink";
+  const factory = createManagedCodexRunnerFactory({
+    ...trustedTempBoundary({
+      canonicalizePath: (path) => path === symlinkPath ? "/safe/project/escape" : path,
+      inspectPath: (path) => ({
+        dev: 10,
+        ino: 20,
+        isDirectory: () => path === symlinkPath,
+        isSymbolicLink: () => path === symlinkPath,
+      }),
+    }),
+    projectDir: "/safe/project",
+    schemaPath: "/safe/project/schema.json",
+    projectProbePath: "/safe/project/package.json",
+    outsideProbePath: "/etc/hosts",
+    makeTempDirectory: () => symlinkPath,
+    writeProbeFile() { throw new Error("must not write"); },
+    removeDirectory: async (path) => { removed.push(path); },
+    removeDirectorySync(path) { removed.push(path); },
+    createRunner() { throw new Error("must not run"); },
+  });
+  assert.throws(() => factory.create({ activeTimeoutMs: 1 }), { code: "CODEX_ISOLATION_UNAVAILABLE" });
+  assert.deepEqual(removed, []);
+});
+
+test("managed cleanup refuses a replaced directory identity and consumes ownership once", async () => {
+  const isolatedDir = "/private/tmp/travel-research-owned";
+  const removed = [];
+  let inspection = 0;
+  const factory = createManagedCodexRunnerFactory({
+    ...trustedTempBoundary({
+      inspectPath: () => ({
+        dev: 10,
+        ino: inspection++ === 0 ? 20 : 21,
+        isDirectory: () => true,
+        isSymbolicLink: () => false,
+      }),
+    }),
+    projectDir: "/safe/project",
+    schemaPath: "/safe/project/schema.json",
+    projectProbePath: "/safe/project/package.json",
+    outsideProbePath: "/etc/hosts",
+    discoverCodex: () => "/Applications/ChatGPT.app/Contents/Resources/codex",
+    makeTempDirectory: () => isolatedDir,
+    writeProbeFile() {},
+    removeDirectory: async (path) => { removed.push(path); },
+    removeDirectorySync(path) { removed.push(path); },
+    createRunner() {
+      return {
+        getState: () => ({}),
+        runInitial: async () => ({}),
+        resume: async () => ({}),
+        cancel: async () => true,
+      };
+    },
+  });
+
+  const session = factory.create({ activeTimeoutMs: 1 });
+  await session.cancel();
+  await session.cancel();
   assert.deepEqual(removed, []);
 });
 
