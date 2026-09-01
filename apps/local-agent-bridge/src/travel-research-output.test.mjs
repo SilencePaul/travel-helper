@@ -241,6 +241,8 @@ test("canonical URL inspection rejects encoded paths and search data before remo
     `https://hotel1.com/${encodedRawId}`,
     "https://hotel1.com/cHJl%20ZmVy%20ZW5j%20ZS1z%20ZWNy%20ZXQ=",
     "https://hotel1.com/cHJl.ZmVy.ZW5j.ZS1z.ZWNy.ZXQ=",
+    "https://hotel1.com/cHJl.ZmVy.ZW5j.ZS1z.ZWNy.ZXQ",
+    "https://hotel1.com/cHJl%20ZmVy%20ZW5j%20ZS1z%20ZWNy%20ZXQ",
     `https://hotel1.com/${layeredCredential}`,
     "https://hotel1.com/%68%74%74%70%73%3A%2F%2Fother.example.com%2Fa",
     "https://hotel1.com/rooms?access%5Ftoken=opaque-secret",
@@ -250,6 +252,8 @@ test("canonical URL inspection rejects encoded paths and search data before remo
     `https://hotel1.com/rooms?reference=${encodedRawId}`,
     `https://hotel1.com/rooms?reference=${layeredCredential}`,
     "https://hotel1.com/rooms?reference=cHJl.ZmVy.ZW5j.ZS1z.ZWNy.ZXQ=",
+    "https://hotel1.com/rooms?reference=cHJl.ZmVy.ZW5j.ZS1z.ZWNy.ZXQ",
+    "https://hotel1.com/rooms?reference=cHJl%20ZmVy%20ZW5j%20ZS1z%20ZWNy%20ZXQ",
     "https://hotel1.com/%ZZ",
     "https://hotel1.com/abc%2",
   ]) {
@@ -373,6 +377,8 @@ test("recursively rejects secret keys, token values, HTML, local paths, and over
     (value) => { value.candidates[0].recommendation.reason = layeredCredential; },
     (value) => { value.candidates[0].recommendation.reason = "access%5Ftoken%3Dopaque-secret%E0%A4%A"; },
     (value) => { value.candidates[0].recommendation.reason = "cHJl.ZmVy.ZW5j.ZS1z.ZWNy.ZXQ="; },
+    (value) => { value.candidates[0].recommendation.reason = "cHJl.ZmVy.ZW5j.ZS1z.ZWNy.ZXQ"; },
+    (value) => { value.candidates[0].recommendation.reason = "cHJl ZmVy ZW5j ZS1z ZWNy ZXQ"; },
     (value) => { value.candidates[0].recommendation.reason = "access   token=opaque-secret"; },
     (value) => { value.candidates[0].recommendation.reason = "access.token=opaque-secret"; },
     (value) => { value.candidates[0].evidence[0].facts["%70reference-raw-1%E0%A4%A"] = "opaque"; },
@@ -392,11 +398,13 @@ test("accepts visible safe prose without rewriting ignorable characters", async 
   const output = completedOutput();
   const longEnglish = "This hotel has a very convenient location and provides comfortable rooms with excellent service near popular attractions";
   output.candidates[0].recommendation.reason = longEnglish;
-  output.candidates[1].recommendation.reason = "This page explains an access token without a value";
+  const alignedEnglish = "This very nice room sits near many good food hubs with easy rail link plus calm city park each day";
+  output.candidates[1].recommendation.reason = alignedEnglish;
   output.candidates[0].evidence[0].sourceName = "行程\u200B说明";
 
   const result = await validateTravelResearchOutput(output, options());
   assert.equal(result.payload.candidates[0].recommendation.reason, longEnglish);
+  assert.equal(result.payload.candidates[1].recommendation.reason, alignedEnglish);
   assert.equal(result.payload.candidates[0].evidence[0].sourceName, "行程\u200B说明");
 });
 

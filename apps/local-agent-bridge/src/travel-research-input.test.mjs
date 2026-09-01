@@ -260,6 +260,8 @@ test("input inspection catches normalized, URI and encoded private or credential
     "access\u200Btoken=opaque-secret-value",
     "cHJl ZmVy ZW5j ZS1z ZWNy ZXQ=",
     "cHJl.ZmVy.ZW5j.ZS1z.ZWNy.ZXQ=",
+    "cHJl.ZmVy.ZW5j.ZS1z.ZWNy.ZXQ",
+    "cHJl ZmVy ZW5j ZS1z ZWNy ZXQ",
     "access   token=opaque-secret-value",
     "access.token=opaque-secret-value",
     "_https://alice:password@publicsite.com/private",
@@ -304,6 +306,7 @@ test("input inspection catches normalized, URI and encoded private or credential
     safeFragmentedBase64Like: "Q2hp bmVz ZVRy YXZl bElu Zm8=",
     safeExplanation: "This page explains an access token without a value",
     safeLongEnglish: "This hotel has a very convenient location and provides comfortable rooms with excellent service near popular attractions",
+    safeAlignedEnglish: "This very nice room sits near many good food hubs with easy rail link plus calm city park each day",
   };
   safeContext.workspace.preferences[0].freeText = { note: "普通说明" };
   const safeBuilt = await buildTravelResearchInput(safeContext, {
@@ -318,13 +321,18 @@ test("input inspection catches normalized, URI and encoded private or credential
   assert.equal(safeBuilt.codexInput.preferences[0].answers.safeFragmentedBase64Like, "Q2hp bmVz ZVRy YXZl bElu Zm8=");
   assert.equal(safeBuilt.codexInput.preferences[0].answers.safeExplanation, "This page explains an access token without a value");
   assert.equal(safeBuilt.codexInput.preferences[0].answers.safeLongEnglish, "This hotel has a very convenient location and provides comfortable rooms with excellent service near popular attractions");
+  assert.equal(safeBuilt.codexInput.preferences[0].answers.safeAlignedEnglish, "This very nice room sits near many good food hubs with easy rail link plus calm city park each day");
   assert.equal(safeBuilt.codexInput.preferences[0].answers["安全，键"], "保留原键");
 });
 
 test("inspection view expansion fails closed at bounded input and fragment limits", () => {
-  const fragmented = researchInspectionViews(`${"QUJD ".repeat(20)}RA==`);
-  assert.equal(fragmented.truncated, true);
-  assert.ok(fragmented.views.length <= 64);
+  const longCandidate = researchInspectionViews(`${"QUJD ".repeat(20)}RA==`);
+  assert.equal(longCandidate.truncated, false);
+  assert.ok(longCandidate.views.length <= 64);
+
+  const candidateFlood = researchInspectionViews("QUJD QUJD QUJD ! ".repeat(129));
+  assert.equal(candidateFlood.truncated, true);
+  assert.ok(candidateFlood.views.length <= 64);
 
   const oversized = researchInspectionViews("x".repeat((256 * 1_024) + 1));
   assert.equal(oversized.truncated, true);

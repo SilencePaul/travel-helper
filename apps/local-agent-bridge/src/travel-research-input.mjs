@@ -295,43 +295,55 @@ export function researchInspectionViews(value) {
       if (decoded !== current) pending.push({ pass: currentEntry.pass + 1, value: decoded });
     }
   }
-  function decodedFragmentToken(rawToken, pattern, maxLength, alignment) {
+  function decodedFragmentToken(rawToken, pattern, maxLength) {
     const candidates = rawToken.startsWith("/")
       ? [rawToken.replace(/^\/+/, ""), rawToken]
       : [rawToken];
     return candidates.find((candidate) => candidate.length > 0
       && candidate.length <= maxLength
-      && candidate.length % alignment === 0
       && pattern.test(candidate));
   }
-  function inspectJoinedFragments(view, pattern, minimumLength, maximumLength, alignment, decoder) {
+  function inspectJoinedFragments(view, pattern, minimumLength, maximumLength, decoder) {
     const run = [];
-    for (const match of view.matchAll(/[^.\s]+/gu)) {
-      const token = decodedFragmentToken(match[0], pattern, maximumLength, alignment);
-      if (!token) {
+    function inspectRun() {
+      if (run.length < 2) {
         run.length = 0;
+        return;
+      }
+      if (run.length > MAX_JOINED_FRAGMENTS) {
+        const fullCandidate = run.join("");
+        if (fullCandidate.length > maximumLength) {
+          truncated = true;
+        } else if (consumeCandidate()) {
+          const decoded = decoder(fullCandidate);
+          if (decoded !== undefined) addUriViews(decoded);
+        }
+        run.length = 0;
+        return;
+      }
+      for (let end = 1; end < run.length && !truncated; end += 1) {
+        let joined = run[end];
+        for (let start = end - 1; start >= 0; start -= 1) {
+          joined = `${run[start]}${joined}`;
+          if (joined.length > maximumLength) break;
+          if (joined.length < minimumLength) continue;
+          if (!consumeCandidate()) break;
+          const decoded = decoder(joined);
+          if (decoded !== undefined) addUriViews(decoded);
+        }
+      }
+      run.length = 0;
+    }
+    for (const match of view.matchAll(/[^.\s]+/gu)) {
+      const token = decodedFragmentToken(match[0], pattern, maximumLength);
+      if (!token) {
+        inspectRun();
         continue;
       }
       run.push(token);
-      if (run.length > MAX_JOINED_FRAGMENTS) {
-        const fullCandidate = run.join("");
-        if (!consumeCandidate()) return;
-        if (fullCandidate.length <= maximumLength && decoder(fullCandidate) !== undefined) {
-          truncated = true;
-          return;
-        }
-        run.shift();
-      }
-      let joined = token;
-      for (let start = run.length - 2; start >= 0; start -= 1) {
-        joined = `${run[start]}${joined}`;
-        if (joined.length > maximumLength) break;
-        if (joined.length < minimumLength) continue;
-        if (!consumeCandidate()) return;
-        const decoded = decoder(joined);
-        if (decoded !== undefined) addUriViews(decoded);
-      }
+      if (token.includes("=")) inspectRun();
     }
+    inspectRun();
   }
   addUriViews(value);
   for (let index = 0; index < views.length && !truncated; index += 1) {
@@ -350,9 +362,9 @@ export function researchInspectionViews(value) {
       if (decoded !== undefined) addUriViews(decoded);
     }
     if (truncated) break;
-    inspectJoinedFragments(view, BASE_FRAGMENT_PATTERN, 12, 4_098, 4, decodeBaseToken);
+    inspectJoinedFragments(view, BASE_FRAGMENT_PATTERN, 12, 4_098, decodeBaseToken);
     if (truncated) break;
-    inspectJoinedFragments(view, HEX_FRAGMENT_PATTERN, 16, 8_192, 2, decodeHexToken);
+    inspectJoinedFragments(view, HEX_FRAGMENT_PATTERN, 16, 8_192, decodeHexToken);
   }
   return Object.freeze({ views: Object.freeze(views), malformed, truncated });
 }
