@@ -311,6 +311,39 @@ describe("LocalAgentBridgeClient", () => {
       : ["reader", "cancel-start", "cancel-end"]);
   });
 
+  it.each(["mime", "length"])("times out an early %s rejection when body cancellation never settles", async (failure) => {
+    let cancelCount = 0;
+    let readerAcquired = false;
+    const response = {
+      status: 200,
+      headers: new Headers({
+        "content-type": failure === "mime" ? "text/plain" : "application/json",
+        ...(failure === "length" ? { "content-length": String(64 * 1_024 + 1) } : {}),
+      }),
+      body: {
+        cancel: () => {
+          cancelCount += 1;
+          return new Promise<void>(() => undefined);
+        },
+        getReader: () => {
+          readerAcquired = true;
+          throw new Error("body must not be read");
+        },
+      },
+    } as unknown as Response;
+    const fetch = vi.fn().mockResolvedValue(response);
+    const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch, timeoutMs: 5 });
+
+    const outcome = await Promise.race([
+      client.getResearchStatus().then(() => "resolved", (error: LocalAgentBridgeError) => error.code),
+      new Promise<string>((resolve) => globalThis.setTimeout(() => resolve("still-pending"), 30)),
+    ]);
+
+    expect(outcome).toBe("BRIDGE_UNAVAILABLE");
+    expect(cancelCount).toBe(1);
+    expect(readerAcquired).toBe(false);
+  });
+
   it("cancels streamed response reading as soon as the 64 KiB accumulation limit is exceeded", async () => {
     let readCount = 0;
     let cancelCount = 0;
@@ -368,6 +401,38 @@ describe("LocalAgentBridgeClient", () => {
     await expect(client.getResearchStatus()).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
     expect(readCount).toBe(1);
     expect(events).toEqual(["cancel-start", "cancel-end", "release"]);
+  });
+
+  it("times out a response error when reader cancellation never settles and still releases the lock", async () => {
+    let cancelCount = 0;
+    let releaseCount = 0;
+    const response = {
+      status: 200,
+      headers: new Headers({ "content-type": "application/json" }),
+      body: {
+        getReader() {
+          return {
+            read: async () => ({ done: false as const, value: new Uint8Array() }),
+            cancel: () => {
+              cancelCount += 1;
+              return new Promise<void>(() => undefined);
+            },
+            releaseLock: () => { releaseCount += 1; },
+          };
+        },
+      },
+    } as unknown as Response;
+    const fetch = vi.fn().mockResolvedValue(response);
+    const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch, timeoutMs: 5 });
+
+    const outcome = await Promise.race([
+      client.getResearchStatus().then(() => "resolved", (error: LocalAgentBridgeError) => error.code),
+      new Promise<string>((resolve) => globalThis.setTimeout(() => resolve("still-pending"), 30)),
+    ]);
+
+    expect(outcome).toBe("BRIDGE_UNAVAILABLE");
+    expect(cancelCount).toBe(1);
+    expect(releaseCount).toBe(1);
   });
 
   it("lets a 1 ms timeout interrupt a pathological stream of one-byte microtask chunks", async () => {

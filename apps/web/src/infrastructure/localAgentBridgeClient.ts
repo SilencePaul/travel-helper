@@ -119,21 +119,31 @@ function hasPrototypeKey(value: unknown): boolean {
   return false;
 }
 
-async function cancelResponseBody(response: unknown): Promise<void> {
+function settledCleanup(action: () => Promise<unknown> | unknown): Promise<void> {
   try {
-    const body = (response as { body?: { cancel?: () => Promise<unknown> | unknown } } | null)?.body;
-    if (body && typeof body.cancel === "function") await body.cancel();
+    return Promise.resolve(action()).then(() => undefined, () => undefined);
   } catch {
-    // Cleanup failures must not replace the stable request error.
+    return Promise.resolve();
   }
 }
 
-async function cancelReader(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+function cancelResponseBody(response: unknown, abortPromise?: Promise<never>): Promise<void> {
+  let body: { cancel?: () => Promise<unknown> | unknown } | undefined;
   try {
-    await reader.cancel();
+    body = (response as { body?: { cancel?: () => Promise<unknown> | unknown } } | null)?.body;
   } catch {
-    // Cleanup failures must not replace the stable request error.
+    return Promise.resolve();
   }
+  if (!body || typeof body.cancel !== "function") return Promise.resolve();
+  const cancellation = settledCleanup(() => body.cancel!());
+  return abortPromise === undefined ? Promise.resolve() : Promise.race([cancellation, abortPromise]);
+}
+
+function cancelReader(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  abortPromise: Promise<never>,
+): Promise<void> {
+  return Promise.race([settledCleanup(() => reader.cancel()), abortPromise]);
 }
 
 function strictLoopbackOrigin(value: string) {
@@ -209,7 +219,7 @@ export class LocalAgentBridgeClient implements LocalAgentBridge {
         const fetchPromise = Promise.resolve(this.fetch(`${this.origin}${path}`, init)).then(
           async (lateResponse) => {
             if (aborted) {
-              await cancelResponseBody(lateResponse);
+              void cancelResponseBody(lateResponse);
               throw new LocalAgentBridgeError("BRIDGE_UNAVAILABLE");
             }
             return lateResponse;
@@ -249,21 +259,21 @@ export class LocalAgentBridgeClient implements LocalAgentBridge {
       contentType = response.headers?.get("content-type") ?? null;
       declaredLength = response.headers?.get("content-length") ?? null;
     } catch {
-      await cancelResponseBody(response);
+      await cancelResponseBody(response, abortPromise);
       throw invalidBridgeResponse();
     }
     if (contentType === null || !JSON_CONTENT_TYPE.test(contentType)) {
-      await cancelResponseBody(response);
+      await cancelResponseBody(response, abortPromise);
       throw invalidBridgeResponse();
     }
     if (declaredLength !== null) {
       if (!/^\d+$/u.test(declaredLength)) {
-        await cancelResponseBody(response);
+        await cancelResponseBody(response, abortPromise);
         throw invalidBridgeResponse();
       }
       const parsedLength = Number(declaredLength);
       if (!Number.isSafeInteger(parsedLength) || parsedLength > MAX_RESPONSE_BYTES) {
-        await cancelResponseBody(response);
+        await cancelResponseBody(response, abortPromise);
         throw invalidBridgeResponse();
       }
     }
@@ -273,7 +283,7 @@ export class LocalAgentBridgeClient implements LocalAgentBridge {
     try {
       reader = response.body.getReader();
     } catch {
-      await cancelResponseBody(response);
+      await cancelResponseBody(response, abortPromise);
       throw invalidBridgeResponse();
     }
     const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -323,10 +333,11 @@ export class LocalAgentBridgeClient implements LocalAgentBridge {
         throw invalidBridgeResponse();
       }
     } finally {
-      if (!completed) {
-        await cancelReader(reader);
+      try {
+        if (!completed) await cancelReader(reader, abortPromise);
+      } finally {
+        try { reader.releaseLock(); } catch { /* a non-cooperative pending reader stays isolated */ }
       }
-      try { reader.releaseLock(); } catch { /* a non-cooperative pending reader stays isolated */ }
     }
 
     let parsed: unknown;
