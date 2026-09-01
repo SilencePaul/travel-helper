@@ -307,6 +307,117 @@ test("a lost claim response reuses the nonce, pairing code and signature", async
   assert.equal(bodies[0], bodies[1]);
 });
 
+test("claim replays one envelope across truncated and structurally invalid 2xx responses", async () => {
+  const bodies = [];
+  let attempts = 0;
+  const runtime = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.example.test/api/agent",
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      bodies.push(init.body);
+      attempts += 1;
+      if (attempts === 1) {
+        return new Response("{", { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (attempts === 2) {
+        return Response.json({ ok: true, data: claimedData("different-agent-run") });
+      }
+      return Response.json({ ok: true, data: claimedData(body.agentRunId, 9) });
+    },
+  });
+  runtime.prepare();
+
+  await assert.rejects(runtime.claim("agent-run-uncertain-claim"), /INVALID_AGENT_RESPONSE/);
+  await assert.rejects(runtime.claim("agent-run-uncertain-claim"), /INVALID_AGENT_RESPONSE/);
+  assert.equal(runtime.claimedRun, undefined);
+  await runtime.claim("agent-run-uncertain-claim");
+
+  assert.equal(bodies[0], bodies[1]);
+  assert.equal(bodies[1], bodies[2]);
+  assert.deepEqual(runtime.claimedRun, {
+    agentRunId: "agent-run-uncertain-claim",
+    expiresAt: FUTURE_EXPIRES_AT,
+    nextSequence: 9,
+  });
+});
+
+test("command replays one envelope across truncated and structurally invalid 2xx responses", async () => {
+  const commandBodies = [];
+  let attempts = 0;
+  const runtime = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.example.test/api/agent",
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.action === "claimAgentRun") {
+        return Response.json({ ok: true, data: claimedData(body.agentRunId, 6) });
+      }
+      commandBodies.push(init.body);
+      attempts += 1;
+      if (attempts === 1) {
+        throw Object.assign(new Error("socket reset"), { code: "ECONNRESET" });
+      }
+      if (attempts === 2) {
+        return new Response("{", { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (attempts === 3) {
+        return Response.json({ ok: true, action: body.action, data: {}, replayed: "yes" });
+      }
+      return Response.json({ ok: true, action: body.action, data: { accepted: true }, replayed: true });
+    },
+  });
+  runtime.prepare();
+  await runtime.claim("agent-run-uncertain-command");
+  const payload = { round: 1, candidates: [] };
+
+  await assert.rejects(runtime.command("submitProposalBatch", payload), /AGENT_TRANSPORT_UNAVAILABLE/);
+  assert.equal(runtime.nextSequence, 6);
+  await assert.rejects(runtime.command("submitProposalBatch", payload), /INVALID_AGENT_RESPONSE/);
+  assert.equal(runtime.nextSequence, 6);
+  await assert.rejects(runtime.command("submitProposalBatch", payload), /INVALID_AGENT_RESPONSE/);
+  assert.equal(runtime.nextSequence, 6);
+  await runtime.command("submitProposalBatch", payload);
+
+  assert.equal(commandBodies[0], commandBodies[1]);
+  assert.equal(commandBodies[1], commandBodies[2]);
+  assert.equal(commandBodies[2], commandBodies[3]);
+  assert.equal(runtime.nextSequence, 7);
+});
+
+test("revokeSelf replays one envelope across truncated and structurally invalid 2xx responses", async () => {
+  const revokeBodies = [];
+  let attempts = 0;
+  const runtime = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.example.test/api/agent",
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.action === "claimAgentRun") {
+        return Response.json({ ok: true, data: claimedData(body.agentRunId, 3) });
+      }
+      revokeBodies.push(init.body);
+      attempts += 1;
+      if (attempts === 1) {
+        return new Response("{", { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (attempts === 2) {
+        return Response.json({ ok: true, action: "submitProposalBatch", data: {} });
+      }
+      return Response.json({ ok: true, action: "revokeAgentRunSelf", data: { agentRunId: body.agentRunId } });
+    },
+  });
+  runtime.prepare();
+  await runtime.claim("agent-run-uncertain-revoke");
+
+  await assert.rejects(runtime.revokeSelf(), /INVALID_AGENT_RESPONSE/);
+  assert.equal(runtime.nextSequence, 3);
+  await assert.rejects(runtime.revokeSelf(), /INVALID_AGENT_RESPONSE/);
+  assert.equal(runtime.nextSequence, 3);
+  await runtime.revokeSelf();
+
+  assert.equal(revokeBodies[0], revokeBodies[1]);
+  assert.equal(revokeBodies[1], revokeBodies[2]);
+  assert.equal(runtime.nextSequence, 4);
+});
+
 test("runtime rejects non-HTTPS public transports", () => {
   assert.throws(() => new LocalAgentBridgeRuntime({ agentEndpoint: "http://api.example.test/api/agent" }), /INVALID_AGENT_ENDPOINT/);
   assert.throws(() => new LocalAgentBridgeRuntime({ agentEndpoint: "https://user:secret@api.example.test/api/agent" }), /INVALID_AGENT_ENDPOINT/);
@@ -356,7 +467,7 @@ test("prepare, claim and commands are mutually exclusive", async () => {
   await originalFetch;
 });
 
-test("definitive errors clear pending envelopes while transient failures retain them", async () => {
+test("explicit non-transient 4xx failures clear pending claim and command envelopes", async () => {
   const bodies = [];
   let claimAttempts = 0;
   let commandAttempts = 0;
@@ -385,6 +496,29 @@ test("definitive errors clear pending envelopes while transient failures retain 
   await runtime.command("submitProposalBatch", { proposals: [{ title: "fixed" }] });
   assert.notEqual(bodies[2], bodies[3]);
   assert.equal(runtime.nextSequence, 2);
+});
+
+test("an explicit ok-false protocol response clears the pending envelope even with a 2xx status", async () => {
+  const bodies = [];
+  let attempts = 0;
+  const runtime = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.example.test/api/agent",
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      bodies.push(init.body);
+      attempts += 1;
+      if (attempts === 1) {
+        return Response.json({ ok: false, error: "INVALID_AGENT_CLAIM" });
+      }
+      return Response.json({ ok: true, data: claimedData(body.agentRunId) });
+    },
+  });
+  runtime.prepare();
+
+  await assert.rejects(runtime.claim("agent-run-explicit-failure"), /INVALID_AGENT_CLAIM/);
+  await runtime.claim("agent-run-explicit-failure");
+
+  assert.notEqual(bodies[0], bodies[1]);
 });
 
 test("scope, response shape and sequence boundary are enforced before advancing", async () => {

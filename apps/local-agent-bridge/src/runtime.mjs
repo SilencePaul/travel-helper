@@ -9,11 +9,12 @@ import { canonicalJson } from "@travel/contracts/decision-research";
 
 const FIXED_AGENT_SCOPE = ["submitProposalBatch"];
 const CONTROL_ACTIONS = new Set(["getDecisionContext", "revokeAgentRunSelf"]);
+const BRIDGE_ERROR = Symbol("bridgeError");
 
 export { canonicalJson };
 
-function codedError(code, transient = false) {
-  return Object.assign(new Error(code), { code, transient });
+function codedError(code, uncertain = false) {
+  return Object.assign(new Error(code), { code, uncertain, [BRIDGE_ERROR]: true });
 }
 
 function validAgentEndpoint(value) {
@@ -134,20 +135,24 @@ export class LocalAgentBridgeRuntime {
       } catch {
         throw codedError(
           response.status >= 500 ? "AGENT_TRANSPORT_UNAVAILABLE" : "INVALID_AGENT_RESPONSE",
-          response.status >= 500,
+          true,
         );
       }
+      const explicitFailure = value
+        && typeof value === "object"
+        && value.ok === false
+        && typeof value.error === "string";
       if (!response.ok) {
-        const transient = response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500;
-        throw codedError(
-          transient ? "AGENT_TRANSPORT_UNAVAILABLE" : (typeof value?.error === "string" ? value.error : "INVALID_AGENT_RESPONSE"),
-          transient,
-        );
+        const unavailable = response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500;
+        if (unavailable) throw codedError("AGENT_TRANSPORT_UNAVAILABLE", true);
+        if (explicitFailure) throw codedError(value.error);
+        throw codedError("INVALID_AGENT_RESPONSE", true);
       }
-      if (!value || typeof value !== "object" || value.ok !== true) throw codedError("INVALID_AGENT_RESPONSE");
+      if (explicitFailure) throw codedError(value.error);
+      if (!value || typeof value !== "object" || value.ok !== true) throw codedError("INVALID_AGENT_RESPONSE", true);
       return value;
     } catch (error) {
-      if (error?.code) throw error;
+      if (error?.[BRIDGE_ERROR]) throw error;
       throw codedError("AGENT_TRANSPORT_UNAVAILABLE", true);
     } finally {
       clearTimeout(timeout);
@@ -186,13 +191,13 @@ export class LocalAgentBridgeRuntime {
         || !Number.isSafeInteger(data.nextSequence)
         || data.nextSequence < 1
       ) {
-        throw codedError("INVALID_AGENT_RESPONSE");
+        throw codedError("INVALID_AGENT_RESPONSE", true);
       }
       this.#claimed = { agentRunId, expiresAt: data.expiresAt, nextSequence: data.nextSequence };
       this.#pendingClaim = undefined;
       return { agentRunId, status: "claimed" };
     } catch (error) {
-      if (!error?.transient) this.#pendingClaim = undefined;
+      if (!error?.uncertain) this.#pendingClaim = undefined;
       throw error;
     } finally {
       this.#busy = undefined;
@@ -228,13 +233,13 @@ export class LocalAgentBridgeRuntime {
         || !Object.hasOwn(response, "data")
         || (Object.hasOwn(response, "replayed") && typeof response.replayed !== "boolean")
       ) {
-        throw codedError("INVALID_AGENT_RESPONSE");
+        throw codedError("INVALID_AGENT_RESPONSE", true);
       }
       this.#claimed.nextSequence += 1;
       this.#pendingCommand = undefined;
       return response;
     } catch (error) {
-      if (!error?.transient) this.#pendingCommand = undefined;
+      if (!error?.uncertain) this.#pendingCommand = undefined;
       throw error;
     } finally {
       this.#busy = undefined;
