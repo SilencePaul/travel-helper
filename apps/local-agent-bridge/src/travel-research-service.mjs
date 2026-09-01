@@ -150,6 +150,7 @@ export class TravelResearchService {
   #runner;
   #store;
   #notifier;
+  #guardedNotifier;
   #clock;
   #idGenerator;
   #setTimer;
@@ -181,6 +182,12 @@ export class TravelResearchService {
     this.#runner = runner;
     this.#store = store;
     this.#notifier = notifier;
+    this.#guardedNotifier = Object.freeze({
+      notifyOwnerAction: (transitionKey) => {
+        if (this.#cancelRequested) return false;
+        return this.#notifier.notifyOwnerAction(transitionKey);
+      },
+    });
     this.#clock = clock;
     this.#idGenerator = idGenerator;
     this.#setTimer = typeof clock.setTimeout === "function" ? clock.setTimeout.bind(clock) : setTimeout;
@@ -681,6 +688,7 @@ export class TravelResearchService {
     try {
       if (!this.#task.codexThreadId) throw codedError("CODEX_RESEARCH_FAILED");
       await this.#revokeStrict({ cleanup: true });
+      if (this.#cancelRequested) return this.#finishCancelled();
       const updatedAt = this.#now();
       const record = {
         researchTaskId: this.#task.researchTaskId,
@@ -696,7 +704,8 @@ export class TravelResearchService {
         startedAt: this.#task.startedAt,
         updatedAt,
       };
-      await this.#store.persistNeedsOwnerAction(record, this.#notifier);
+      await this.#store.persistNeedsOwnerAction(record, this.#guardedNotifier);
+      if (this.#cancelRequested) return this.#finishCancelled();
       this.#status = safeResearchStatus(record);
       return this.#status;
     } catch (error) {

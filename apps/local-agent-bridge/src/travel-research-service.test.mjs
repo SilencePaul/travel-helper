@@ -197,6 +197,7 @@ function fakeStore(events, initialState, options = {}) {
     async persistNeedsOwnerAction(value, notifier) {
       events.push("store.persistNeedsOwnerAction");
       state = structuredClone(value);
+      if (options.persistGate) await options.persistGate;
       await notifier?.notifyOwnerAction("transition-key");
       return structuredClone(state);
     },
@@ -993,6 +994,67 @@ test("validated owner-action output revokes before persistence and notification 
     assert.equal(revokeIndex < persistIndex && persistIndex < notifyIndex, true);
     assert.equal(JSON.stringify(status).includes("thread-"), false);
   }
+});
+
+test("cancel during owner-action revoke skips persistence and finishes cancelled", async () => {
+  let releaseRevoke;
+  const revokeGate = new Promise((resolve) => { releaseRevoke = resolve; });
+  const harness = createHarness({
+    scripts: [{
+      codexThreadId: "thread-cancel-block-revoke",
+      output: ownerAction("codex_auth_required"),
+      activeDurationMs: 10,
+    }],
+    transportOptions: { revokeGate },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+  const execution = harness.service.executeTravelResearch(request);
+  while (!harness.events.includes("transport.revokeSelf")) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  const cancellation = harness.service.cancelResearch({ researchTaskId: "research-task-1" });
+  releaseRevoke();
+  const [executeStatus, cancelStatus] = await Promise.all([execution, cancellation]);
+
+  assert.equal(executeStatus.phase, "cancelled");
+  assert.equal(cancelStatus.phase, "cancelled");
+  assert.equal(harness.events.includes("store.persistNeedsOwnerAction"), false);
+  assert.equal(harness.events.includes("notifier.notifyOwnerAction"), false);
+  assert.equal(harness.events.includes("store.clear"), true);
+  assert.equal(harness.store.state, undefined);
+});
+
+test("cancel during owner-action persistence clears the record and suppresses notification", async () => {
+  let releasePersist;
+  const persistGate = new Promise((resolve) => { releasePersist = resolve; });
+  const harness = createHarness({
+    scripts: [{
+      codexThreadId: "thread-cancel-block-persist",
+      output: ownerAction("codex_auth_required"),
+      activeDurationMs: 10,
+    }],
+    storeOptions: { persistGate },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+  const execution = harness.service.executeTravelResearch(request);
+  while (!harness.events.includes("store.persistNeedsOwnerAction")) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  const cancellation = harness.service.cancelResearch({ researchTaskId: "research-task-1" });
+  releasePersist();
+  const [executeStatus, cancelStatus] = await Promise.all([execution, cancellation]);
+
+  assert.equal(executeStatus.phase, "cancelled");
+  assert.equal(cancelStatus.phase, "cancelled");
+  assert.equal(harness.events.includes("notifier.notifyOwnerAction"), false);
+  assert.equal(harness.events.includes("store.clear"), true);
+  assert.equal(harness.store.state, undefined);
 });
 
 test("an issued owner-action revocation finishes reconciliation after the active deadline", async () => {
