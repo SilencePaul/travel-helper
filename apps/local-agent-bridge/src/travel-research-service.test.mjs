@@ -499,6 +499,83 @@ test("execute fails closed when recovery state cannot be loaded", async () => {
   assert.equal(harness.events.filter((event) => event === "store.load").length, 2);
 });
 
+test("a real runtime releases an unbound claim when execute fails before creating a task", async () => {
+  const harness = createHarness({
+    storeOptions: {
+      loadError: Object.assign(new Error("private store failure"), { code: "RESEARCH_STATE_UNAVAILABLE" }),
+    },
+    transportFactory(_events, runtimeClock) {
+      return new LocalAgentBridgeRuntime({
+        agentEndpoint: "https://api.public.org/api/agent",
+        now: runtimeClock,
+        fetch: async (_url, init) => {
+          const body = JSON.parse(init.body);
+          assert.equal(body.action, "claimAgentRun");
+          return Response.json({
+            ok: true,
+            data: {
+              agentRunId: body.agentRunId,
+              claimedAt: "2026-09-01T00:00:00.000Z",
+              expiresAt: "2026-09-01T00:15:00.000Z",
+              nextSequence: 1,
+            },
+          });
+        },
+      });
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+
+  await assert.rejects(harness.service.executeTravelResearch(request), { code: "CODEX_RESEARCH_FAILED" });
+
+  assert.equal(harness.transport.claimedRun, undefined);
+  assert.doesNotThrow(() => harness.service.prepare());
+});
+
+test("a pre-task execute failure preserves a real runtime claim with an uncertain signed envelope", async () => {
+  let contextAttempts = 0;
+  const harness = createHarness({
+    storeOptions: {
+      loadError: Object.assign(new Error("private store failure"), { code: "RESEARCH_STATE_UNAVAILABLE" }),
+    },
+    transportFactory(_events, runtimeClock) {
+      return new LocalAgentBridgeRuntime({
+        agentEndpoint: "https://api.public.org/api/agent",
+        now: runtimeClock,
+        fetch: async (_url, init) => {
+          const body = JSON.parse(init.body);
+          if (body.action === "claimAgentRun") {
+            return Response.json({
+              ok: true,
+              data: {
+                agentRunId: body.agentRunId,
+                claimedAt: "2026-09-01T00:00:00.000Z",
+                expiresAt: "2026-09-01T00:15:00.000Z",
+                nextSequence: 1,
+              },
+            });
+          }
+          assert.equal(body.action, "getDecisionContext");
+          contextAttempts += 1;
+          throw new TypeError("response lost");
+        },
+      });
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+  await assert.rejects(harness.transport.getDecisionContext(), { code: "AGENT_TRANSPORT_UNAVAILABLE", uncertain: true });
+
+  await assert.rejects(harness.service.executeTravelResearch(request), { code: "CODEX_RESEARCH_FAILED" });
+
+  assert.equal(contextAttempts, 1);
+  assert.equal(harness.transport.claimedRun?.agentRunId, request.agentRunId);
+  assert.throws(() => harness.service.prepare(), /BRIDGE_BUSY/);
+});
+
 test("service composes with a real createCodexRunner session contract", async () => {
   const output = completedOutput();
   const runnerFactory = (events) => ({

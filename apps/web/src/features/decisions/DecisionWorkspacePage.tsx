@@ -72,6 +72,7 @@ export function DecisionWorkspacePage({ repository, trip, member, agentBridge, o
   const [message, setMessage] = useState<MessageState>({ text: "正在读取共同决定…", role: "status", source: "load" });
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [researchRefreshPending, setResearchRefreshPending] = useState(false);
   const workspaceRef = useRef<DecisionWorkspace | undefined>(undefined);
   const draftRef = useRef<PreferenceDraft | undefined>(undefined);
   const preferenceFormRef = useRef<HTMLFormElement>(null);
@@ -156,6 +157,7 @@ export function DecisionWorkspacePage({ repository, trip, member, agentBridge, o
     setDraft(undefined);
     setBusy(false);
     setRefreshing(false);
+    setResearchRefreshPending(false);
     setMessage({ text: "正在读取共同决定…", role: "status", source: "load" });
 
     void repository.load(trip.id).then((loaded) => {
@@ -229,6 +231,16 @@ export function DecisionWorkspacePage({ repository, trip, member, agentBridge, o
       }
     }
   }, [acceptWorkspace, isCurrentScope, repository, scopeGeneration, trip.id]);
+
+  const queueResearchRefresh = useCallback(() => {
+    setResearchRefreshPending(true);
+  }, []);
+
+  useEffect(() => {
+    if (!researchRefreshPending || busy || refreshing || operationRef.current) return;
+    setResearchRefreshPending(false);
+    void retryRefresh();
+  }, [busy, refreshing, researchRefreshPending, retryRefresh]);
 
   const runCommand = useCallback(async (command: DecisionCommand, trigger?: HTMLElement) => {
     const generation = scopeGeneration;
@@ -373,7 +385,7 @@ export function DecisionWorkspacePage({ repository, trip, member, agentBridge, o
           bridge={agentBridge}
           trip={trip}
           workspace={workspace}
-          onResearchCompleted={retryRefresh}
+          onResearchCompleted={queueResearchRefresh}
           newIdempotencyKey={newIdempotencyKey}
         />
       : <DecisionAgentMemberNotice />}

@@ -1,7 +1,8 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { DecisionCommandResult, DecisionWorkspace, DecisionWorkspaceRepository, Member, Trip } from "@travel/contracts";
+import type { DecisionCommandResult, DecisionWorkspace, DecisionWorkspaceRepository, Member, ResearchStatus, Trip } from "@travel/contracts";
 import { expect, test, vi } from "vitest";
+import type { LocalAgentBridge } from "../../infrastructure/localAgentBridgeClient";
 import { DecisionWorkspacePage } from "./DecisionWorkspacePage";
 
 const trip = {
@@ -683,6 +684,40 @@ test("mounts the injected Codex research controls only for an administrator", as
 
   expect(await screen.findByRole("button", { name: "准备本机 Codex" })).toBeVisible();
   expect(screen.getByRole("heading", { name: "Codex 旅行研究" })).toBeVisible();
+});
+
+test("queues a Codex completion refresh while a page command is busy and runs it once after the command settles", async () => {
+  let finishCommand!: (result: DecisionCommandResult) => void;
+  let finishStatus!: (status: ResearchStatus) => void;
+  const command = vi.fn(() => new Promise<DecisionCommandResult>((resolve) => { finishCommand = resolve; }));
+  const refreshed = { ...workspace, workspaceCursor: "1" } satisfies DecisionWorkspace;
+  const repository = {
+    load: vi.fn().mockResolvedValue(workspace),
+    refresh: vi.fn().mockResolvedValue(refreshed),
+    command,
+    events: vi.fn(),
+    subscribe: vi.fn(() => () => undefined),
+  } satisfies DecisionWorkspaceRepository;
+  const agentBridge = {
+    prepare: vi.fn(), claim: vi.fn(), executeTravelResearch: vi.fn(),
+    getResearchStatus: vi.fn(() => new Promise<ResearchStatus>((resolve) => { finishStatus = resolve; })),
+    resumeTravelResearch: vi.fn(), cancelResearch: vi.fn(),
+  } satisfies LocalAgentBridge;
+  render(<DecisionWorkspacePage repository={repository} trip={trip} member={member} agentBridge={agentBridge} onBack={() => undefined} />);
+  await screen.findByRole("heading", { name: "两个人的偏好，正在汇成一张路线" });
+
+  await userEvent.click(screen.getByRole("button", { name: "保存我的偏好" }));
+  await act(async () => finishStatus({
+    phase: "completed",
+    researchTaskId: "research-task-completed-while-busy",
+    startedAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:01:00.000Z",
+  }));
+  expect(repository.refresh).not.toHaveBeenCalled();
+
+  await act(async () => finishCommand({ ok: false, error: "INVALID_REQUEST" }));
+
+  await waitFor(() => expect(repository.refresh).toHaveBeenCalledTimes(1));
 });
 
 test("普通成员只看静态说明且 Bridge 全部零调用，仍可反馈和共同确认", async () => {

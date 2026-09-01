@@ -69,6 +69,55 @@ function json(response, status, body, headers = {}) {
   response.end(value);
 }
 
+function trackClaimResponse(request, response, runtime, agentRunId) {
+  let claimed = false;
+  let disconnected = false;
+  let finished = false;
+  let released = false;
+  const cleanup = () => {
+    request.off("aborted", onDisconnected);
+    request.socket?.off("close", onDisconnected);
+    request.socket?.off("end", onDisconnected);
+    request.socket?.off("error", onDisconnected);
+    response.off("close", onDisconnected);
+    response.off("finish", onFinish);
+  };
+  const release = () => {
+    if (!claimed || released || finished) return;
+    released = true;
+    Promise.resolve()
+      .then(() => runtime.releaseUnboundClaim(agentRunId))
+      .catch(() => undefined);
+  };
+  const onDisconnected = () => {
+    if (finished) return;
+    disconnected = true;
+    release();
+  };
+  const onFinish = () => {
+    finished = true;
+    cleanup();
+  };
+  request.once("aborted", onDisconnected);
+  request.socket?.once("close", onDisconnected);
+  request.socket?.once("end", onDisconnected);
+  request.socket?.once("error", onDisconnected);
+  response.once("close", onDisconnected);
+  response.once("finish", onFinish);
+  return {
+    claimSucceeded() {
+      claimed = true;
+      if (request.aborted || request.socket?.destroyed || response.destroyed) disconnected = true;
+      if (disconnected) release();
+    },
+    failed() {
+      release();
+      cleanup();
+    },
+    get disconnected() { return disconnected; },
+  };
+}
+
 function readBody(request, maxBodyBytes, bodyTimeoutMs) {
   return new Promise((resolve, reject) => {
     let size = 0;
@@ -176,6 +225,7 @@ const ROUTES = new Map([
     validate: validClaim,
     invoke: (runtime, body) => runtime.claim(body.agentRunId),
     project: projectClaimed,
+    claim: true,
   }],
   [EXECUTE_PATH, {
     method: "POST",
@@ -250,7 +300,7 @@ export async function startLocalAgentBridge({
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes <= 0) throw codedError("INVALID_MAX_BODY_BYTES");
   if (!Number.isSafeInteger(bodyTimeoutMs) || bodyTimeoutMs <= 0) throw codedError("INVALID_BODY_TIMEOUT");
   const requiredMethods = [
-    "prepare", "claim", "executeTravelResearch", "getResearchStatus", "resumeTravelResearch", "cancelResearch",
+    "prepare", "claim", "releaseUnboundClaim", "executeTravelResearch", "getResearchStatus", "resumeTravelResearch", "cancelResearch",
   ];
   if (!runtime || requiredMethods.some((method) => typeof runtime[method] !== "function")) throw codedError("INVALID_RUNTIME");
   if (onPrepared !== undefined && typeof onPrepared !== "function") throw codedError("INVALID_PREPARE_CALLBACK");
@@ -331,6 +381,7 @@ export async function startLocalAgentBridge({
       json(response, 400, { ok: false, error: "INVALID_REQUEST" }, corsHeaders);
       return;
     }
+    let claimResponse;
     try {
       const source = await readBody(request, maxBodyBytes, bodyTimeoutMs);
       let body;
@@ -344,13 +395,19 @@ export async function startLocalAgentBridge({
         }
         if (!route.validate(body)) throw codedError("INVALID_REQUEST");
       }
+      if (route.claim) claimResponse = trackClaimResponse(request, response, runtime, body.agentRunId);
       const rawData = await route.invoke(runtime, body);
+      claimResponse?.claimSucceeded();
       const data = route.project(rawData, body);
       if (route.prepared) await onPrepared?.(data);
+      if (claimResponse?.disconnected) return;
       json(response, 200, { ok: true, data }, corsHeaders);
     } catch (error) {
+      claimResponse?.failed();
       const failure = requestError(error);
-      json(response, failure.status, { ok: false, error: failure.code }, corsHeaders);
+      if (!response.destroyed && !response.writableEnded) {
+        json(response, failure.status, { ok: false, error: failure.code }, corsHeaders);
+      }
     }
   });
 

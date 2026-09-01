@@ -123,6 +123,7 @@ test("CLI composes transport, managed runner, store, notifier and research servi
     "executeTravelResearch",
     "getResearchStatus",
     "prepare",
+    "releaseUnboundClaim",
     "resumeTravelResearch",
   ]);
   assert.equal(Object.hasOwn(bridgeOptions.runtime, "command"), false);

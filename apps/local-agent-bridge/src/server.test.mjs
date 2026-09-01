@@ -85,6 +85,26 @@ function rawSocketRequest(port, source) {
   });
 }
 
+function beginClaimRequest(port, agentRunId) {
+  const body = JSON.stringify({ agentRunId });
+  const activeSocket = connect({ host: "127.0.0.1", port });
+  const settled = new Promise((resolve) => {
+    activeSocket.on("connect", () => activeSocket.write([
+      "POST /v1/agent-runs/claim HTTP/1.1",
+      `Host: 127.0.0.1:${port}`,
+      `Origin: ${APP_ORIGIN}`,
+      "Content-Type: application/json",
+      `Content-Length: ${Buffer.byteLength(body)}`,
+      "Connection: keep-alive",
+      "",
+      body,
+    ].join("\r\n")));
+    activeSocket.on("close", resolve);
+    activeSocket.on("error", resolve);
+  });
+  return { destroy: () => activeSocket.resetAndDestroy(), settled };
+}
+
 function fakeRuntime(events = []) {
   return {
     prepare() {
@@ -99,6 +119,9 @@ function fakeRuntime(events = []) {
     async claim(agentRunId) {
       events.push(["claim", agentRunId]);
       return { agentRunId, status: "claimed", privateKey: "must-not-leak" };
+    },
+    releaseUnboundClaim() {
+      return true;
     },
     async executeTravelResearch(input) {
       events.push(["execute", input]);
@@ -125,6 +148,106 @@ function fakeRuntime(events = []) {
     },
   };
 }
+
+test("an aborted claim response releases the newly claimed local capability before the next prepare", async (context) => {
+  let releaseClaim;
+  let claimStarted;
+  const claimGate = new Promise((resolve) => { releaseClaim = resolve; });
+  const observedClaim = new Promise((resolve) => { claimStarted = resolve; });
+  let claimedAgentRunId;
+  let releaseCalls = 0;
+  let releaseObserved;
+  const observedRelease = new Promise((resolve) => { releaseObserved = resolve; });
+  const runtime = fakeRuntime();
+  runtime.claim = async (agentRunId) => {
+    claimStarted();
+    await claimGate;
+    claimedAgentRunId = agentRunId;
+    return { agentRunId, status: "claimed" };
+  };
+  runtime.releaseUnboundClaim = (agentRunId) => {
+    releaseCalls += 1;
+    releaseObserved();
+    if (claimedAgentRunId !== agentRunId) return false;
+    claimedAgentRunId = undefined;
+    return true;
+  };
+  runtime.prepare = () => {
+    if (claimedAgentRunId) throw Object.assign(new Error("busy"), { code: "CODEX_RESEARCH_FAILED" });
+    return fakeRuntime().prepare();
+  };
+  const bridge = await startLocalAgentBridge({ appUrl: APP_ORIGIN, runtime });
+  context.after(() => bridge.close());
+  const claim = beginClaimRequest(bridge.port, "agent-run-aborted");
+  await observedClaim;
+
+  claim.destroy();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  releaseClaim();
+  await claim.settled;
+  await Promise.race([
+    observedRelease,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("release not called")), 100)),
+  ]);
+
+  assert.equal(releaseCalls, 1);
+  const prepared = await rawRequest(bridge.port, { path: "/v1/agent-runs/prepare", body: "{}" });
+  assert.equal(prepared.status, 200);
+});
+
+test("a normally finished claim response never releases its local capability", async (context) => {
+  let releaseCalls = 0;
+  const runtime = fakeRuntime();
+  runtime.releaseUnboundClaim = () => { releaseCalls += 1; return true; };
+  const bridge = await startLocalAgentBridge({ appUrl: APP_ORIGIN, runtime });
+  context.after(() => bridge.close());
+
+  const claimed = await rawRequest(bridge.port, {
+    path: "/v1/agent-runs/claim",
+    body: JSON.stringify({ agentRunId: "agent-run-finished" }),
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(claimed.status, 200);
+  assert.equal(releaseCalls, 0);
+});
+
+test("an aborted claim absorbs release cleanup failures without an unhandled rejection", async (context) => {
+  let releaseClaim;
+  let claimStarted;
+  const claimGate = new Promise((resolve) => { releaseClaim = resolve; });
+  const observedClaim = new Promise((resolve) => { claimStarted = resolve; });
+  let releaseCalls = 0;
+  let releaseObserved;
+  const observedRelease = new Promise((resolve) => { releaseObserved = resolve; });
+  const runtime = fakeRuntime();
+  runtime.claim = async (agentRunId) => {
+    claimStarted();
+    await claimGate;
+    return { agentRunId, status: "claimed" };
+  };
+  runtime.releaseUnboundClaim = () => {
+    releaseCalls += 1;
+    releaseObserved();
+    throw new Error("private cleanup failure");
+  };
+  const bridge = await startLocalAgentBridge({ appUrl: APP_ORIGIN, runtime });
+  context.after(() => bridge.close());
+  const claim = beginClaimRequest(bridge.port, "agent-run-release-fails");
+  await observedClaim;
+
+  claim.destroy();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  releaseClaim();
+  await claim.settled;
+  await Promise.race([
+    observedRelease,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("release not called")), 100)),
+  ]);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(releaseCalls, 1);
+});
 
 test("the fixed route matrix dispatches only exact methods and strictly projects successful data", async (context) => {
   const events = [];

@@ -349,6 +349,11 @@ export class TravelResearchService {
     return this.#transport.claim(agentRunId);
   }
 
+  releaseUnboundClaim(agentRunId) {
+    if (typeof agentRunId !== "string" || agentRunId.length === 0) return false;
+    return this.#releaseRejectedOperation(agentRunId);
+  }
+
   #releaseRejectedOperation(agentRunId) {
     if (agentRunId === this.#operationAgentRunId || agentRunId === this.#task?.agentRunId) return false;
     return this.#transport.releaseUnboundClaim(agentRunId);
@@ -395,7 +400,6 @@ export class TravelResearchService {
     try {
       const existing = await this.getResearchStatus();
       if (existing.phase !== "idle" && !TERMINAL_PHASES.has(existing.phase)) {
-        this.#transport.releaseUnboundClaim(input.agentRunId);
         throw codedError("CODEX_RESEARCH_FAILED");
       }
       const startedAt = this.#now();
@@ -437,7 +441,14 @@ export class TravelResearchService {
       );
       return await this.#consume(result, "researching");
     } catch (error) {
-      if (!created) throw codedError(stableFailureCode(error));
+      if (!created) {
+        if (this.#task?.agentRunId !== input.agentRunId) {
+          try {
+            this.#transport.releaseUnboundClaim(input.agentRunId);
+          } catch { /* The original stable failure remains authoritative. */ }
+        }
+        throw codedError(stableFailureCode(error));
+      }
       if (error?.code === "CODEX_NOT_AUTHENTICATED") {
         const state = recoverableRunnerState(this.#session, error);
         if (state) {

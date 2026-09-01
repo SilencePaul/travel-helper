@@ -369,6 +369,7 @@ function fixedLoopbackRuntime(service, runner) {
   return Object.freeze({
     prepare: () => service.prepare(),
     claim: (agentRunId) => service.claim(agentRunId),
+    releaseUnboundClaim: (agentRunId) => service.releaseUnboundClaim(agentRunId),
     executeTravelResearch: (input) => finishRunnerSession(() => service.executeTravelResearch(input)),
     getResearchStatus: () => service.getResearchStatus(),
     resumeTravelResearch: (input) => finishRunnerSession(() => service.resumeTravelResearch(input)),
