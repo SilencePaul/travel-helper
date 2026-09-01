@@ -7,6 +7,7 @@ import { buildResearchTargetScopes } from "@travel/contracts/decision-research";
 
 import { buildTravelResearchInput } from "./travel-research-input.mjs";
 import { createCodexRunner } from "./codex-runner.mjs";
+import { LocalAgentBridgeRuntime } from "./runtime.mjs";
 import { safeResearchStatus, TravelResearchService } from "./travel-research-service.mjs";
 
 const PUBLIC_RESOLVER = async () => [{ address: "93.184.216.34", family: 4 }];
@@ -171,6 +172,7 @@ function fakeTransport(events, context, options = {}) {
       submittedPayloads.push(structuredClone(payload));
       submitAttempts += 1;
       if (options.submitGate) await options.submitGate;
+      if (options.submitError) throw options.submitError;
       if (options.uncertainSubmitOnce && submitAttempts === 1) {
         throw Object.assign(new Error("private network detail"), {
           code: "AGENT_TRANSPORT_UNAVAILABLE",
@@ -271,11 +273,14 @@ function createHarness({
   initialState,
   clock = createClock(),
   runnerFactory,
+  transportFactory,
 } = {}) {
   const events = [];
   const store = fakeStore(events, initialState);
   const notifier = { async notifyOwnerAction() { events.push("notifier.notifyOwnerAction"); return true; } };
-  const transport = fakeTransport(events, context, transportOptions);
+  const transport = transportFactory
+    ? transportFactory(events, clock)
+    : fakeTransport(events, context, transportOptions);
   const runner = runnerFactory ? runnerFactory(events) : fakeRunner(events, [...scripts]);
   const generated = ["research-task-1", "alias-salt-1234567890"];
   const service = new TravelResearchService({
@@ -395,6 +400,142 @@ test("service composes with a real createCodexRunner session contract", async ()
   assert.equal(harness.events.includes("runner.create:real"), true);
 });
 
+test("a real runtime keeps a pending signed submit alive past the service deadline and then completes revoke", async () => {
+  let releaseSubmit;
+  const submitGate = new Promise((resolve) => { releaseSubmit = resolve; });
+  const actions = [];
+  const submitBodies = [];
+  const clock = createControlledClock();
+  const harness = createHarness({
+    clock,
+    scripts: [{
+      codexThreadId: "thread-real-runtime",
+      output: completedOutput(),
+      activeDurationMs: 599_990,
+    }],
+    transportFactory(_events, runtimeClock) {
+      return new LocalAgentBridgeRuntime({
+        agentEndpoint: "https://api.public.org/api/agent",
+        now: runtimeClock,
+        fetch: async (_url, init) => {
+          const body = JSON.parse(init.body);
+          actions.push(body.action);
+          if (body.action === "claimAgentRun") {
+            return Response.json({
+              ok: true,
+              data: {
+                agentRunId: body.agentRunId,
+                claimedAt: "2026-09-01T00:00:00.000Z",
+                expiresAt: "2026-09-01T00:15:00.000Z",
+                nextSequence: 1,
+              },
+            });
+          }
+          if (body.action === "getDecisionContext") {
+            return Response.json({ ok: true, action: body.action, data: contextFixture() });
+          }
+          if (body.action === "submitProposalBatch") {
+            submitBodies.push(init.body);
+            await submitGate;
+            return Response.json({
+              ok: true,
+              action: body.action,
+              data: { count: body.payload.candidates.length },
+            });
+          }
+          assert.equal(body.action, "revokeAgentRunSelf");
+          return Response.json({
+            ok: true,
+            action: body.action,
+            data: { agentRunId: body.agentRunId, revokedAt: runtimeClock().toISOString() },
+          });
+        },
+      });
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+  const execution = harness.service.executeTravelResearch(request);
+  while (!actions.includes("submitProposalBatch")) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  const timerFired = clock.fireNext();
+  clock.advance(20);
+  await new Promise((resolve) => setImmediate(resolve));
+  const pendingStatus = await harness.service.getResearchStatus();
+  const claimedWhilePending = harness.transport.claimedRun;
+  releaseSubmit();
+  const status = await execution;
+
+  assert.equal(timerFired, false);
+  assert.equal(pendingStatus.phase, "writing");
+  assert.equal(claimedWhilePending.agentRunId, request.agentRunId);
+  assert.equal(status.phase, "completed");
+  assert.deepEqual(actions, [
+    "claimAgentRun",
+    "getDecisionContext",
+    "submitProposalBatch",
+    "revokeAgentRunSelf",
+  ]);
+  assert.equal(submitBodies.length, 1);
+  assert.equal(harness.transport.claimedRun, undefined);
+  assert.equal(harness.events.includes("store.clear"), true);
+});
+
+test("two uncertain real-runtime submits fail safely and keep the pending capability unreusable", async () => {
+  const actions = [];
+  const submitBodies = [];
+  const harness = createHarness({
+    scripts: [{
+      codexThreadId: "thread-real-runtime-uncertain",
+      output: completedOutput(),
+      activeDurationMs: 10_000,
+    }],
+    transportFactory(_events, runtimeClock) {
+      return new LocalAgentBridgeRuntime({
+        agentEndpoint: "https://api.public.org/api/agent",
+        now: runtimeClock,
+        fetch: async (_url, init) => {
+          const body = JSON.parse(init.body);
+          actions.push(body.action);
+          if (body.action === "claimAgentRun") {
+            return Response.json({
+              ok: true,
+              data: {
+                agentRunId: body.agentRunId,
+                claimedAt: "2026-09-01T00:00:00.000Z",
+                expiresAt: "2026-09-01T00:15:00.000Z",
+                nextSequence: 1,
+              },
+            });
+          }
+          if (body.action === "getDecisionContext") {
+            return Response.json({ ok: true, action: body.action, data: contextFixture() });
+          }
+          assert.equal(body.action, "submitProposalBatch");
+          submitBodies.push(init.body);
+          throw new TypeError("fake response lost");
+        },
+      });
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+
+  const status = await harness.service.executeTravelResearch(request);
+
+  assert.equal(status.phase, "failed");
+  assert.equal(status.errorCode, "AGENT_TRANSPORT_UNAVAILABLE");
+  assert.equal(submitBodies.length, 2);
+  assert.equal(submitBodies[0], submitBodies[1]);
+  assert.equal(actions.includes("revokeAgentRunSelf"), false);
+  assert.throws(() => harness.service.prepare(), { code: "BRIDGE_BUSY" });
+  assert.equal(harness.transport.claimedRun.agentRunId, request.agentRunId);
+});
+
 test("concurrent execute calls for the same AgentRun share one runner and one task", async () => {
   let release;
   const waiting = new Promise((resolve) => { release = resolve; });
@@ -464,7 +605,7 @@ test("validated owner-action output revokes before persistence and notification 
   }
 });
 
-test("owner-action revocation cannot outlive the active deadline or persist an unreconciled blocker", async () => {
+test("an issued owner-action revocation finishes reconciliation after the active deadline", async () => {
   let releaseRevoke;
   const revokeGate = new Promise((resolve) => { releaseRevoke = resolve; });
   const clock = createControlledClock();
@@ -486,13 +627,16 @@ test("owner-action revocation cannot outlive the active deadline or persist an u
   }
 
   const timerFired = clock.fireNext();
+  clock.advance(20);
+  await new Promise((resolve) => setImmediate(resolve));
+  const pendingStatus = await harness.service.getResearchStatus();
   releaseRevoke();
   const status = await execution;
 
-  assert.equal(timerFired, true);
-  assert.equal(status.phase, "failed");
-  assert.equal(status.errorCode, "CODEX_RESEARCH_TIMEOUT");
-  assert.equal(harness.events.includes("store.persistNeedsOwnerAction"), false);
+  assert.equal(timerFired, false);
+  assert.equal(pendingStatus.phase, "validating");
+  assert.equal(status.phase, "needs_owner_action");
+  assert.equal(harness.events.includes("store.persistNeedsOwnerAction"), true);
 });
 
 test("runner authentication loss becomes owner action only with a recoverable thread state", async () => {
@@ -787,7 +931,7 @@ test("active deadline bounds validation before cloud submission", async () => {
   assert.equal(harness.transport.submittedPayloads.length, 0);
 });
 
-test("active deadline bounds cloud submit and final revoke phases", async () => {
+test("issued cloud submit and final revoke requests reconcile after the active deadline", async () => {
   for (const phase of ["submit", "revoke"]) {
     let releaseGate;
     const gate = new Promise((resolve) => { releaseGate = resolve; });
@@ -812,12 +956,16 @@ test("active deadline bounds cloud submit and final revoke phases", async () => 
       await new Promise((resolve) => setImmediate(resolve));
     }
 
-    assert.equal(clock.fireNext(), true, phase);
+    const timerFired = clock.fireNext();
+    clock.advance(20);
+    await new Promise((resolve) => setImmediate(resolve));
+    const pendingStatus = await harness.service.getResearchStatus();
     releaseGate();
     const status = await execution;
 
-    assert.equal(status.phase, "failed", phase);
-    assert.equal(status.errorCode, "CODEX_RESEARCH_TIMEOUT", phase);
+    assert.equal(timerFired, false, phase);
+    assert.equal(pendingStatus.phase, "writing", phase);
+    assert.equal(status.phase, "completed", phase);
     assert.equal(harness.transport.submittedPayloads.length, 1, phase);
   }
 });
@@ -1010,6 +1158,42 @@ test("cancel stops an active runner before validation and produces no candidates
   assert.equal(cancelStatus.phase, "cancelled");
   assert.equal(harness.transport.submittedPayloads.length, 0);
   assert.equal(harness.store.state, undefined);
+});
+
+test("cancel during writing waits for terminal reconciliation and never reports cancelled", async () => {
+  for (const submitError of [undefined, Object.assign(new Error("private submit failure"), {
+    code: "AGENT_TRANSPORT_UNAVAILABLE",
+  })]) {
+    let releaseSubmit;
+    const submitGate = new Promise((resolve) => { releaseSubmit = resolve; });
+    const harness = createHarness({
+      scripts: [{
+        codexThreadId: "thread-writing-cancel",
+        output: completedOutput(),
+        activeDurationMs: 10_000,
+      }],
+      transportOptions: { submitGate, submitError },
+    });
+    const request = await targetRequest();
+    harness.service.prepare();
+    await harness.service.claim(request.agentRunId);
+    const execution = harness.service.executeTravelResearch(request);
+    while (!harness.events.includes("transport.submitProposalBatch")) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    const cancellation = harness.service.cancelResearch({ researchTaskId: "research-task-1" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal((await harness.service.getResearchStatus()).phase, "cancelling");
+    releaseSubmit();
+    const [executeStatus, cancelStatus] = await Promise.all([execution, cancellation]);
+
+    const expectedPhase = submitError ? "failed" : "completed";
+    assert.equal(executeStatus.phase, expectedPhase);
+    assert.equal(cancelStatus.phase, expectedPhase);
+    assert.notEqual(executeStatus.phase, "cancelled");
+    if (submitError) assert.equal(executeStatus.errorCode, "AGENT_TRANSPORT_UNAVAILABLE");
+  }
 });
 
 test("uncertain cloud submit retries an identical payload and writes only once logically", async () => {

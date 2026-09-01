@@ -126,6 +126,49 @@ test("submitProposalBatch is a fixed runtime wrapper and uncertain retries reuse
   assert.equal(JSON.parse(bodies[1]).payload.round, 1);
 });
 
+test("an aborted submit is uncertain and replays the byte-identical pending envelope", async () => {
+  const bodies = [];
+  let submitAttempts = 0;
+  const runtime = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.example.test/api/agent",
+    timeoutMs: 5,
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.action === "claimAgentRun") {
+        return Response.json({ ok: true, data: claimedData(body.agentRunId) });
+      }
+      bodies.push(init.body);
+      submitAttempts += 1;
+      if (submitAttempts === 1) {
+        return new Promise((_, reject) => {
+          init.signal.addEventListener("abort", () => {
+            reject(Object.assign(new Error("fake fetch aborted"), { name: "AbortError" }));
+          }, { once: true });
+        });
+      }
+      return Response.json({
+        ok: true,
+        action: "submitProposalBatch",
+        data: { count: 1 },
+        replayed: true,
+      });
+    },
+  });
+  runtime.prepare();
+  await runtime.claim("agent-run-aborted-submit");
+  const payload = { round: 1, candidates: [{ id: "safe" }] };
+
+  await assert.rejects(runtime.submitProposalBatch(payload), {
+    code: "AGENT_TRANSPORT_UNAVAILABLE",
+    uncertain: true,
+  });
+  const replay = await runtime.submitProposalBatch(structuredClone(payload));
+
+  assert.equal(replay.replayed, true);
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[0], bodies[1]);
+});
+
 test("prepare is idempotent only before claim work starts and never rotates active capability state", async () => {
   let claimAttempts = 0;
   const runtime = new LocalAgentBridgeRuntime({

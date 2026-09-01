@@ -641,12 +641,13 @@ export class TravelResearchService {
   }
 
   async #submitWithRetry(payload) {
+    this.#beginTerminalReconciliation();
     const submit = typeof this.#transport.submitProposalBatch === "function"
       ? () => this.#transport.submitProposalBatch(payload)
       : () => this.#transport.command("submitProposalBatch", payload);
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        return await this.#bounded(submit);
+        return await submit();
       } catch (error) {
         if (!error?.uncertain || attempt === 1) throw error;
       }
@@ -655,9 +656,10 @@ export class TravelResearchService {
   }
 
   async #revokeStrict() {
+    this.#beginTerminalReconciliation();
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        return await this.#bounded(() => this.#transport.revokeSelf());
+        return await this.#transport.revokeSelf();
       } catch (error) {
         if (!error?.uncertain || attempt === 1) throw error;
       }
@@ -665,10 +667,21 @@ export class TravelResearchService {
     throw codedError("AGENT_TRANSPORT_UNAVAILABLE", true);
   }
 
+  #beginTerminalReconciliation() {
+    if (this.#task.terminalStarted) return;
+    this.#assertClaimed(this.#task.agentRunId);
+    const deadline = this.#deadline(false);
+    if (deadline.delay <= 0) throw codedError(deadline.code);
+    this.#task.terminalStarted = true;
+  }
+
   async #handleOperationFailure(error, evidenceContinuation = false) {
-    if (this.#cancelRequested || error?.code === "CODEX_RESEARCH_CANCELLED") return this.#finishCancelled();
+    if (!this.#task.terminalStarted
+      && (this.#cancelRequested || error?.code === "CODEX_RESEARCH_CANCELLED")) {
+      return this.#finishCancelled();
+    }
     const code = stableFailureCode(error, evidenceContinuation);
-    return this.#finishFailure(code, code !== "AGENT_RUN_INACTIVE");
+    return this.#finishFailure(code, code !== "AGENT_RUN_INACTIVE" && !this.#task.terminalStarted);
   }
 
   async #finishFailure(code, revoke = true) {
@@ -692,15 +705,17 @@ export class TravelResearchService {
 
   async #finishCancelled() {
     if (this.#status.phase === "cancelled") return this.#status;
+    if (this.#task.agentRunId && this.#transport.claimedRun?.agentRunId === this.#task.agentRunId) {
+      try {
+        await this.#revokeStrict();
+      } catch (error) {
+        return this.#finishFailure(stableFailureCode(error), false);
+      }
+    }
     try {
       await this.#store.clear();
     } catch {
       return this.#finishFailure("CODEX_RESEARCH_FAILED", false);
-    }
-    try {
-      await this.#revokeStrict();
-    } catch {
-      // Cancellation revocation is best effort; the uncertain runtime capability remains fail-closed.
     }
     return this.#setStatus("cancelled", { errorCode: "CODEX_RESEARCH_CANCELLED" });
   }
