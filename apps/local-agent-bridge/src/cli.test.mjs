@@ -299,6 +299,103 @@ test("shutdown preserves owner-action state and propagates active cancellation f
   ]);
 });
 
+test("the real bridge and service-aware shutdown both retry a rejected runner cleanup end to end", async () => {
+  const events = [];
+  const signalTarget = new EventEmitter();
+  let closeAttempts = 0;
+  const runner = {
+    async cleanupIdle() {},
+    async close() {
+      closeAttempts += 1;
+      events.push(`runner.close:${closeAttempts}`);
+      if (closeAttempts === 1) throw Object.assign(new Error("busy"), { code: "EBUSY" });
+    },
+  };
+  const service = {
+    prepare() { return {}; },
+    async claim() { return {}; },
+    async executeTravelResearch() { return {}; },
+    async getResearchStatus() { events.push("service.status"); return { phase: "idle" }; },
+    async resumeTravelResearch() { return {}; },
+    async cancelResearch() { throw new Error("must not cancel idle research"); },
+  };
+  const bridge = await runCli([
+    "--app-url", "https://trip.example/decisions",
+    "--agent-endpoint", "https://api.example/api/agent",
+    "--port", "0",
+  ], { write() {} }, {
+    createTransport: () => ({}),
+    createRunnerFactory: () => runner,
+    createStore: () => ({}),
+    createNotifier: () => ({}),
+    createService: () => service,
+    signalTarget,
+  });
+
+  await assert.rejects(bridge.close(), { code: "EBUSY" });
+  await bridge.close();
+  assert.deepEqual(events, [
+    "service.status",
+    "runner.close:1",
+    "service.status",
+    "runner.close:2",
+  ]);
+});
+
+test("SIGTERM retries one transient cleanup failure and exits successfully", async () => {
+  const events = [];
+  const signalTarget = new EventEmitter();
+  let closeAttempts = 0;
+  const runner = {
+    async cleanupIdle() {},
+    async close() {
+      closeAttempts += 1;
+      events.push(`runner.close:${closeAttempts}`);
+      if (closeAttempts === 1) throw Object.assign(new Error("busy"), { code: "EBUSY" });
+    },
+  };
+  const service = {
+    prepare() { return {}; },
+    async claim() { return {}; },
+    async executeTravelResearch() { return {}; },
+    async getResearchStatus() { events.push("service.status"); return { phase: "idle" }; },
+    async resumeTravelResearch() { return {}; },
+    async cancelResearch() { throw new Error("must not cancel idle research"); },
+  };
+  let bridgeOptions;
+  let resolveExit;
+  const exited = new Promise((resolve) => { resolveExit = resolve; });
+  await runCli([
+    "--app-url", "https://trip.example/decisions",
+    "--agent-endpoint", "https://api.example/api/agent",
+    "--port", "0",
+  ], { write() {} }, {
+    createTransport: () => ({}),
+    createRunnerFactory: () => runner,
+    createStore: () => ({}),
+    createNotifier: () => ({}),
+    createService: () => service,
+    async startBridge(options) {
+      bridgeOptions = options;
+      return {
+        connectionUrl: "https://trip.example/#agentBridge=http://127.0.0.1:43120",
+        close: () => bridgeOptions.onClose(),
+      };
+    },
+    signalTarget,
+    setExitCode: resolveExit,
+  });
+
+  signalTarget.emit("SIGTERM");
+  assert.equal(await exited, 0);
+  assert.deepEqual(events, [
+    "service.status",
+    "runner.close:1",
+    "service.status",
+    "runner.close:2",
+  ]);
+});
+
 test("SIGTERM reports exit failure when active terminal reconciliation cannot finish", async () => {
   const events = [];
   const signalTarget = new EventEmitter();
@@ -343,7 +440,12 @@ test("SIGTERM reports exit failure when active terminal reconciliation cannot fi
 
   signalTarget.emit("SIGTERM");
   assert.equal(await exited, 1);
-  assert.deepEqual(events, ["service.cancel", "runner.close"]);
+  assert.deepEqual(events, [
+    "service.cancel",
+    "runner.close",
+    "service.cancel",
+    "runner.close",
+  ]);
 });
 
 test("managed runner factory forwards Task7 options, isolates each session and cleans on cancel and close", async () => {
@@ -598,6 +700,45 @@ test("cleanupIdle reports EBUSY, retains quarantined ownership and lets close re
   assert.deepEqual(removed, [quarantineDir, quarantineDir]);
 });
 
+test("a failed quarantine rename retains the reserved path for the close retry", async () => {
+  const isolatedDir = "/private/tmp/travel-research-rename-retry";
+  const quarantineDir = "/private/tmp/.travel-research-quarantine-rename-1";
+  const moved = [];
+  const removed = [];
+  let tokenCalls = 0;
+  let moveAttempts = 0;
+  const factory = createManagedCodexRunnerFactory({
+    ...trustedTempBoundary({ quarantineToken: () => `rename-${++tokenCalls}` }),
+    projectDir: "/safe/project",
+    schemaPath: "/safe/project/schema.json",
+    projectProbePath: "/safe/project/package.json",
+    outsideProbePath: "/etc/hosts",
+    discoverCodex: () => "/Applications/ChatGPT.app/Contents/Resources/codex",
+    makeTempDirectory: () => isolatedDir,
+    writeProbeFile() {},
+    moveDirectory: async (from, to) => {
+      moved.push([from, to]);
+      moveAttempts += 1;
+      if (moveAttempts === 1) throw Object.assign(new Error("busy"), { code: "EBUSY" });
+    },
+    removeDirectory: async (path) => { removed.push(path); },
+    removeDirectorySync() {},
+    createRunner: () => ({
+      getState: () => ({}),
+      runInitial: async () => ({}),
+      resume: async () => ({}),
+      cancel: async () => true,
+    }),
+  });
+
+  const session = factory.create({ activeTimeoutMs: 1 });
+  await assert.rejects(session.cancel(), { code: "EBUSY" });
+  await factory.close();
+  assert.equal(tokenCalls, 1);
+  assert.deepEqual(moved, [[isolatedDir, quarantineDir], [isolatedDir, quarantineDir]]);
+  assert.deepEqual(removed, [quarantineDir]);
+});
+
 test("managed cleanup never deletes when the quarantined inode differs after rename", async () => {
   const isolatedDir = "/private/tmp/travel-research-owned";
   const quarantineDir = "/private/tmp/.travel-research-quarantine-replaced";
@@ -636,6 +777,43 @@ test("managed cleanup never deletes when the quarantined inode differs after ren
   await assert.rejects(factory.close(), { code: "CODEX_ISOLATION_UNAVAILABLE" });
   assert.deepEqual(moved, [[isolatedDir, quarantineDir]]);
   assert.deepEqual(removed, []);
+});
+
+test("successful cleanup releases its quarantine path so a later owned session can reuse the token", async () => {
+  const directories = [
+    "/private/tmp/travel-research-first",
+    "/private/tmp/travel-research-second",
+  ];
+  const quarantineDir = "/private/tmp/.travel-research-quarantine-reusable";
+  const moved = [];
+  const removed = [];
+  const factory = createManagedCodexRunnerFactory({
+    ...trustedTempBoundary({ quarantineToken: () => "reusable" }),
+    projectDir: "/safe/project",
+    schemaPath: "/safe/project/schema.json",
+    projectProbePath: "/safe/project/package.json",
+    outsideProbePath: "/etc/hosts",
+    discoverCodex: () => "/Applications/ChatGPT.app/Contents/Resources/codex",
+    makeTempDirectory: () => directories.shift(),
+    writeProbeFile() {},
+    moveDirectory: async (from, to) => { moved.push([from, to]); },
+    removeDirectory: async (path) => { removed.push(path); },
+    removeDirectorySync() {},
+    createRunner: () => ({
+      getState: () => ({}),
+      runInitial: async () => ({}),
+      resume: async () => ({}),
+      cancel: async () => true,
+    }),
+  });
+
+  await factory.create({ activeTimeoutMs: 1 }).cancel();
+  await factory.create({ activeTimeoutMs: 1 }).cancel();
+  assert.deepEqual(moved, [
+    ["/private/tmp/travel-research-first", quarantineDir],
+    ["/private/tmp/travel-research-second", quarantineDir],
+  ]);
+  assert.deepEqual(removed, [quarantineDir, quarantineDir]);
 });
 
 test("the real CLI constructs components without running Codex or notifications, then exits on SIGTERM", async (context) => {

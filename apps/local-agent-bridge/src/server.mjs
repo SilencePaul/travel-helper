@@ -378,8 +378,12 @@ export async function startLocalAgentBridge({
       const cleanup = Promise.resolve()
         .then(() => runtime.close?.())
         .then(() => onClose?.());
-      closePromise = Promise.all([serverClose, cleanup]).then(() => undefined);
-      return closePromise;
+      const attempt = Promise.all([serverClose, cleanup]).then(() => undefined);
+      closePromise = attempt;
+      attempt.catch(() => {
+        if (closePromise === attempt) closePromise = undefined;
+      });
+      return attempt;
     },
   };
 }

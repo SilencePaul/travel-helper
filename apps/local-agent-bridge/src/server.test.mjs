@@ -451,3 +451,21 @@ test("startup rejects unsafe settings and close tears down runtime exactly once"
   await Promise.all([bridge.close(), bridge.close(), bridge.close()]);
   assert.equal(closeCalls, 1);
 });
+
+test("a rejected close is not cached and retries cleanup after the server has stopped listening", async () => {
+  const events = [];
+  let closeAttempts = 0;
+  const bridge = await startLocalAgentBridge({
+    appUrl: APP_ORIGIN,
+    runtime: fakeRuntime(),
+    async onClose() {
+      closeAttempts += 1;
+      events.push(`close:${closeAttempts}`);
+      if (closeAttempts === 1) throw Object.assign(new Error("busy"), { code: "EBUSY" });
+    },
+  });
+
+  await assert.rejects(bridge.close(), { code: "EBUSY" });
+  await bridge.close();
+  assert.deepEqual(events, ["close:1", "close:2"]);
+});

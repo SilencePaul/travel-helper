@@ -176,7 +176,8 @@ export function createManagedCodexRunnerFactory({
     return Boolean(current && current.dev === record.identity.dev && current.ino === record.identity.ino);
   }
 
-  function nextQuarantinePath() {
+  function nextQuarantinePath(record) {
+    if (record.quarantinePath) return record.quarantinePath;
     const token = quarantineToken();
     if (typeof token !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/u.test(token)) {
       throw codedError("CODEX_ISOLATION_UNAVAILABLE");
@@ -184,6 +185,7 @@ export function createManagedCodexRunnerFactory({
     const path = join(canonicalTempRoot, `${QUARANTINE_DIRECTORY_PREFIX}${token}`);
     if (quarantinePaths.has(path)) throw codedError("CODEX_ISOLATION_UNAVAILABLE");
     quarantinePaths.add(path);
+    record.quarantinePath = path;
     return path;
   }
 
@@ -196,7 +198,7 @@ export function createManagedCodexRunnerFactory({
   function quarantineOwnedSync(record) {
     if (record.quarantined) return;
     requireOwnedIdentity(record);
-    const quarantinePath = nextQuarantinePath();
+    const quarantinePath = nextQuarantinePath(record);
     moveDirectorySync(record.path, quarantinePath);
     record.path = quarantinePath;
     record.quarantined = true;
@@ -206,7 +208,7 @@ export function createManagedCodexRunnerFactory({
   async function quarantineOwned(record) {
     if (record.quarantined) return;
     requireOwnedIdentity(record);
-    const quarantinePath = nextQuarantinePath();
+    const quarantinePath = nextQuarantinePath(record);
     await moveDirectory(record.path, quarantinePath);
     record.path = quarantinePath;
     record.quarantined = true;
@@ -219,6 +221,8 @@ export function createManagedCodexRunnerFactory({
     requireOwnedIdentity(record);
     removeDirectorySync(record.path);
     ownedDirectories.delete(record);
+    quarantinePaths.delete(record.path);
+    record.quarantinePath = undefined;
     return true;
   }
 
@@ -228,6 +232,8 @@ export function createManagedCodexRunnerFactory({
     requireOwnedIdentity(record);
     await removeDirectory(record.path);
     ownedDirectories.delete(record);
+    quarantinePaths.delete(record.path);
+    record.quarantinePath = undefined;
     return true;
   }
 
@@ -245,7 +251,13 @@ export function createManagedCodexRunnerFactory({
     if (!identity) {
       throw codedError("CODEX_ISOLATION_UNAVAILABLE");
     }
-    const ownership = { path: isolatedDir, identity, quarantined: false, managed: undefined };
+    const ownership = {
+      path: isolatedDir,
+      identity,
+      quarantined: false,
+      quarantinePath: undefined,
+      managed: undefined,
+    };
     ownedDirectories.add(ownership);
     const isolatedFile = join(isolatedDir, "inside.txt");
     let session;
@@ -368,7 +380,7 @@ function createServiceAwareShutdown(service, runner) {
   let shutdownPromise;
   return () => {
     if (shutdownPromise) return shutdownPromise;
-    shutdownPromise = Promise.resolve().then(async () => {
+    const attempt = Promise.resolve().then(async () => {
       let shutdownError;
       try {
         const status = await service.getResearchStatus();
@@ -395,7 +407,11 @@ function createServiceAwareShutdown(service, runner) {
       }
       if (shutdownError) throw shutdownError;
     });
-    return shutdownPromise;
+    shutdownPromise = attempt;
+    attempt.catch(() => {
+      if (shutdownPromise === attempt) shutdownPromise = undefined;
+    });
+    return attempt;
   };
 }
 
@@ -468,9 +484,18 @@ export async function runCli(argv = process.argv.slice(2), output = process.stdo
     signalTarget.off?.("SIGTERM", close);
   };
   const close = () => {
-    closing ??= bridge.close()
-      .then(() => { setExitCode(0); })
-      .catch(() => { setExitCode(1); })
+    closing ??= (async () => {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          await bridge.close();
+          setExitCode(0);
+          return;
+        } catch {
+          // Retry once so transient owned-directory cleanup failures remain recoverable.
+        }
+      }
+      setExitCode(1);
+    })()
       .finally(removeSignalHandlers);
     return closing;
   };
