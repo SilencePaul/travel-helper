@@ -6,8 +6,11 @@ export const NOTIFICATION_BODY = "请打开共同决定页面查看";
 const OSASCRIPT_PATH = "/usr/bin/osascript";
 const NOTIFICATION_SCRIPT = `display notification "${NOTIFICATION_BODY}" with title "${NOTIFICATION_TITLE}"`;
 
-export function createMacosNotifier({ spawnImpl = spawn } = {}) {
+export function createMacosNotifier({ spawnImpl = spawn, timeoutMs = 5_000 } = {}) {
   if (typeof spawnImpl !== "function") throw new TypeError("INVALID_NOTIFIER");
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 60_000) {
+    throw new TypeError("INVALID_NOTIFIER");
+  }
   const attemptedTransitions = new Set();
 
   async function notifyOwnerAction(transitionKey) {
@@ -30,13 +33,24 @@ export function createMacosNotifier({ spawnImpl = spawn } = {}) {
 
     return new Promise((resolve) => {
       let settled = false;
+      let timer;
       const finish = (result) => {
         if (settled) return;
         settled = true;
+        if (timer !== undefined) clearTimeout(timer);
         resolve(result);
       };
       child.once("error", () => finish(false));
       child.once("close", (code) => finish(code === 0));
+      timer = setTimeout(() => {
+        try {
+          child.kill?.("SIGTERM");
+        } catch {
+          // A failed termination attempt must not keep notification pending.
+        }
+        finish(false);
+      }, timeoutMs);
+      timer.unref?.();
     });
   }
 
