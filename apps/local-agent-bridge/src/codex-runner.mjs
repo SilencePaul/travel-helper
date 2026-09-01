@@ -353,22 +353,26 @@ function parseJsonLines(stdout) {
       webSearchSeen = true;
       continue;
     }
-    if (event.type === "item.completed" && Object.hasOwn(event, "item")
-      && event.item && typeof event.item === "object" && !Array.isArray(event.item)
-      && Object.hasOwn(event.item, "type") && event.item.type === "web_search") {
-      webSearchSeen = true;
-      continue;
-    }
-    if (event.type === "item.completed" && Object.hasOwn(event, "item")
-      && event.item && typeof event.item === "object" && !Array.isArray(event.item)
-      && Object.hasOwn(event.item, "type") && event.item.type === "agent_message") {
-      if (!webSearchSeen || output !== undefined || !Object.hasOwn(event.item, "text") || typeof event.item.text !== "string") {
+    if (event.type === "item.started" || event.type === "item.updated" || event.type === "item.completed") {
+      if (!Object.hasOwn(event, "item")
+        || !event.item || typeof event.item !== "object" || Array.isArray(event.item)
+        || !Object.hasOwn(event.item, "type") || typeof event.item.type !== "string") {
         throw codedError("CODEX_OUTPUT_INVALID");
       }
-      output = parseStructuredText(event.item.text);
-      if (!output) throw codedError("CODEX_OUTPUT_INVALID");
-      state = "output";
-      continue;
+      if (event.item.type === "reasoning") continue;
+      if (event.item.type === "web_search") {
+        if (event.type === "item.completed") webSearchSeen = true;
+        continue;
+      }
+      if (event.item.type === "agent_message" && event.type === "item.completed") {
+        if (!webSearchSeen || output !== undefined || !Object.hasOwn(event.item, "text") || typeof event.item.text !== "string") {
+          throw codedError("CODEX_OUTPUT_INVALID");
+        }
+        output = parseStructuredText(event.item.text);
+        if (!output) throw codedError("CODEX_OUTPUT_INVALID");
+        state = "output";
+        continue;
+      }
     }
     throw codedError("CODEX_OUTPUT_INVALID");
   }

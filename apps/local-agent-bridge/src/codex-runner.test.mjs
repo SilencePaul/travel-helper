@@ -607,6 +607,11 @@ test(`JSONL accepts the verified Codex ${CODEX_CLI_FIXTURE_VERSION} event sequen
       active_permission_profile: { id: "travel_research", extends: "default" },
     },
     { type: "turn.started", turn_id: "turn-1" },
+    { type: "item.started", item: { id: "reasoning-1", type: "reasoning", text: "researching" } },
+    { type: "item.updated", item: { id: "reasoning-1", type: "reasoning", text: "researching sources" } },
+    { type: "item.completed", item: { id: "reasoning-1", type: "reasoning", text: "research plan complete" } },
+    { type: "item.started", item: { id: "search-1", type: "web_search", query: "hotel" } },
+    { type: "item.updated", item: { id: "search-1", type: "web_search", query: "hotel near station" } },
     { type: "item.completed", item: { id: "search-1", type: "web_search", query: "hotel" } },
     { type: "item.completed", item: { id: "message-1", type: "agent_message", text: JSON.stringify(VALID_OUTPUT) } },
     { type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } },
@@ -635,6 +640,12 @@ test(`JSONL rejects non-allowlisted Codex ${CODEX_CLI_FIXTURE_VERSION} research 
     { type: "config_changed", key: "approval_policy", value: "on-request" },
     { type: "item.failed", item: { type: "web_search" } },
     { type: "item.aborted", item: { type: "web_search" } },
+    { type: "item.started", item: { type: "command_execution" } },
+    { type: "item.updated", item: { type: "file_change" } },
+    { type: "item.completed", item: { type: "mcp_tool_call" } },
+    { type: "item.started", item: { type: "agent_message", text: JSON.stringify(VALID_OUTPUT) } },
+    { type: "item.updated", item: { type: "agent_message", text: JSON.stringify(VALID_OUTPUT) } },
+    { type: "item.created", item: { type: "reasoning" } },
     { type: "turn.failed", error: { message: "failed" } },
     { type: "turn.aborted" },
     { type: "future.unknown", payload: {} },
@@ -642,6 +653,26 @@ test(`JSONL rejects non-allowlisted Codex ${CODEX_CLI_FIXTURE_VERSION} research 
 
   for (const rejectedEvent of rejectedEvents) {
     const fake = createFakeSpawn([{ stdout: rawJsonl([...prefix, rejectedEvent, ...suffix]) }]);
+    await assert.rejects(makeRunner(fake).runInitial({ prompt: "private" }), { code: "CODEX_OUTPUT_INVALID" });
+  }
+});
+
+test("JSONL web-search started or updated events do not prove a successful search", async () => {
+  const prefix = [
+    { type: "thread.started", thread_id: "thread-1" },
+    { type: "session_configured", session_id: "thread-1", approval_policy: "never", active_permission_profile: { id: "travel_research" } },
+    { type: "turn.started" },
+  ];
+  const outputAndDone = [
+    { type: "item.completed", item: { type: "agent_message", text: JSON.stringify(VALID_OUTPUT) } },
+    { type: "turn.completed" },
+  ];
+
+  for (const webEvent of [
+    { type: "item.started", item: { type: "web_search", query: "hotel" } },
+    { type: "item.updated", item: { type: "web_search", query: "hotel" } },
+  ]) {
+    const fake = createFakeSpawn([{ stdout: rawJsonl([...prefix, webEvent, ...outputAndDone]) }]);
     await assert.rejects(makeRunner(fake).runInitial({ prompt: "private" }), { code: "CODEX_OUTPUT_INVALID" });
   }
 });
