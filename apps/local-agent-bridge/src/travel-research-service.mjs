@@ -137,7 +137,7 @@ function recoverableRunnerState(session, error, result) {
 function stableFailureCode(error, evidenceContinuation = false) {
   if (evidenceContinuation && error?.code === "CODEX_RESEARCH_TIMEOUT") return "CODEX_INSUFFICIENT_EVIDENCE";
   if (error?.code === "AGENT_RUN_EXPIRED" || error?.code === "BRIDGE_NOT_CLAIMED"
-    || error?.code === "AGENT_RUN_MISMATCH") return "AGENT_RUN_INACTIVE";
+    || error?.code === "AGENT_RUN_MISMATCH" || error?.code === "INVALID_AGENT_CLAIM") return "AGENT_RUN_INACTIVE";
   if (FAILURE_CODES.has(error?.code)) return error.code;
   if (error?.code === "CODEX_NOT_AUTHENTICATED") return "CODEX_RESEARCH_FAILED";
   if (error?.code === "RESEARCH_STATE_UNAVAILABLE" || error?.code === "RESEARCH_STATE_INVALID"
@@ -354,10 +354,10 @@ export class TravelResearchService {
       || typeof input.disclosureFingerprint !== "string" || !/^[a-f0-9]{64}$/u.test(input.disclosureFingerprint)) {
       return Promise.reject(codedError("CODEX_RESEARCH_FAILED"));
     }
-    const key = JSON.stringify(input);
+    const key = `execute:${JSON.stringify(input)}`;
     if (this.#inflight) {
       if (this.#operationKey === key) return this.#inflight;
-      return Promise.resolve(safeResearchStatus(this.#status));
+      return Promise.reject(codedError("BRIDGE_BUSY"));
     }
     let operation;
     operation = this.#execute(input).finally(() => {
@@ -453,15 +453,18 @@ export class TravelResearchService {
     return this.#status;
   }
 
-  async resumeTravelResearch(input) {
+  resumeTravelResearch(input) {
     if (!exactKeys(input, ["agentRunId", "researchTaskId", "resumeAction"])
       || typeof input.agentRunId !== "string" || input.agentRunId.length === 0
       || typeof input.researchTaskId !== "string" || input.researchTaskId.length === 0
       || !RESUME_ACTIONS.has(input.resumeAction)) {
-      throw codedError("CODEX_RESEARCH_FAILED");
+      return Promise.reject(codedError("CODEX_RESEARCH_FAILED"));
     }
-    if (this.#inflight) return safeResearchStatus(this.#status);
-    const operationKey = JSON.stringify(input);
+    const operationKey = `resume:${JSON.stringify(input)}`;
+    if (this.#inflight) {
+      if (this.#operationKey === operationKey) return this.#inflight;
+      return Promise.reject(codedError("BRIDGE_BUSY"));
+    }
     let operation;
     operation = this.#resume(input).finally(() => {
       if (this.#inflight === operation) {

@@ -769,6 +769,47 @@ test("a definitive self-revoke failure clears its pending envelope", async () =>
   assert.equal(runtime.nextSequence, undefined);
 });
 
+test("a definitive inactive self-revoke clears the claimed capability and allows a fresh prepare", async () => {
+  const runtime = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.example.test/api/agent",
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.action === "claimAgentRun") {
+        return Response.json({ ok: true, data: claimedData(body.agentRunId, 2) });
+      }
+      return Response.json({ ok: false, error: "INVALID_AGENT_CLAIM" }, { status: 403 });
+    },
+  });
+  const firstMaterial = runtime.prepare();
+  await runtime.claim("agent-run-externally-revoked");
+
+  await assert.rejects(runtime.revokeSelf(), { code: "INVALID_AGENT_CLAIM", uncertain: false });
+
+  assert.equal(runtime.claimedRun, undefined);
+  const nextMaterial = runtime.prepare();
+  assert.notDeepEqual(nextMaterial, firstMaterial);
+});
+
+test("an uncertain self-revoke failure retains the claimed capability and stays busy", async () => {
+  const runtime = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.example.test/api/agent",
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.action === "claimAgentRun") {
+        return Response.json({ ok: true, data: claimedData(body.agentRunId, 2) });
+      }
+      throw new TypeError("response lost");
+    },
+  });
+  runtime.prepare();
+  await runtime.claim("agent-run-uncertain-revoke");
+
+  await assert.rejects(runtime.revokeSelf(), { code: "AGENT_TRANSPORT_UNAVAILABLE", uncertain: true });
+
+  assert.equal(runtime.claimedRun?.agentRunId, "agent-run-uncertain-revoke");
+  assert.throws(() => runtime.prepare(), { code: "BRIDGE_BUSY" });
+});
+
 test("invalid self-revoke success data keeps the capability and pending envelope intact", async () => {
   const cases = [
     ["empty data", {}],

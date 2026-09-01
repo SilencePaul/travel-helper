@@ -477,7 +477,11 @@ export class LocalAgentBridgeRuntime {
       }
       return safeResponse;
     } catch (error) {
-      if (!error?.uncertain) this.#pendingCommand = undefined;
+      if (!error?.uncertain && ["INVALID_AGENT_CLAIM", "AGENT_RUN_EXPIRED"].includes(error?.code)) {
+        this.#clearCapability();
+      } else if (!error?.uncertain) {
+        this.#pendingCommand = undefined;
+      }
       throw error;
     } finally {
       this.#busy = undefined;
