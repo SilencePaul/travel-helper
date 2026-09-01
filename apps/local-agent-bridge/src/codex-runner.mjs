@@ -408,6 +408,20 @@ function failureCode(stdout, stderr) {
   return "CODEX_RESEARCH_FAILED";
 }
 
+function trustedStartedThread(stdout) {
+  const firstLine = stdout.split(/\r?\n/u).find((line) => line.trim());
+  if (!firstLine || firstLine.length > 4_096) return undefined;
+  try {
+    const event = JSON.parse(firstLine);
+    if (!objectWithKeys(event, ["type", "thread_id"])
+      || event.type !== "thread.started") return undefined;
+    validateThreadId(event.thread_id);
+    return event.thread_id;
+  } catch {
+    return undefined;
+  }
+}
+
 export function createCodexRunner(options) {
   const {
     codexPath,
@@ -473,6 +487,7 @@ export function createCodexRunner(options) {
   let boundThreadId = initialState?.codexThreadId;
   let correctionUsed = initialState?.correctionUsed ?? false;
   let inFlight = false;
+  let activeOperation;
   let poisoned = false;
   let lastClock = -Infinity;
 
@@ -501,15 +516,22 @@ export function createCodexRunner(options) {
     const remaining = remainingMs(operation);
     if (remaining <= 0) throw codedError("CODEX_RESEARCH_TIMEOUT");
     let timer;
+    let cancelHandler;
     try {
       return await Promise.race([
         promise,
         new Promise((_, reject) => {
           timer = setTimeout(() => reject(codedError("CODEX_RESEARCH_TIMEOUT")), remaining);
         }),
+        new Promise((_, reject) => {
+          cancelHandler = () => reject(codedError("CODEX_RESEARCH_CANCELLED"));
+          operation.cancelHandlers.add(cancelHandler);
+          if (operation.cancelled) cancelHandler();
+        }),
       ]);
     } finally {
       clearTimeout(timer);
+      operation.cancelHandlers.delete(cancelHandler);
     }
   }
 
@@ -522,7 +544,7 @@ export function createCodexRunner(options) {
         throw new Error("overlapping canonical boundary");
       }
     } catch (error) {
-      if (error?.code === "CODEX_RESEARCH_TIMEOUT") throw error;
+      if (error?.code === "CODEX_RESEARCH_TIMEOUT" || error?.code === "CODEX_RESEARCH_CANCELLED") throw error;
       throw codedError(CODEX_ISOLATION_ERROR);
     }
   }
@@ -556,7 +578,7 @@ export function createCodexRunner(options) {
       }
     } catch (error) {
       if (error?.processTreeUnconfirmed === true) poisoned = true;
-      if (error?.code === "CODEX_RESEARCH_TIMEOUT") throw error;
+      if (error?.code === "CODEX_RESEARCH_TIMEOUT" || error?.code === "CODEX_RESEARCH_CANCELLED") throw error;
       throw codedError(CODEX_ISOLATION_ERROR);
     }
   }
@@ -564,6 +586,7 @@ export function createCodexRunner(options) {
   async function execute(args, prompt, expectedThreadId, operation) {
     await verifyPaths(operation);
     await verifyIsolation(operation);
+    if (operation.cancelled) throw codedError("CODEX_RESEARCH_CANCELLED");
     const processTimeoutMs = remainingMs(operation);
     if (processTimeoutMs <= 0) throw codedError("CODEX_RESEARCH_TIMEOUT");
     return new Promise((resolve, reject) => {
@@ -583,6 +606,7 @@ export function createCodexRunner(options) {
       let killTimer;
       let timeoutTimer;
       let teardownTimer;
+      let cancelHandler;
 
       const finish = (error, value) => {
         if (settled) return;
@@ -590,6 +614,7 @@ export function createCodexRunner(options) {
         clearTimeout(timeoutTimer);
         clearTimeout(killTimer);
         clearTimeout(teardownTimer);
+        operation.cancelHandlers.delete(cancelHandler);
         stdout = "";
         stderr = "";
         if (error) reject(error);
@@ -636,6 +661,12 @@ export function createCodexRunner(options) {
           confirmGroupGone();
         }, killGraceMs);
       };
+      cancelHandler = () => terminate(codedError("CODEX_RESEARCH_CANCELLED"));
+      operation.cancelHandlers.add(cancelHandler);
+      if (operation.cancelled) {
+        cancelHandler();
+        return;
+      }
       const collectStdout = (chunk) => {
         if (terminationError) return;
         const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -695,6 +726,8 @@ export function createCodexRunner(options) {
           return;
         }
         if (code !== 0) {
+          const startedThread = trustedStartedThread(stdout);
+          if (startedThread && (!expectedThreadId || startedThread === expectedThreadId)) bindThread(startedThread);
           finish(codedError(failureCode(stdout, stderr)));
           return;
         }
@@ -725,7 +758,7 @@ export function createCodexRunner(options) {
       const result = await withinBudget(Promise.resolve().then(() => validateOutput(value)), operation);
       return result === true;
     } catch (error) {
-      if (error?.code === "CODEX_RESEARCH_TIMEOUT") throw error;
+      if (error?.code === "CODEX_RESEARCH_TIMEOUT" || error?.code === "CODEX_RESEARCH_CANCELLED") throw error;
       return false;
     }
   }
@@ -753,7 +786,20 @@ export function createCodexRunner(options) {
     if (activeDurationMs >= activeTimeoutMs) throw codedError("CODEX_RESEARCH_TIMEOUT");
     const startedAt = now();
     inFlight = true;
-    const operation = { activeBefore: activeDurationMs, startedAt };
+    let settleOperation;
+    const operation = {
+      activeBefore: activeDurationMs,
+      startedAt,
+      cancelled: false,
+      cancelHandlers: new Set(),
+      settled: new Promise((resolve) => { settleOperation = resolve; }),
+      cancel() {
+        if (operation.cancelled) return;
+        operation.cancelled = true;
+        for (const handler of [...operation.cancelHandlers]) handler();
+      },
+    };
+    activeOperation = operation;
     let result;
     let failure;
     try {
@@ -770,6 +816,8 @@ export function createCodexRunner(options) {
       const elapsed = Math.max(0, finishedAt - operation.startedAt);
       activeDurationMs = Math.min(activeTimeoutMs, operation.activeBefore + elapsed);
       inFlight = false;
+      if (activeOperation === operation) activeOperation = undefined;
+      settleOperation();
       if (!failure && elapsed > activeTimeoutMs - operation.activeBefore) failure = codedError("CODEX_RESEARCH_TIMEOUT");
     }
     if (failure) throw failure;
@@ -777,6 +825,16 @@ export function createCodexRunner(options) {
   }
 
   return {
+    getState() {
+      return state();
+    },
+    async cancel() {
+      const operation = activeOperation;
+      if (!operation) return false;
+      operation.cancel();
+      await operation.settled;
+      return true;
+    },
     async runInitial(input) {
       const prompt = input?.prompt;
       if (initialStarted || boundThreadId || typeof prompt !== "string") throw codedError("CODEX_RESEARCH_FAILED");

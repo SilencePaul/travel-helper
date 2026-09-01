@@ -117,7 +117,7 @@ function recoverableRunnerState(session, error, result) {
   for (const state of candidates) {
     if (!plainObject(state)) continue;
     if (typeof state.codexThreadId !== "string" || state.codexThreadId.length === 0) continue;
-    if (!Number.isSafeInteger(state.activeDurationMs)
+    if (typeof state.activeDurationMs !== "number" || !Number.isFinite(state.activeDurationMs)
       || state.activeDurationMs < 0 || state.activeDurationMs > ACTIVE_BUDGET_MS) continue;
     return {
       codexThreadId: state.codexThreadId,
@@ -125,7 +125,7 @@ function recoverableRunnerState(session, error, result) {
     };
   }
   if (typeof result?.codexThreadId === "string"
-    && Number.isSafeInteger(result.activeDurationMs)
+    && typeof result.activeDurationMs === "number" && Number.isFinite(result.activeDurationMs)
     && result.activeDurationMs >= 0 && result.activeDurationMs <= ACTIVE_BUDGET_MS) {
     return { codexThreadId: result.codexThreadId, activeDurationMs: result.activeDurationMs };
   }
@@ -150,6 +150,8 @@ export class TravelResearchService {
   #notifier;
   #clock;
   #idGenerator;
+  #setTimer;
+  #clearTimer;
   #status = Object.freeze({ phase: "idle" });
   #task;
   #session;
@@ -178,6 +180,8 @@ export class TravelResearchService {
     this.#notifier = notifier;
     this.#clock = clock;
     this.#idGenerator = idGenerator;
+    this.#setTimer = typeof clock.setTimeout === "function" ? clock.setTimeout.bind(clock) : setTimeout;
+    this.#clearTimer = typeof clock.clearTimeout === "function" ? clock.clearTimeout.bind(clock) : clearTimeout;
   }
 
   #date() {
@@ -213,6 +217,7 @@ export class TravelResearchService {
     if (!claimed || claimed.agentRunId !== agentRunId || !Number.isFinite(expiry) || expiry <= this.#date().getTime()) {
       throw codedError("AGENT_RUN_INACTIVE");
     }
+    return expiry;
   }
 
   #newIdentifier() {
@@ -228,10 +233,86 @@ export class TravelResearchService {
     return value;
   }
 
+  #syncActiveRuntime(runnerRuntimeMs = this.#task.runnerRuntimeMs) {
+    if (typeof runnerRuntimeMs !== "number" || !Number.isFinite(runnerRuntimeMs)
+      || runnerRuntimeMs < 0 || runnerRuntimeMs > ACTIVE_BUDGET_MS) {
+      throw codedError("CODEX_RESEARCH_FAILED");
+    }
+    this.#task.runnerRuntimeMs = runnerRuntimeMs;
+    this.#task.activeRuntimeMs = Math.min(
+      ACTIVE_BUDGET_MS,
+      runnerRuntimeMs + this.#task.serviceRuntimeMs,
+    );
+    return this.#task.activeRuntimeMs;
+  }
+
+  #deadline(evidenceContinuation) {
+    const now = this.#date().getTime();
+    const activeRemaining = ACTIVE_BUDGET_MS - this.#task.activeRuntimeMs;
+    const agentRemaining = this.#task.agentExpiresAt - now;
+    if (agentRemaining <= activeRemaining) {
+      return { delay: Math.max(0, agentRemaining), code: "AGENT_RUN_INACTIVE" };
+    }
+    return {
+      delay: Math.max(0, activeRemaining),
+      code: evidenceContinuation ? "CODEX_INSUFFICIENT_EVIDENCE" : "CODEX_RESEARCH_TIMEOUT",
+    };
+  }
+
+  async #bounded(task, {
+    countService = true,
+    cancelRunner = false,
+    evidenceContinuation = false,
+  } = {}) {
+    const startedAt = this.#date().getTime();
+    const deadline = this.#deadline(evidenceContinuation);
+    let timer;
+    let deadlineReached = false;
+    try {
+      if (deadline.delay <= 0) {
+        if (cancelRunner && this.#session) await this.#session.cancel();
+        throw codedError(deadline.code);
+      }
+      const operation = Promise.resolve().then(task);
+      return await Promise.race([
+        operation,
+        new Promise((_, reject) => {
+          timer = this.#setTimer(() => {
+            deadlineReached = true;
+            const rejectDeadline = () => reject(codedError(deadline.code));
+            if (cancelRunner && this.#session) {
+              Promise.resolve(this.#session.cancel()).then(rejectDeadline, rejectDeadline);
+            } else {
+              rejectDeadline();
+            }
+          }, deadline.delay);
+          timer?.unref?.();
+        }),
+      ]);
+    } catch (error) {
+      if (deadlineReached) throw codedError(deadline.code);
+      throw error;
+    } finally {
+      if (timer !== undefined) this.#clearTimer(timer);
+      if (countService) {
+        const elapsed = Math.max(0, this.#date().getTime() - startedAt);
+        this.#task.serviceRuntimeMs += elapsed;
+        this.#syncActiveRuntime();
+      }
+    }
+  }
+
   #createSession(initialState) {
+    const activeTimeoutMs = Math.floor(ACTIVE_BUDGET_MS - this.#task.serviceRuntimeMs);
+    if (activeTimeoutMs <= 0 || (initialState && initialState.activeDurationMs >= activeTimeoutMs)) {
+      throw codedError("CODEX_RESEARCH_TIMEOUT");
+    }
     let session;
     try {
-      session = this.#runner.create(initialState);
+      session = this.#runner.create({
+        activeTimeoutMs,
+        ...(initialState ? { initialState } : {}),
+      });
     } catch {
       throw codedError("CODEX_RESEARCH_FAILED");
     }
@@ -289,17 +370,18 @@ export class TravelResearchService {
         agentRunId: input.agentRunId,
         startedAt,
         activeRuntimeMs: 0,
-        validationRuntimeMs: 0,
+        runnerRuntimeMs: 0,
+        serviceRuntimeMs: 0,
       };
       created = true;
       this.#cancelRequested = false;
-      this.#assertClaimed(input.agentRunId);
-      const context = await this.#transport.getDecisionContext();
-      const built = await buildTravelResearchInput(context, {
+      this.#task.agentExpiresAt = this.#assertClaimed(input.agentRunId);
+      const context = await this.#bounded(() => this.#transport.getDecisionContext());
+      const built = await this.#bounded(() => buildTravelResearchInput(context, {
         targetCategory: input.targetCategory,
         targetScopeId: input.targetScopeId,
         aliasSalt: this.#task.aliasSalt,
-      });
+      }));
       if (built.disclosureFingerprint !== input.disclosureFingerprint) {
         await this.#revokeStrict();
         await this.#store.clear();
@@ -309,7 +391,10 @@ export class TravelResearchService {
       this.#task.built = built;
       this.#setStatus("researching");
       this.#session = this.#createSession();
-      const result = await this.#session.runInitial({ prompt: built.prompt });
+      const result = await this.#bounded(
+        () => this.#session.runInitial({ prompt: built.prompt }),
+        { countService: false, cancelRunner: true },
+      );
       return await this.#consume(result, "researching");
     } catch (error) {
       if (!created) throw codedError(stableFailureCode(error));
@@ -317,7 +402,7 @@ export class TravelResearchService {
         const state = recoverableRunnerState(this.#session, error);
         if (state) {
           this.#task.codexThreadId = state.codexThreadId;
-          this.#task.activeRuntimeMs = state.activeDurationMs;
+          this.#syncActiveRuntime(state.activeDurationMs);
           return this.#block({ status: "needs_owner_action", reason: "codex_auth_required" });
         }
       }
@@ -343,6 +428,8 @@ export class TravelResearchService {
       disclosureFingerprint: recovered.disclosureFingerprint,
       codexThreadId: recovered.codexThreadId,
       activeRuntimeMs: recovered.activeRuntimeMs,
+      runnerRuntimeMs: recovered.activeRuntimeMs,
+      serviceRuntimeMs: 0,
       startedAt: recovered.startedAt,
     };
     this.#status = safeResearchStatus(recovered);
@@ -373,7 +460,7 @@ export class TravelResearchService {
   async #resume(input) {
     let recovered;
     try {
-      this.#assertClaimed(input.agentRunId);
+      const agentExpiresAt = this.#assertClaimed(input.agentRunId);
       recovered = await this.#store.load();
       if (!recovered || recovered.phase !== "needs_owner_action"
         || recovered.researchTaskId !== input.researchTaskId) {
@@ -390,19 +477,21 @@ export class TravelResearchService {
         disclosureFingerprint: recovered.disclosureFingerprint,
         codexThreadId: recovered.codexThreadId,
         activeRuntimeMs: recovered.activeRuntimeMs,
-        validationRuntimeMs: 0,
+        runnerRuntimeMs: recovered.activeRuntimeMs,
+        serviceRuntimeMs: 0,
         agentRunId: input.agentRunId,
+        agentExpiresAt,
         startedAt: recovered.startedAt,
       };
       this.#cancelRequested = false;
-      const context = await this.#transport.getDecisionContext();
+      const context = await this.#bounded(() => this.#transport.getDecisionContext());
       let built;
       try {
-        built = await buildTravelResearchInput(context, {
+        built = await this.#bounded(() => buildTravelResearchInput(context, {
           targetCategory: recovered.targetCategory,
           targetScopeId: recovered.targetScopeId,
           aliasSalt: recovered.aliasSalt,
-        });
+        }));
       } catch (error) {
         if (error?.code !== "INVALID_RESEARCH_TARGET") throw error;
         await this.#supersedeCurrentRun();
@@ -426,7 +515,10 @@ export class TravelResearchService {
       const prompt = input.resumeAction === "retry_codex_auth"
         ? RETRY_AUTH_PROMPT
         : `继续原旅行研究任务。不得再访问 ${recovered.blockedHostname}；只能寻找其他公开来源，并按原固定 JSON Schema 输出完整结果。`;
-      const result = await this.#session.resume({ codexThreadId: recovered.codexThreadId, prompt });
+      const result = await this.#bounded(
+        () => this.#session.resume({ codexThreadId: recovered.codexThreadId, prompt }),
+        { countService: false, cancelRunner: true },
+      );
       return await this.#consume(result, "resuming");
     } catch (error) {
       if (error?.code === "INVALID_RESUME_ACTION") throw codedError("CODEX_RESEARCH_FAILED");
@@ -435,7 +527,7 @@ export class TravelResearchService {
         const state = recoverableRunnerState(this.#session, error);
         if (state) {
           this.#task.codexThreadId = state.codexThreadId;
-          this.#task.activeRuntimeMs = state.activeDurationMs;
+          this.#syncActiveRuntime(state.activeDurationMs);
           return this.#block({ status: "needs_owner_action", reason: "codex_auth_required" });
         }
       }
@@ -463,15 +555,11 @@ export class TravelResearchService {
         const runnerState = recoverableRunnerState(this.#session, undefined, result);
         if (!runnerState) throw codedError("CODEX_RESEARCH_FAILED");
         this.#task.codexThreadId = runnerState.codexThreadId;
-        this.#task.activeRuntimeMs = Math.min(
-          ACTIVE_BUDGET_MS,
-          runnerState.activeDurationMs + this.#task.validationRuntimeMs,
-        );
+        this.#syncActiveRuntime(runnerState.activeDurationMs);
         this.#setStatus("validating");
-        const validationStarted = this.#date().getTime();
         let validated;
         try {
-          validated = await validateTravelResearchOutput(result.output, {
+          validated = await this.#bounded(() => validateTravelResearchOutput(result.output, {
             targetCategory: this.#task.targetCategory,
             segment: this.#task.built.disclosure.segment,
             aliasMap: this.#task.built.aliasMap,
@@ -480,26 +568,23 @@ export class TravelResearchService {
             ...(typeof this.#runner.resolveHostname === "function"
               ? { resolveHostname: this.#runner.resolveHostname }
               : {}),
-          });
+          }), { evidenceContinuation });
         } catch (error) {
-          const validationElapsed = Math.max(0, this.#date().getTime() - validationStarted);
-          this.#task.validationRuntimeMs += validationElapsed;
-          this.#task.activeRuntimeMs = Math.min(ACTIVE_BUDGET_MS, runnerState.activeDurationMs + this.#task.validationRuntimeMs);
           if (error?.code !== "CODEX_INSUFFICIENT_EVIDENCE") throw error;
           if (this.#task.activeRuntimeMs >= ACTIVE_BUDGET_MS) {
             throw codedError("CODEX_INSUFFICIENT_EVIDENCE");
           }
           evidenceContinuation = true;
           this.#setStatus(runningPhase);
-          result = await this.#session.resume({
-            codexThreadId: this.#task.codexThreadId,
-            prompt: CONTINUE_EVIDENCE_PROMPT,
-          });
+          result = await this.#bounded(
+            () => this.#session.resume({
+              codexThreadId: this.#task.codexThreadId,
+              prompt: CONTINUE_EVIDENCE_PROMPT,
+            }),
+            { countService: false, cancelRunner: true, evidenceContinuation: true },
+          );
           continue;
         }
-        const validationElapsed = Math.max(0, this.#date().getTime() - validationStarted);
-        this.#task.validationRuntimeMs += validationElapsed;
-        this.#task.activeRuntimeMs = Math.min(ACTIVE_BUDGET_MS, runnerState.activeDurationMs + this.#task.validationRuntimeMs);
         if (this.#task.activeRuntimeMs >= ACTIVE_BUDGET_MS && validated.status === "completed") {
           throw codedError("CODEX_RESEARCH_TIMEOUT");
         }
@@ -520,7 +605,7 @@ export class TravelResearchService {
         const state = recoverableRunnerState(this.#session, error, result);
         if (state) {
           this.#task.codexThreadId = state.codexThreadId;
-          this.#task.activeRuntimeMs = state.activeDurationMs;
+          this.#syncActiveRuntime(state.activeDurationMs);
           return this.#block({ status: "needs_owner_action", reason: "codex_auth_required" });
         }
       }
@@ -542,7 +627,7 @@ export class TravelResearchService {
         aliasSalt: this.#task.aliasSalt,
         blockedReason: blocked.reason,
         blockedHostname: SOURCE_BLOCK_REASONS.has(blocked.reason) ? blocked.sourceHostname : null,
-        activeRuntimeMs: this.#task.activeRuntimeMs,
+        activeRuntimeMs: Math.min(ACTIVE_BUDGET_MS, Math.ceil(this.#task.activeRuntimeMs)),
         phase: "needs_owner_action",
         startedAt: this.#task.startedAt,
         updatedAt,
@@ -561,7 +646,7 @@ export class TravelResearchService {
       : () => this.#transport.command("submitProposalBatch", payload);
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        return await submit();
+        return await this.#bounded(submit);
       } catch (error) {
         if (!error?.uncertain || attempt === 1) throw error;
       }
@@ -572,7 +657,7 @@ export class TravelResearchService {
   async #revokeStrict() {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        return await this.#transport.revokeSelf();
+        return await this.#bounded(() => this.#transport.revokeSelf());
       } catch (error) {
         if (!error?.uncertain || attempt === 1) throw error;
       }
@@ -591,8 +676,10 @@ export class TravelResearchService {
     if (revoke) {
       try {
         await this.#revokeStrict();
-      } catch {
-        finalCode = "AGENT_TRANSPORT_UNAVAILABLE";
+      } catch (error) {
+        if (error?.code !== "CODEX_RESEARCH_TIMEOUT" && error?.code !== "AGENT_RUN_INACTIVE") {
+          finalCode = "AGENT_TRANSPORT_UNAVAILABLE";
+        }
       }
     }
     try {

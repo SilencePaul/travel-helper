@@ -279,6 +279,70 @@ test("runner spawns a controlled absolute binary in the isolated directory and s
   assert.equal(fake.calls[0].args.includes("untrusted travel context"), false);
 });
 
+test("runner exposes an immutable fractional state snapshot and idempotent idle cancellation", async () => {
+  const runner = makeRunner(createFakeSpawn([]), {
+    initialState: {
+      codexThreadId: "thread-fractional",
+      correctionUsed: false,
+      activeDurationMs: 1.5,
+    },
+  });
+
+  const first = runner.getState();
+  assert.deepEqual(first, {
+    codexThreadId: "thread-fractional",
+    correctionUsed: false,
+    activeDurationMs: 1.5,
+  });
+  first.codexThreadId = "caller-mutation";
+  assert.equal(runner.getState().codexThreadId, "thread-fractional");
+  assert.equal(await runner.cancel(), false);
+  assert.equal(await runner.cancel(), false);
+});
+
+test("runner cancellation tears down the real fake process group and rejects the in-flight run stably", async () => {
+  const fake = createFakeSpawn([{
+    hang: true,
+    closeOnSignal: "SIGKILL",
+    groupGoneOnSignal: "SIGKILL",
+  }]);
+  const runner = makeRunner(fake, { killGraceMs: 5, teardownTimeoutMs: 30 });
+  const running = runner.runInitial({ prompt: "private" });
+  while (fake.calls.length === 0) await new Promise((resolve) => setImmediate(resolve));
+
+  const firstCancel = runner.cancel();
+  const secondCancel = runner.cancel();
+
+  await assert.rejects(running, { code: "CODEX_RESEARCH_CANCELLED" });
+  assert.equal(await firstCancel, true);
+  assert.equal(await secondCancel, true);
+  assert.deepEqual(fake.calls[0].groupSignals.map(({ signal }) => signal), ["SIGTERM", "SIGKILL"]);
+  assert.equal(await runner.cancel(), false);
+});
+
+test("a non-zero exit binds only an exact trusted thread.started prefix for safe auth recovery", async () => {
+  const trusted = createFakeSpawn([{
+    code: 1,
+    stdout: `${JSON.stringify({ type: "thread.started", thread_id: "thread-auth" })}\n`,
+    stderr: "Not authenticated. Run codex login",
+  }]);
+  const trustedRunner = makeRunner(trusted);
+  await assert.rejects(trustedRunner.runInitial({ prompt: "private" }), { code: "CODEX_NOT_AUTHENTICATED" });
+  assert.equal(trustedRunner.getState().codexThreadId, "thread-auth");
+
+  for (const stdout of [
+    `${JSON.stringify({ type: "thread.started", thread_id: "thread-auth", injected: true })}\n`,
+    `${JSON.stringify({ type: "agent_message", thread_id: "thread-auth" })}\n`,
+    `${JSON.stringify({ type: "thread.started", thread_id: "../unsafe" })}\n`,
+    "not-json\n",
+  ]) {
+    const fake = createFakeSpawn([{ code: 1, stdout, stderr: "Not authenticated" }]);
+    const runner = makeRunner(fake);
+    await assert.rejects(runner.runInitial({ prompt: "private" }), { code: "CODEX_NOT_AUTHENTICATED" });
+    assert.equal(runner.getState().codexThreadId, undefined);
+  }
+});
+
 test("runner awaits a complete isolation probe before every Codex spawn", async () => {
   const fake = createFakeSpawn([{ stdout: jsonl("thread-1") }]);
   const probeCalls = [];

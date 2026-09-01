@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 
 import { buildResearchTargetScopes } from "@travel/contracts/decision-research";
 
 import { buildTravelResearchInput } from "./travel-research-input.mjs";
+import { createCodexRunner } from "./codex-runner.mjs";
 import { safeResearchStatus, TravelResearchService } from "./travel-research-service.mjs";
 
 const PUBLIC_RESOLVER = async () => [{ address: "93.184.216.34", family: 4 }];
@@ -102,6 +104,32 @@ function createClock(start = "2026-09-01T00:00:00.000Z") {
   return clock;
 }
 
+function createControlledClock(start = "2026-09-01T00:00:00.000Z") {
+  let time = Date.parse(start);
+  let nextTimerId = 1;
+  const timers = new Map();
+  const clock = () => new Date(time);
+  clock.advance = (milliseconds) => { time += milliseconds; };
+  clock.setTimeout = (callback, delay) => {
+    const timerId = nextTimerId;
+    nextTimerId += 1;
+    timers.set(timerId, { callback, delay });
+    return timerId;
+  };
+  clock.clearTimeout = (timerId) => { timers.delete(timerId); };
+  clock.fireNext = () => {
+    const next = [...timers.entries()].sort((left, right) => left[1].delay - right[1].delay)[0];
+    if (!next) return false;
+    const [timerId, timer] = next;
+    timers.delete(timerId);
+    time += timer.delay;
+    timer.callback();
+    return true;
+  };
+  clock.pendingTimers = () => timers.size;
+  return clock;
+}
+
 function fakeStore(events, initialState) {
   let state = initialState && structuredClone(initialState);
   return {
@@ -142,6 +170,7 @@ function fakeTransport(events, context, options = {}) {
       events.push("transport.submitProposalBatch");
       submittedPayloads.push(structuredClone(payload));
       submitAttempts += 1;
+      if (options.submitGate) await options.submitGate;
       if (options.uncertainSubmitOnce && submitAttempts === 1) {
         throw Object.assign(new Error("private network detail"), {
           code: "AGENT_TRANSPORT_UNAVAILABLE",
@@ -152,6 +181,7 @@ function fakeTransport(events, context, options = {}) {
     },
     async revokeSelf() {
       events.push("transport.revokeSelf");
+      if (options.revokeGate) await options.revokeGate;
       if (options.uncertainRevoke) {
         throw Object.assign(new Error("private revoke detail"), {
           code: "AGENT_TRANSPORT_UNAVAILABLE",
@@ -169,12 +199,13 @@ function fakeRunner(events, scripts) {
   let createCount = 0;
   const resumeInputs = [];
   const sessions = [];
-  const createInitialStates = [];
+  const createOptions = [];
   return {
     resolveHostname: PUBLIC_RESOLVER,
-    create(initialState) {
+    create(options = {}) {
       createCount += 1;
-      createInitialStates.push(initialState && structuredClone(initialState));
+      createOptions.push(structuredClone(options));
+      const initialState = options.initialState;
       events.push(initialState ? `runner.create:${initialState.codexThreadId}` : "runner.create:new");
       let state = initialState && { ...initialState };
       let cancelled = false;
@@ -214,7 +245,7 @@ function fakeRunner(events, scripts) {
     get createCount() { return createCount; },
     resumeInputs,
     sessions,
-    createInitialStates,
+    createOptions,
   };
 }
 
@@ -233,13 +264,19 @@ async function targetRequest(context = contextFixture()) {
   };
 }
 
-function createHarness({ context = contextFixture(), scripts = [], transportOptions, initialState } = {}) {
+function createHarness({
+  context = contextFixture(),
+  scripts = [],
+  transportOptions,
+  initialState,
+  clock = createClock(),
+  runnerFactory,
+} = {}) {
   const events = [];
-  const clock = createClock();
   const store = fakeStore(events, initialState);
   const notifier = { async notifyOwnerAction() { events.push("notifier.notifyOwnerAction"); return true; } };
   const transport = fakeTransport(events, context, transportOptions);
-  const runner = fakeRunner(events, [...scripts]);
+  const runner = runnerFactory ? runnerFactory(events) : fakeRunner(events, [...scripts]);
   const generated = ["research-task-1", "alias-salt-1234567890"];
   const service = new TravelResearchService({
     transport,
@@ -285,6 +322,77 @@ test("happy path starts Codex only after prepare/claim and writes one validated 
   ]);
   assert.equal(harness.transport.submittedPayloads.length, 1);
   assert.equal(harness.transport.submittedPayloads[0].candidates.length, 2);
+});
+
+test("service composes with a real createCodexRunner session contract", async () => {
+  const output = completedOutput();
+  const runnerFactory = (events) => ({
+    resolveHostname: PUBLIC_RESOLVER,
+    create(options) {
+      events.push("runner.create:real");
+      return createCodexRunner({
+        codexPath: "/Applications/ChatGPT.app/Contents/Resources/codex",
+        isolatedDir: "/isolated",
+        projectDir: "/project",
+        schemaPath: "/schema.json",
+        activeTimeoutMs: options.activeTimeoutMs,
+        ...(options.initialState ? { initialState: options.initialState } : {}),
+        sourceEnv: {
+          PATH: "/usr/bin:/bin",
+          HOME: "/Users/owner",
+          CODEX_HOME: "/Users/owner/.codex",
+        },
+        pathVerifier: async (paths) => paths,
+        probeIsolation: async () => ({
+          isolatedDirectoryReadable: true,
+          outsideDirectoryUnreadable: true,
+          projectDirectoryUnreadable: true,
+          httpsNetworkAvailable: true,
+          authenticationAvailable: true,
+          persistenceAvailable: true,
+        }),
+        processKillImpl: () => { throw new Error("successful fake child must not be killed"); },
+        spawnImpl: () => {
+          const child = new EventEmitter();
+          child.pid = 40_001;
+          child.stdout = new EventEmitter();
+          child.stderr = new EventEmitter();
+          child.stdin = new EventEmitter();
+          child.stdin.end = () => {};
+          queueMicrotask(() => {
+            child.stdout.emit("data", Buffer.from([
+              JSON.stringify({ type: "thread.started", thread_id: "thread-real-contract" }),
+              JSON.stringify({
+                type: "session_configured",
+                session_id: "thread-real-contract",
+                approval_policy: "never",
+                active_permission_profile: { id: "travel_research" },
+              }),
+              JSON.stringify({ type: "item.completed", item: { type: "web_search" } }),
+              JSON.stringify({
+                type: "item.completed",
+                item: { type: "agent_message", text: JSON.stringify(output) },
+              }),
+              JSON.stringify({ type: "turn.completed" }),
+              "",
+            ].join("\n")));
+            child.emit("close", 0);
+          });
+          return child;
+        },
+      });
+    },
+  });
+  const harness = createHarness({ runnerFactory });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+
+  const status = await harness.service.executeTravelResearch(request);
+
+  assert.equal(status.phase, "completed");
+  assert.equal(harness.transport.submittedPayloads.length, 1);
+  assert.equal(harness.events.includes("runner.create:real"), true);
 });
 
 test("concurrent execute calls for the same AgentRun share one runner and one task", async () => {
@@ -354,6 +462,37 @@ test("validated owner-action output revokes before persistence and notification 
     assert.equal(revokeIndex < persistIndex && persistIndex < notifyIndex, true);
     assert.equal(JSON.stringify(status).includes("thread-"), false);
   }
+});
+
+test("owner-action revocation cannot outlive the active deadline or persist an unreconciled blocker", async () => {
+  let releaseRevoke;
+  const revokeGate = new Promise((resolve) => { releaseRevoke = resolve; });
+  const clock = createControlledClock();
+  const harness = createHarness({
+    clock,
+    scripts: [{
+      codexThreadId: "thread-block-deadline",
+      output: ownerAction(),
+      activeDurationMs: 599_990,
+    }],
+    transportOptions: { revokeGate },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+  const execution = harness.service.executeTravelResearch(request);
+  while (!harness.events.includes("transport.revokeSelf")) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  const timerFired = clock.fireNext();
+  releaseRevoke();
+  const status = await execution;
+
+  assert.equal(timerFired, true);
+  assert.equal(status.phase, "failed");
+  assert.equal(status.errorCode, "CODEX_RESEARCH_TIMEOUT");
+  assert.equal(harness.events.includes("store.persistNeedsOwnerAction"), false);
 });
 
 test("runner authentication loss becomes owner action only with a recoverable thread state", async () => {
@@ -469,14 +608,21 @@ test("insufficient evidence resumes the same thread until success within the act
   assert.equal(harness.runner.resumeInputs[0].prompt.includes("证据不足"), true);
 });
 
-test("active budget exhaustion after insufficient evidence fails with zero writes", async () => {
-  const insufficient = completedOutput();
-  insufficient.candidates[0].evidence[1].sourceUrl = insufficient.candidates[0].evidence[0].sourceUrl;
-  const harness = createHarness({ scripts: [{
-    codexThreadId: "thread-timeout",
-    output: insufficient,
-    activeDurationMs: 600_000,
-  }] });
+test("active budget exhausted before validation times out with zero writes", async () => {
+  const harness = createHarness({
+    runnerFactory(events) {
+      const runner = fakeRunner(events, [{
+        codexThreadId: "thread-timeout",
+        output: completedOutput(),
+        activeDurationMs: 600_000,
+      }]);
+      runner.resolveHostname = async () => {
+        events.push("runner.resolveHostname");
+        return PUBLIC_RESOLVER();
+      };
+      return runner;
+    },
+  });
   const request = await targetRequest();
   harness.service.prepare();
   await harness.service.claim(request.agentRunId);
@@ -484,9 +630,10 @@ test("active budget exhaustion after insufficient evidence fails with zero write
   const status = await harness.service.executeTravelResearch(request);
 
   assert.equal(status.phase, "failed");
-  assert.equal(status.errorCode, "CODEX_INSUFFICIENT_EVIDENCE");
+  assert.equal(status.errorCode, "CODEX_RESEARCH_TIMEOUT");
   assert.equal(harness.transport.submittedPayloads.length, 0);
   assert.equal(harness.runner.resumeInputs.length, 0);
+  assert.equal(harness.events.includes("runner.resolveHostname"), false);
 });
 
 test("owner waiting time is excluded when restoring the runner active budget", async () => {
@@ -519,11 +666,236 @@ test("owner waiting time is excluded when restoring the runner active budget", a
     resumeAction: "retry_codex_auth",
   });
 
-  assert.deepEqual(harness.runner.createInitialStates[0], {
-    codexThreadId: "thread-wait",
-    correctionUsed: true,
-    activeDurationMs: 42_000,
+  assert.deepEqual(harness.runner.createOptions[0], {
+    activeTimeoutMs: 600_000,
+    initialState: {
+      codexThreadId: "thread-wait",
+      correctionUsed: true,
+      activeDurationMs: 42_000,
+    },
   });
+});
+
+test("fractional runner duration remains valid and recoverable persistence rounds it up conservatively", async () => {
+  const completed = createHarness({ scripts: [{
+    codexThreadId: "thread-fractional",
+    output: completedOutput(),
+    activeDurationMs: 1.5,
+  }] });
+  const request = await targetRequest();
+  completed.service.prepare();
+  await completed.service.claim(request.agentRunId);
+  assert.equal((await completed.service.executeTravelResearch(request)).phase, "completed");
+
+  const blocked = createHarness({ scripts: [{
+    codexThreadId: "thread-fractional-block",
+    output: ownerAction(),
+    activeDurationMs: 1.5,
+  }] });
+  blocked.service.prepare();
+  await blocked.service.claim(request.agentRunId);
+  assert.equal((await blocked.service.executeTravelResearch(request)).phase, "needs_owner_action");
+  assert.equal(blocked.store.state.activeRuntimeMs, 2);
+});
+
+test("runner factory receives the active deadline remaining after signed context work", async () => {
+  let releaseContext;
+  const contextGate = new Promise((resolve) => { releaseContext = resolve; });
+  const clock = createClock();
+  const harness = createHarness({
+    clock,
+    scripts: [{ codexThreadId: "thread-budget", output: completedOutput(), activeDurationMs: 1_000 }],
+    transportOptions: { contextGate },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+  const execution = harness.service.executeTravelResearch(request);
+  while (!harness.events.includes("transport.getDecisionContext")) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  clock.advance(125);
+  releaseContext();
+
+  assert.equal((await execution).phase, "completed");
+  assert.deepEqual(harness.runner.createOptions[0], { activeTimeoutMs: 599_875 });
+});
+
+test("claimed-run expiry bounds signed context before any runner or write starts", async () => {
+  let releaseContext;
+  const contextGate = new Promise((resolve) => { releaseContext = resolve; });
+  const clock = createControlledClock();
+  const harness = createHarness({
+    clock,
+    transportOptions: {
+      claimExpiresAt: "2026-09-01T00:00:00.010Z",
+      contextGate,
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+  const execution = harness.service.executeTravelResearch(request);
+  while (!harness.events.includes("transport.getDecisionContext")) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  assert.equal(clock.fireNext(), true);
+  const status = await execution;
+  releaseContext();
+
+  assert.equal(status.phase, "failed");
+  assert.equal(status.errorCode, "AGENT_RUN_INACTIVE");
+  assert.equal(harness.runner.createCount, 0);
+  assert.equal(harness.transport.submittedPayloads.length, 0);
+});
+
+test("active deadline bounds validation before cloud submission", async () => {
+  let releaseResolution;
+  const resolutionGate = new Promise((resolve) => { releaseResolution = resolve; });
+  const clock = createControlledClock();
+  const harness = createHarness({
+    clock,
+    runnerFactory(events) {
+      const runner = fakeRunner(events, [{
+        codexThreadId: "thread-validation-deadline",
+        output: completedOutput(),
+        activeDurationMs: 599_990,
+      }]);
+      runner.resolveHostname = async () => {
+        events.push("runner.resolveHostname");
+        await resolutionGate;
+        return PUBLIC_RESOLVER();
+      };
+      return runner;
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+  const execution = harness.service.executeTravelResearch(request);
+  while (!harness.events.includes("runner.resolveHostname")) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  assert.equal(clock.fireNext(), true);
+  const status = await execution;
+  releaseResolution();
+
+  assert.equal(status.phase, "failed");
+  assert.equal(status.errorCode, "CODEX_RESEARCH_TIMEOUT");
+  assert.equal(harness.transport.submittedPayloads.length, 0);
+});
+
+test("active deadline bounds cloud submit and final revoke phases", async () => {
+  for (const phase of ["submit", "revoke"]) {
+    let releaseGate;
+    const gate = new Promise((resolve) => { releaseGate = resolve; });
+    const clock = createControlledClock();
+    const harness = createHarness({
+      clock,
+      scripts: [{
+        codexThreadId: `thread-${phase}-deadline`,
+        output: completedOutput(),
+        activeDurationMs: 599_990,
+      }],
+      transportOptions: phase === "submit" ? { submitGate: gate } : { revokeGate: gate },
+    });
+    const request = await targetRequest();
+    harness.service.prepare();
+    await harness.service.claim(request.agentRunId);
+    const execution = harness.service.executeTravelResearch(request);
+    const expectedEvent = phase === "submit"
+      ? "transport.submitProposalBatch"
+      : "transport.revokeSelf";
+    while (!harness.events.includes(expectedEvent)) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    assert.equal(clock.fireNext(), true, phase);
+    releaseGate();
+    const status = await execution;
+
+    assert.equal(status.phase, "failed", phase);
+    assert.equal(status.errorCode, "CODEX_RESEARCH_TIMEOUT", phase);
+    assert.equal(harness.transport.submittedPayloads.length, 1, phase);
+  }
+});
+
+test("claimed-run expiry races an in-flight runner, cancels it and writes no candidates", async () => {
+  let releaseRunner;
+  const runnerGate = new Promise((resolve) => { releaseRunner = resolve; });
+  const clock = createControlledClock();
+  const harness = createHarness({
+    clock,
+    scripts: [async () => {
+      await runnerGate;
+      return {
+        codexThreadId: "thread-too-late",
+        output: completedOutput(),
+        activeDurationMs: 10,
+        state: { codexThreadId: "thread-too-late", correctionUsed: false, activeDurationMs: 10 },
+      };
+    }],
+    transportOptions: { claimExpiresAt: "2026-09-01T00:00:00.010Z" },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+  const execution = harness.service.executeTravelResearch(request);
+  while (!harness.events.includes("runner.runInitial")) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  const timerFired = clock.fireNext();
+  const status = await execution;
+  releaseRunner();
+
+  assert.equal(timerFired, true);
+  assert.equal(status.phase, "failed");
+  assert.equal(status.errorCode, "AGENT_RUN_INACTIVE");
+  assert.equal(harness.events.includes("runner.cancel"), true);
+  assert.equal(harness.transport.submittedPayloads.length, 0);
+});
+
+test("active deadline during evidence continuation cancels the runner and reports insufficient evidence", async () => {
+  const insufficient = completedOutput();
+  insufficient.candidates[0].evidence[1].sourceUrl = insufficient.candidates[0].evidence[0].sourceUrl;
+  let releaseRunner;
+  const runnerGate = new Promise((resolve) => { releaseRunner = resolve; });
+  const clock = createControlledClock();
+  const harness = createHarness({
+    clock,
+    scripts: [
+      { codexThreadId: "thread-evidence-deadline", output: insufficient, activeDurationMs: 599_990 },
+      async () => {
+        await runnerGate;
+        return {
+          codexThreadId: "thread-evidence-deadline",
+          output: completedOutput(),
+          activeDurationMs: 600_000,
+          state: { codexThreadId: "thread-evidence-deadline", correctionUsed: false, activeDurationMs: 600_000 },
+        };
+      },
+    ],
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+  const execution = harness.service.executeTravelResearch(request);
+  while (harness.runner.resumeInputs.length === 0) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  const timerFired = clock.fireNext();
+  const status = await execution;
+  releaseRunner();
+
+  assert.equal(timerFired, true);
+  assert.equal(status.phase, "failed");
+  assert.equal(status.errorCode, "CODEX_INSUFFICIENT_EVIDENCE");
+  assert.equal(harness.events.includes("runner.cancel"), true);
+  assert.equal(harness.transport.submittedPayloads.length, 0);
 });
 
 test("inactive, expired, unavailable, isolated, usage and invalid-output runs fail stably with zero writes", async () => {
