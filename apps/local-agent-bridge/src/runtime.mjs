@@ -5,21 +5,12 @@ import {
   randomUUID,
   sign,
 } from "node:crypto";
+import { canonicalJson } from "@travel/contracts/decision-research";
 
-const AGENT_SCOPES = new Set([
-  "submitProposalBatch",
-  "appendEvidenceSnapshot",
-  "reportVerificationBlocked",
-  "generatePreferenceSummary",
-]);
+const FIXED_AGENT_SCOPE = ["submitProposalBatch"];
+const CONTROL_ACTIONS = new Set(["getDecisionContext", "revokeAgentRunSelf"]);
 
-export function canonicalJson(value) {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
+export { canonicalJson };
 
 function codedError(code, transient = false) {
   return Object.assign(new Error(code), { code, transient });
@@ -43,9 +34,40 @@ function signature(privateKey, value) {
   ).toString("base64url");
 }
 
+function utcDateTimeMilliseconds(value) {
+  const match = typeof value === "string"
+    ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/.exec(value)
+    : undefined;
+  if (!match) return Number.NaN;
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return Number.NaN;
+  const parsed = new Date(time);
+  return parsed.getUTCFullYear() === Number(match[1])
+    && parsed.getUTCMonth() + 1 === Number(match[2])
+    && parsed.getUTCDate() === Number(match[3])
+    && parsed.getUTCHours() === Number(match[4])
+    && parsed.getUTCMinutes() === Number(match[5])
+    && parsed.getUTCSeconds() === Number(match[6])
+    ? time
+    : Number.NaN;
+}
+
+function currentTime(now) {
+  const value = now();
+  const time = value instanceof Date ? value.getTime() : Number.NaN;
+  return Number.isFinite(time) ? time : Number.NaN;
+}
+
+function activeAgentRun(expiresAt, now) {
+  const expiry = utcDateTimeMilliseconds(expiresAt);
+  const current = currentTime(now);
+  return Number.isFinite(expiry) && Number.isFinite(current) && expiry > current;
+}
+
 export class LocalAgentBridgeRuntime {
   #agentEndpoint;
   #fetch;
+  #now;
   #timeoutMs;
   #prepared;
   #claimed;
@@ -53,31 +75,38 @@ export class LocalAgentBridgeRuntime {
   #pendingCommand;
   #busy;
 
-  constructor({ agentEndpoint, fetch: fetchImpl = globalThis.fetch, timeoutMs = 15_000 } = {}) {
+  constructor({ agentEndpoint, fetch: fetchImpl = globalThis.fetch, timeoutMs = 15_000, now = () => new Date() } = {}) {
     const endpoint = validAgentEndpoint(agentEndpoint);
     if (!endpoint) throw codedError("INVALID_AGENT_ENDPOINT");
     if (typeof fetchImpl !== "function") throw codedError("INVALID_AGENT_ENDPOINT");
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw codedError("INVALID_TIMEOUT");
+    if (typeof now !== "function") throw codedError("INVALID_CLOCK");
     this.#agentEndpoint = endpoint;
     this.#fetch = fetchImpl;
     this.#timeoutMs = timeoutMs;
+    this.#now = now;
   }
 
   get nextSequence() {
     return this.#claimed?.nextSequence;
   }
 
-  prepare(scope) {
+  get claimedRun() {
+    return this.#claimed && {
+      agentRunId: this.#claimed.agentRunId,
+      expiresAt: this.#claimed.expiresAt,
+      nextSequence: this.#claimed.nextSequence,
+    };
+  }
+
+  prepare() {
     if (this.#busy) throw codedError("BRIDGE_BUSY");
-    if (!Array.isArray(scope) || scope.length < 1 || scope.length > 4 || new Set(scope).size !== scope.length || scope.some((item) => !AGENT_SCOPES.has(item))) {
-      throw codedError("INVALID_SCOPE");
-    }
     const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
     const pairingCode = randomBytes(32).toString("base64url");
     const pairingCodeHash = createHash("sha256").update(pairingCode).digest("base64url");
     const fingerprintHex = createHash("sha256").update(pairingCode).digest("hex").slice(0, 8).toUpperCase();
     const publicKeyJwk = publicKey.export({ format: "jwk" });
-    this.#prepared = { privateKey, publicKeyJwk, pairingCode, scope: [...scope] };
+    this.#prepared = { privateKey, publicKeyJwk, pairingCode, scope: [...FIXED_AGENT_SCOPE] };
     this.#claimed = undefined;
     this.#pendingClaim = undefined;
     this.#pendingCommand = undefined;
@@ -130,6 +159,7 @@ export class LocalAgentBridgeRuntime {
     if (this.#busy) throw codedError("BRIDGE_BUSY");
     if (this.#claimed) {
       if (this.#claimed.agentRunId !== agentRunId) throw codedError("AGENT_RUN_MISMATCH");
+      if (!activeAgentRun(this.#claimed.expiresAt, this.#now)) throw codedError("AGENT_RUN_EXPIRED");
       return { agentRunId, status: "claimed" };
     }
     if (!this.#pendingClaim) {
@@ -151,13 +181,14 @@ export class LocalAgentBridgeRuntime {
         || typeof data !== "object"
         || data.agentRunId !== agentRunId
         || typeof data.claimedAt !== "string"
-        || !Number.isFinite(Date.parse(data.claimedAt))
+        || !Number.isFinite(utcDateTimeMilliseconds(data.claimedAt))
+        || !activeAgentRun(data.expiresAt, this.#now)
         || !Number.isSafeInteger(data.nextSequence)
         || data.nextSequence < 1
       ) {
         throw codedError("INVALID_AGENT_RESPONSE");
       }
-      this.#claimed = { agentRunId, nextSequence: data.nextSequence };
+      this.#claimed = { agentRunId, expiresAt: data.expiresAt, nextSequence: data.nextSequence };
       this.#pendingClaim = undefined;
       return { agentRunId, status: "claimed" };
     } catch (error) {
@@ -171,7 +202,8 @@ export class LocalAgentBridgeRuntime {
   async command(action, payload) {
     if (!this.#prepared || !this.#claimed) throw codedError("BRIDGE_NOT_CLAIMED");
     if (this.#busy) throw codedError("BRIDGE_BUSY");
-    if (action !== "getDecisionContext" && !this.#prepared.scope.includes(action)) throw codedError("ACTION_NOT_ALLOWED");
+    if (!activeAgentRun(this.#claimed.expiresAt, this.#now)) throw codedError("AGENT_RUN_EXPIRED");
+    if (!CONTROL_ACTIONS.has(action) && !this.#prepared.scope.includes(action)) throw codedError("ACTION_NOT_ALLOWED");
     if (!Number.isSafeInteger(this.#claimed.nextSequence) || this.#claimed.nextSequence >= Number.MAX_SAFE_INTEGER) {
       throw codedError("SEQUENCE_EXHAUSTED");
     }
@@ -212,5 +244,9 @@ export class LocalAgentBridgeRuntime {
   async getDecisionContext() {
     const response = await this.command("getDecisionContext", {});
     return response.data;
+  }
+
+  async revokeSelf() {
+    return this.command("revokeAgentRunSelf", {});
   }
 }
