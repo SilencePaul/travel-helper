@@ -13,7 +13,10 @@ import {
   canonicalJson,
   computeDisclosureFingerprint,
 } from "./decision-research.mjs";
-import type { DecisionResearchContext } from "./decision-research.mjs";
+import type { CryptoLike, DecisionResearchContext } from "./decision-research.mjs";
+
+const asBrowserCryptoProvider = (subtle: SubtleCrypto): CryptoLike => ({ subtle });
+void asBrowserCryptoProvider;
 
 const safeTrip = {
   version: 7,
@@ -248,23 +251,31 @@ describe("decision research projection", () => {
     const temporary = mkdtempSync(join(tmpdir(), "travel-contracts-nodenext-"));
     const packageRoot = fileURLToPath(new URL("../", import.meta.url));
     const packageLink = join(temporary, "node_modules", "@travel", "contracts");
+    const nodeTypesLink = join(temporary, "node_modules", "@types", "node");
     mkdirSync(dirname(packageLink), { recursive: true });
+    mkdirSync(dirname(nodeTypesLink), { recursive: true });
     symlinkSync(packageRoot, packageLink, "dir");
+    symlinkSync(join(packageRoot, "node_modules", "@types", "node"), nodeTypesLink, "dir");
     writeFileSync(join(temporary, "package.json"), JSON.stringify({ type: "module" }));
     writeFileSync(join(temporary, "tsconfig.json"), JSON.stringify({
       compilerOptions: {
-        lib: ["ES2022", "DOM"],
+        lib: ["ES2022"],
         module: "NodeNext",
         moduleResolution: "NodeNext",
         noEmit: true,
         skipLibCheck: false,
         strict: true,
-        types: [],
+        types: ["node"],
       },
       files: ["consumer.ts"],
     }));
     writeFileSync(join(temporary, "consumer.ts"), `
-      import { buildResearchTargetScopes, type DecisionResearchContext } from "@travel/contracts/decision-research";
+      import { webcrypto } from "node:crypto";
+      import {
+        buildResearchTargetScopes,
+        type CryptoLike,
+        type DecisionResearchContext,
+      } from "@travel/contracts/decision-research";
       type IsAny<Value> = 0 extends (1 & Value) ? true : false;
       const scopes = buildResearchTargetScopes({
         version: 1,
@@ -274,9 +285,11 @@ describe("decision research projection", () => {
       });
       const noAny: IsAny<typeof scopes> extends false ? true : never = true;
       const contextNoAny: IsAny<DecisionResearchContext> extends false ? true : never = true;
+      const nodeCryptoProvider: CryptoLike = webcrypto;
       const context: DecisionResearchContext | undefined = undefined;
       void noAny;
       void contextNoAny;
+      void nodeCryptoProvider;
       void context;
     `);
 

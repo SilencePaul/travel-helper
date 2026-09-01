@@ -6,7 +6,9 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue
 export type ResearchCategory = "hotel" | "restaurant" | "attraction";
 
 export interface CryptoLike {
-  readonly subtle: Pick<SubtleCrypto, "digest">;
+  readonly subtle: {
+    digest(algorithm: "SHA-256", data: Uint8Array<ArrayBuffer>): Promise<ArrayBuffer>;
+  };
 }
 
 export interface ResearchTripProjection {
