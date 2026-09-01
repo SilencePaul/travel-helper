@@ -867,6 +867,45 @@ test("an administrator creates, inspects, and revokes only the fixed proposal sc
   assert.equal(JSON.stringify(db.data.decisionAudits).includes("publicKeyJwk"), false);
 });
 
+test("AgentRun status rejects corrupt expirations and reports a valid elapsed run as expired", async () => {
+  for (const [label, expiresAt, clock, expected] of [
+    ["missing", undefined, new Date("2026-08-28T07:05:00.000Z"), "AGENT_RUN_EXPIRED"],
+    ["invalid", "not-a-date", new Date("2026-08-28T07:05:00.000Z"), "AGENT_RUN_EXPIRED"],
+    ["non-datetime", "2099-08-28", new Date("2026-08-28T07:05:00.000Z"), "AGENT_RUN_EXPIRED"],
+    ["invalid clock", "2026-08-28T07:15:00.000Z", new Date("not-a-date"), "AGENT_RUN_EXPIRED"],
+    ["elapsed", "2026-08-28T07:05:00.000Z", new Date("2026-08-28T07:05:00.000Z"), "expired"],
+  ]) {
+    const db = createDb({
+      members: [member("fs_admin", "admin")],
+      trips: [{ ...trip(), memberUids: ["fs_admin"] }],
+    });
+    db.data.trip_agent_runs.set("agent-run-1", {
+      id: "agent-run-1",
+      tripId: "trip-2026-autumn",
+      creatorUid: "fs_admin",
+      publicKeyJwk: { kty: "EC", crv: "P-256", x: "x", y: "y" },
+      scope: ["submitProposalBatch"],
+      status: "claimed",
+      lastSequence: 0,
+      revision: 2,
+      createdAt: "2026-08-28T07:00:00.000Z",
+      expiresAt,
+    });
+    const commands = createTripCommands({ db, now: () => clock });
+    const status = () => commands.execute({
+      action: "getAgentRunStatus",
+      tripId: "trip-2026-autumn",
+      agentRunId: "agent-run-1",
+    }, "fs_admin");
+
+    if (expected === "expired") {
+      assert.equal((await status()).status, "expired", label);
+    } else {
+      await assert.rejects(status, { code: expected }, label);
+    }
+  }
+});
+
 test("an administrator cannot query a different trip's AgentRun through their own trip", async () => {
   const tripA = { ...trip(), id: "trip-a", memberUids: ["fs_admin"] };
   const tripB = { ...trip(), id: "trip-b", memberUids: ["fs_other"] };
@@ -1479,6 +1518,9 @@ test("proposal batches reject duplicate normalized HTTPS origins before writing 
     ["https://source.example/a", "https://source.example/b?different=1"],
     ["https://SOURCE.example/a", "https://source.example/b"],
     ["https://source.example:443/a", "https://source.example/b"],
+    ["https://source.example./a", "https://source.example/b"],
+    ["https://SOURCE.EXAMPLE.:443/a", "https://source.example/b"],
+    ["https://[2001:db8::1]:443/a", "https://[2001:db8::1]/b?different=1"],
   ];
 
   for (const [firstUrl, secondUrl] of variants) {
@@ -1541,6 +1583,8 @@ test("proposal-only schemas require deep-strict HTTPS evidence", async () => {
   const invalidCandidates = [
     restaurantProposal("餐厅 A", [undefined, "https://guide.example/a"]),
     restaurantProposal("餐厅 A", ["http://flyai.example/a", "https://guide.example/a"]),
+    restaurantProposal("餐厅 A", ["https://flyai.example/a#", "https://guide.example/a"]),
+    restaurantProposal("餐厅 A", ["https://./a", "https://guide.example/a"]),
     {
       ...restaurantProposal("餐厅 A"),
       evidence: restaurantProposal("餐厅 A").evidence.map((evidence, index) => (
@@ -1564,6 +1608,9 @@ test("proposal-only schemas require deep-strict HTTPS evidence", async () => {
   }
   assert.equal(db.data.trip_candidates.size, 0);
   assert.equal(db.data.trip_evidence_snapshots.size, 0);
+  assert.equal(db.data.trip_decision_events.size, 0);
+  assert.equal(db.data.trip_agent_idempotency.size, 0);
+  assert.equal(db.data.trip_agent_runs.get("agent-run-1").lastSequence, 0);
 });
 
 test("agent web evidence is server-verified, changed evidence becomes stale, and blockage is explicit", async () => {

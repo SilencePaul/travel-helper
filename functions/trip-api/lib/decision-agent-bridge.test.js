@@ -59,6 +59,72 @@ test("a valid P-256 claim consumes the pairing code and activates the run", asyn
   assert.equal(state.runs.get("agent-run-1").clientNonce, "nonce-001");
 });
 
+test("claim and command envelopes fail closed for missing, invalid, expired or uncheckable expirations", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const publicKeyJwk = publicKey.export({ format: "jwk" });
+  const cases = [
+    ["missing", undefined, new Date("2026-08-28T00:05:00.000Z")],
+    ["invalid", "not-a-date", new Date("2026-08-28T00:05:00.000Z")],
+    ["non-datetime", "2099-08-28", new Date("2026-08-28T00:05:00.000Z")],
+    ["expired", "2026-08-28T00:05:00.000Z", new Date("2026-08-28T00:05:00.000Z")],
+    ["invalid clock", "2026-08-28T00:15:00.000Z", new Date("not-a-date")],
+  ];
+
+  for (const [label, expiresAt, clock] of cases) {
+    const claimState = createTransaction(pendingRun(publicKeyJwk, { expiresAt }));
+    const bridge = createDecisionAgentBridge({ now: () => clock });
+    const claim = { agentRunId: "agent-run-1", pairingCode: "pairing-code", clientNonce: "nonce-001" };
+    await assert.rejects(
+      () => bridge.claim(claimState.transaction, { ...claim, signature: signature(privateKey, claim) }),
+      { code: "AGENT_RUN_EXPIRED" },
+      `${label} claim expiration`,
+    );
+
+    const commandState = createTransaction(pendingRun(publicKeyJwk, {
+      expiresAt,
+      status: "claimed",
+      pairingCodeHash: undefined,
+    }));
+    const command = { agentRunId: "agent-run-1", sequence: 1, idempotencyKey: "proposal-001", action: "submitProposalBatch", payload: { round: 1 } };
+    await assert.rejects(
+      () => bridge.run(commandState.transaction, { ...command, signature: signature(privateKey, command) }, async () => ({ candidates: [] })),
+      { code: "AGENT_RUN_EXPIRED" },
+      `${label} command expiration`,
+    );
+    assert.equal(commandState.idempotency.size, 0);
+    assert.equal(commandState.runs.get("agent-run-1").lastSequence, 0);
+  }
+});
+
+test("successful envelope replays reject corrupted expirations but retain the expired replay contract", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const publicKeyJwk = publicKey.export({ format: "jwk" });
+  let clock = new Date("2026-08-28T00:05:00.000Z");
+  const bridge = createDecisionAgentBridge({ now: () => clock });
+
+  const claimState = createTransaction(pendingRun(publicKeyJwk));
+  const claim = { agentRunId: "agent-run-1", pairingCode: "pairing-code", clientNonce: "nonce-001" };
+  const signedClaim = { ...claim, signature: signature(privateKey, claim) };
+  await bridge.claim(claimState.transaction, signedClaim);
+  claimState.runs.get("agent-run-1").expiresAt = "not-a-date";
+  await assert.rejects(() => bridge.claim(claimState.transaction, signedClaim), { code: "AGENT_RUN_EXPIRED" });
+
+  const commandState = createTransaction(pendingRun(publicKeyJwk, { status: "claimed", pairingCodeHash: undefined }));
+  const command = { agentRunId: "agent-run-1", sequence: 1, idempotencyKey: "proposal-001", action: "submitProposalBatch", payload: { round: 1 } };
+  const signedCommand = { ...command, signature: signature(privateKey, command) };
+  const first = await bridge.run(commandState.transaction, signedCommand, async () => ({ candidates: ["candidate-1"] }));
+  clock = new Date("2026-08-28T00:20:00.000Z");
+  assert.deepEqual(await bridge.run(commandState.transaction, signedCommand, async () => ({ candidates: [] })), {
+    result: first.result,
+    replayed: true,
+  });
+  commandState.runs.get("agent-run-1").expiresAt = undefined;
+  await assert.rejects(
+    () => bridge.run(commandState.transaction, signedCommand, async () => ({ candidates: [] })),
+    { code: "AGENT_RUN_EXPIRED" },
+  );
+});
+
 test("agent commands require the next sequence and replay the original result once", async () => {
   const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
   const state = createTransaction(pendingRun(publicKey.export({ format: "jwk" }), { status: "claimed", pairingCodeHash: undefined, clientNonce: "nonce-001" }));

@@ -49,7 +49,11 @@ const publicDecisionErrors = new Set([
   "AGENT_SCOPE_FORBIDDEN", "INVALID_AGENT_CLAIM", "INVALID_CONFIRMATION_STATE",
   "INVALID_PLACEMENT", "INVALID_PLACEMENT_STATE", "VERIFICATION_INCOMPLETE", "CURSOR_EXPIRED",
 ]);
-const agentTransportUnavailable = Symbol("agentTransportUnavailable");
+const internalDecisionErrors = new Set([
+  ...publicDecisionErrors,
+  "TRIP_NOT_FOUND", "MEMBER_NOT_FOUND", "INVALID_TRIP", "INVALID_MEMBER_STATE",
+  "MEMBER_LIMIT_REACHED", "LAST_ADMIN",
+]);
 
 function publicDecisionError(code) {
   if (publicDecisionErrors.has(code)) return code;
@@ -57,13 +61,15 @@ function publicDecisionError(code) {
   return "INVALID_REQUEST";
 }
 
-function agentFailure(error) {
-  const internalCode = safeError(error);
-  const failure = { ok: false, error: publicDecisionError(internalCode) };
-  if (internalCode === "TRIP_API_UNAVAILABLE") {
-    Object.defineProperty(failure, agentTransportUnavailable, { value: true });
-  }
-  return failure;
+function decisionFailure(error) {
+  const internalCode = typeof error?.code === "string" ? error.code : undefined;
+  if (!internalDecisionErrors.has(internalCode)) throw error;
+  const publicCode = publicDecisionError(internalCode);
+  return {
+    ok: false,
+    error: publicCode,
+    ...(publicCode === "VERSION_CONFLICT" && error?.latest ? { latest: error.latest } : {}),
+  };
 }
 
 const decisionMutationActions = new Set([
@@ -119,11 +125,11 @@ function createAgentHttpHandler({ handler, maxBodyBytes = 64 * 1024 } = {}) {
       const result = await handler(payload);
       const rawError = result?.error;
       const publicError = publicDecisionError(rawError);
-      const unavailable = result?.[agentTransportUnavailable] === true || rawError === "TRIP_API_UNAVAILABLE";
+      const unavailable = rawError === "TRIP_API_UNAVAILABLE";
       const statusCode = result?.ok === true ? 200
         : unavailable ? 503
           : publicError === "AGENT_RUN_EXPIRED" ? 410
-            : ["INVALID_AGENT_CLAIM", "AGENT_SCOPE_FORBIDDEN", "ADMIN_REQUIRED", "FORBIDDEN"].includes(publicError) ? 403
+            : ["INVALID_AGENT_CLAIM", "AGENT_SCOPE_FORBIDDEN", "ADMIN_REQUIRED", "MEMBERSHIP_REQUIRED", "FORBIDDEN"].includes(publicError) ? 403
               : 400;
       return json(statusCode, result?.ok === true ? result : { ok: false, error: publicError });
     } catch {
@@ -181,15 +187,11 @@ function createTripHandler({ db, commands, env = process.env, getUserInfo } = {}
         if (!agentCommands) {
           const error = new Error("TRIP_API_UNAVAILABLE");
           error.code = "TRIP_API_UNAVAILABLE";
-          return agentFailure(error);
+          throw error;
         }
         return agentSuccess(payload.action, await agentCommands.executeAgent(payload));
       } catch (error) {
-        const failure = agentFailure(error);
-        if (failure.error === "VERSION_CONFLICT" && error?.latest) {
-          return { ...failure, latest: error.latest };
-        }
-        return failure;
+        return decisionFailure(error);
       }
     }
     effectiveGetUserInfo ||= createRuntimeGetUserInfo(env);
@@ -201,20 +203,18 @@ function createTripHandler({ db, commands, env = process.env, getUserInfo } = {}
     }
     try {
       if (!ensureCommands()) {
-        return isDecisionMutation ? { ok: false, error: "INVALID_REQUEST" } : { error: "TRIP_API_UNAVAILABLE" };
+        if (isDecisionMutation) {
+          const error = new Error("TRIP_API_UNAVAILABLE");
+          error.code = "TRIP_API_UNAVAILABLE";
+          throw error;
+        }
+        return { error: "TRIP_API_UNAVAILABLE" };
       }
       const result = await effectiveCommands.execute(payload, actorUid);
       return isDecisionMutation ? decisionSuccess(payload.action, result) : result;
     } catch (error) {
+      if (isDecisionMutation) return decisionFailure(error);
       const code = safeError(error);
-      if (isDecisionMutation) {
-        const publicCode = publicDecisionError(code);
-        return {
-          ok: false,
-          error: publicCode,
-          ...(publicCode === "VERSION_CONFLICT" && error?.latest ? { latest: error.latest } : {}),
-        };
-      }
       return { error: code, ...(code === "VERSION_CONFLICT" && Number.isInteger(error.currentVersion) ? { currentVersion: error.currentVersion } : {}) };
     }
   };

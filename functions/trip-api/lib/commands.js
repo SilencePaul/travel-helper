@@ -85,10 +85,37 @@ const AgentEvidenceInputSchema = z.object({
   supersedesEvidenceId: z.string().min(1).optional(),
   changeReason: z.string().optional(),
 });
-const AgentProposalHttpsUrlSchema = z.string().url().refine((value) => {
-  const parsed = new URL(value);
-  return parsed.protocol === "https:" && !parsed.username && !parsed.password && !parsed.hash;
-});
+function normalizedProposalOrigin(value) {
+  if (typeof value !== "string" || value.includes("#")) return undefined;
+  try {
+    const parsed = new URL(value);
+    const authority = value.slice(value.indexOf("://") + 3).split(/[/?#]/, 1)[0];
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password || authority.includes("@")) return undefined;
+    const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
+    if (!hostname) return undefined;
+    return `https://${hostname}${parsed.port ? `:${parsed.port}` : ""}`;
+  } catch {
+    return undefined;
+  }
+}
+function utcDateTimeMilliseconds(value) {
+  const match = typeof value === "string"
+    ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/.exec(value)
+    : undefined;
+  if (!match) return Number.NaN;
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return Number.NaN;
+  const parsed = new Date(time);
+  return parsed.getUTCFullYear() === Number(match[1])
+    && parsed.getUTCMonth() + 1 === Number(match[2])
+    && parsed.getUTCDate() === Number(match[3])
+    && parsed.getUTCHours() === Number(match[4])
+    && parsed.getUTCMinutes() === Number(match[5])
+    && parsed.getUTCSeconds() === Number(match[6])
+    ? time
+    : Number.NaN;
+}
+const AgentProposalHttpsUrlSchema = z.string().url().refine((value) => normalizedProposalOrigin(value) !== undefined);
 const AgentProposalDateRangeSchema = AgentDateRangeSchema.strict();
 const AgentProposalEvidenceInputSchema = z.object({
   sourceKind: z.enum(["flyai", "amap", "web", "official", "manual"]),
@@ -805,7 +832,11 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
   }
 
   function safeAgentRun(run) {
-    const expired = run.status !== "revoked" && new Date(run.expiresAt).getTime() <= now().getTime();
+    const expiresAt = utcDateTimeMilliseconds(run.expiresAt);
+    const current = now();
+    const currentTime = current instanceof Date ? current.getTime() : Number.NaN;
+    if (!Number.isFinite(expiresAt) || !Number.isFinite(currentTime)) throw codedError("AGENT_RUN_EXPIRED");
+    const expired = run.status !== "revoked" && expiresAt <= currentTime;
     return {
       agentRunId: run.id,
       tripId: run.tripId,
@@ -874,13 +905,9 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
       if (proposal.recommendation.round !== input.payload.round) throw codedError("INVALID_REQUEST");
       const origins = new Set();
       for (const evidence of proposal.evidence) {
-        let source;
-        try { source = new URL(evidence.sourceUrl); } catch { throw codedError("INVALID_REQUEST"); }
-        if (source.protocol !== "https:" || source.username || source.password || source.hash) {
-          throw codedError("INVALID_REQUEST");
-        }
-        const effectivePort = source.port || "443";
-        origins.add(`https://${source.hostname.toLowerCase()}:${effectivePort}`);
+        const origin = normalizedProposalOrigin(evidence.sourceUrl);
+        if (!origin) throw codedError("INVALID_REQUEST");
+        origins.add(origin);
       }
       if (origins.size < 2) throw codedError("INVALID_REQUEST");
     }

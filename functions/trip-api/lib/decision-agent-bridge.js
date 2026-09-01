@@ -44,9 +44,34 @@ function verifySignedValue(publicKeyJwk, value, signature) {
   }
 }
 
+function utcDateTimeMilliseconds(value) {
+  const match = typeof value === "string"
+    ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/.exec(value)
+    : undefined;
+  if (!match) return Number.NaN;
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return Number.NaN;
+  const parsed = new Date(time);
+  return parsed.getUTCFullYear() === Number(match[1])
+    && parsed.getUTCMonth() + 1 === Number(match[2])
+    && parsed.getUTCDate() === Number(match[3])
+    && parsed.getUTCHours() === Number(match[4])
+    && parsed.getUTCMinutes() === Number(match[5])
+    && parsed.getUTCSeconds() === Number(match[6])
+    ? time
+    : Number.NaN;
+}
+
 function createDecisionAgentBridge({ now = () => new Date() } = {}) {
-  function assertUsableRun(run) {
-    if (!run || new Date(run.expiresAt).getTime() <= now().getTime()) throw codedError("AGENT_RUN_EXPIRED");
+  function assertUsableRun(run, { allowElapsed = false } = {}) {
+    const expiresAt = utcDateTimeMilliseconds(run?.expiresAt);
+    const current = now();
+    const currentTime = current instanceof Date ? current.getTime() : Number.NaN;
+    if (!Number.isFinite(expiresAt)
+      || !Number.isFinite(currentTime)
+      || (!allowElapsed && expiresAt <= currentTime)) {
+      throw codedError("AGENT_RUN_EXPIRED");
+    }
   }
 
   return {
@@ -59,6 +84,7 @@ function createDecisionAgentBridge({ now = () => new Date() } = {}) {
       if (run?.claimRequestFingerprint) {
         if (sameSecret(run.claimRequestFingerprint, claimRequestFingerprint) && run.claimResult) {
           if (beforeCommit) await beforeCommit(run);
+          assertUsableRun(run, { allowElapsed: true });
           return run.claimResult;
         }
         throw codedError("INVALID_AGENT_CLAIM");
@@ -109,6 +135,7 @@ function createDecisionAgentBridge({ now = () => new Date() } = {}) {
       const prior = one(await idempotency.doc(id).get());
       if (prior) {
         if (prior.sequence !== input.sequence || prior.request !== request) throw codedError("IDEMPOTENCY_KEY_REUSED");
+        assertUsableRun(run, { allowElapsed: true });
         return { result: prior.result, replayed: true };
       }
       assertUsableRun(run);
