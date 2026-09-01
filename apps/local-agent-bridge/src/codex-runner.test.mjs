@@ -580,12 +580,27 @@ test("JSONL accepts the documented public web-search event and the current inter
   }
 });
 
+test("JSONL accepts one turn.started between session configuration and research events", async () => {
+  const events = [
+    { type: "thread.started", thread_id: "thread-1" },
+    { type: "session_configured", session_id: "thread-1", approval_policy: "never", active_permission_profile: { id: "travel_research" } },
+    { type: "turn.started" },
+    { type: "item.completed", item: { type: "web_search", query: "hotel" } },
+    { type: "item.completed", item: { type: "agent_message", text: JSON.stringify(VALID_OUTPUT) } },
+    { type: "turn.completed" },
+  ];
+  const fake = createFakeSpawn([{ stdout: rawJsonl(events) }]);
+
+  assert.deepEqual((await makeRunner(fake).runInitial({ prompt: "private" })).output, VALID_OUTPUT);
+});
+
 test("JSONL state machine rejects missing, reordered, conflicting or inherited session evidence", async () => {
   const thread = { type: "thread.started", thread_id: "thread-1" };
   const session = { type: "session_configured", session_id: "thread-1", approval_policy: "never", active_permission_profile: { id: "travel_research" } };
   const web = { type: "item.completed", item: { type: "web_search" } };
   const output = { type: "item.completed", item: { type: "agent_message", text: JSON.stringify(VALID_OUTPUT) } };
   const done = { type: "turn.completed" };
+  const turn = { type: "turn.started" };
   const inheritedProfile = { type: "session_configured", session_id: "thread-1", approval_policy: "never", active_permission_profile: Object.create({ id: "travel_research" }) };
   const cases = [
     [{ type: "task.started", task_id: "thread-1" }, session, web, output, done],
@@ -599,6 +614,10 @@ test("JSONL state machine rejects missing, reordered, conflicting or inherited s
     [thread, session, output, done],
     [thread, web, session, output, done],
     [thread, session, output, web, done],
+    [thread, turn, session, web, output, done],
+    [thread, session, turn, turn, web, output, done],
+    [thread, session, web, turn, output, done],
+    [thread, session, { type: "item.started", item: { type: "command_execution" } }, turn, web, output, done],
     [thread, session, web, output],
     [thread, session, web, { type: "final.response", output: VALID_OUTPUT }, done],
   ];

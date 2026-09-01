@@ -300,6 +300,8 @@ function parseJsonLines(stdout) {
   let output;
   let state = "thread";
   let webSearchSeen = false;
+  let turnStartedSeen = false;
+  let researchEventSeen = false;
   const lines = stdout.split(/\r?\n/u).filter((line) => line.trim());
   if (lines.length === 0) throw codedError("CODEX_OUTPUT_INVALID");
   for (const line of lines) {
@@ -341,6 +343,12 @@ function parseJsonLines(stdout) {
     if (state === "thread" || state === "session" || state === "output" || state === "done") {
       throw codedError("CODEX_OUTPUT_INVALID");
     }
+    if (event.type === "turn.started") {
+      if (turnStartedSeen || researchEventSeen) throw codedError("CODEX_OUTPUT_INVALID");
+      turnStartedSeen = true;
+      continue;
+    }
+    researchEventSeen = true;
     if (event.type === "web_search_end") {
       webSearchSeen = true;
       continue;
