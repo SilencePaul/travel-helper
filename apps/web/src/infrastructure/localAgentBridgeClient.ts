@@ -3,6 +3,7 @@ import {
   ResearchErrorCodeSchema,
   ResearchResumeActionSchema,
   ResearchStatusSchema,
+  type AgentScope,
   type CandidateCategory,
   type ResearchErrorCode,
   type ResearchResumeAction,
@@ -51,6 +52,9 @@ const ResumeTravelResearchInputSchema = z.object({
 const CancelResearchInputSchema = z.object({
   researchTaskId: OpaqueIdentifierSchema,
 }).strict();
+const MAX_RESPONSE_BYTES = 64 * 1_024;
+const JSON_CONTENT_TYPE = /^application\/json(?:\s*;\s*charset=utf-8)?$/iu;
+const PROTOTYPE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
 export type PreparedAgentRun = z.infer<typeof PreparedAgentRunSchema>;
 export type LocalAgentClaim = z.infer<typeof ClaimResponseSchema>["data"];
@@ -81,6 +85,7 @@ export class LocalAgentBridgeError extends Error {
 
 export interface LocalAgentBridge {
   prepare(options?: RequestOptions): Promise<PreparedAgentRun>;
+  prepare(scope: AgentScope[], options?: RequestOptions): Promise<PreparedAgentRun>;
   claim(agentRunId: string, options?: RequestOptions): Promise<LocalAgentClaim>;
   executeTravelResearch(input: ExecuteTravelResearchInput, options?: RequestOptions): Promise<ResearchStatus>;
   getResearchStatus(options?: RequestOptions): Promise<ResearchStatus>;
@@ -89,6 +94,27 @@ export interface LocalAgentBridge {
 }
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+function invalidBridgeResponse(): LocalAgentBridgeError {
+  return new LocalAgentBridgeError("INVALID_BRIDGE_RESPONSE");
+}
+
+function hasPrototypeKey(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+  const pending: object[] = [value];
+  const seen = new Set<object>();
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    if (seen.has(current)) continue;
+    seen.add(current);
+    for (const key of Object.keys(current)) {
+      if (PROTOTYPE_KEYS.has(key)) return true;
+      const nested = (current as Record<string, unknown>)[key];
+      if (nested !== null && typeof nested === "object") pending.push(nested);
+    }
+  }
+  return false;
+}
 
 function strictLoopbackOrigin(value: string) {
   let url: URL;
@@ -131,17 +157,27 @@ export class LocalAgentBridgeClient implements LocalAgentBridge {
     body: Record<string, unknown> | undefined,
     signal?: AbortSignal,
   ) {
+    if (signal?.aborted) throw new LocalAgentBridgeError("BRIDGE_UNAVAILABLE");
     const controller = new AbortController();
-    const abort = () => controller.abort(signal?.reason);
-    if (signal?.aborted) abort();
-    else signal?.addEventListener("abort", abort, { once: true });
-    const timeout = globalThis.setTimeout(() => controller.abort(new Error("BRIDGE_TIMEOUT")), this.timeoutMs);
+    let abortRequest!: () => void;
+    let aborted = false;
+    const abortPromise = new Promise<never>((_resolve, reject) => {
+      abortRequest = () => {
+        if (aborted) return;
+        aborted = true;
+        controller.abort();
+        reject(new LocalAgentBridgeError("BRIDGE_UNAVAILABLE"));
+      };
+    });
+    signal?.addEventListener("abort", abortRequest, { once: true });
+    const timeout = globalThis.setTimeout(abortRequest, this.timeoutMs);
     try {
       const init: RequestInit = {
         method,
         mode: "cors",
         credentials: "omit",
         cache: "no-store",
+        redirect: "error",
         signal: controller.signal,
       };
       if (method === "POST") {
@@ -150,34 +186,112 @@ export class LocalAgentBridgeClient implements LocalAgentBridge {
       }
       let response: Response;
       try {
-        response = await this.fetch(`${this.origin}${path}`, init);
+        const fetchPromise = Promise.resolve(this.fetch(`${this.origin}${path}`, init))
+          .catch(() => { throw new LocalAgentBridgeError("BRIDGE_UNAVAILABLE"); });
+        response = await Promise.race([fetchPromise, abortPromise]);
       } catch {
         throw new LocalAgentBridgeError("BRIDGE_UNAVAILABLE");
       }
-      let responseBody: unknown;
-      try {
-        responseBody = await response.json();
-      } catch {
-        throw new LocalAgentBridgeError(controller.signal.aborted
-          ? "BRIDGE_UNAVAILABLE"
-          : "INVALID_BRIDGE_RESPONSE");
+      const responseBody = await this.readResponse(response, abortPromise);
+      if (response.status >= 200 && response.status < 300 && response.status !== 200) {
+        throw invalidBridgeResponse();
       }
-      if (!response.ok) {
+      if (response.status !== 200) {
         const errorResponse = ErrorResponseSchema.safeParse(responseBody);
-        if (!errorResponse.success) throw new LocalAgentBridgeError("INVALID_BRIDGE_RESPONSE");
+        if (!errorResponse.success) throw invalidBridgeResponse();
         throw new LocalAgentBridgeError(errorResponse.data.error);
       }
       return responseBody;
     } finally {
       globalThis.clearTimeout(timeout);
-      signal?.removeEventListener("abort", abort);
+      signal?.removeEventListener("abort", abortRequest);
     }
   }
 
-  async prepare(options: RequestOptions = {}): Promise<PreparedAgentRun> {
+  private async readResponse(response: Response, abortPromise: Promise<never>): Promise<unknown> {
+    const contentType = response.headers?.get("content-type");
+    if (typeof contentType !== "string" || !JSON_CONTENT_TYPE.test(contentType)) throw invalidBridgeResponse();
+    const declaredLength = response.headers.get("content-length");
+    if (declaredLength !== null) {
+      if (!/^\d+$/u.test(declaredLength)) throw invalidBridgeResponse();
+      const parsedLength = Number(declaredLength);
+      if (!Number.isSafeInteger(parsedLength) || parsedLength > MAX_RESPONSE_BYTES) throw invalidBridgeResponse();
+    }
+    if (!response.body) throw invalidBridgeResponse();
+
+    let reader: ReadableStreamDefaultReader<Uint8Array>;
+    try {
+      reader = response.body.getReader();
+    } catch {
+      throw invalidBridgeResponse();
+    }
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    let source = "";
+    let receivedBytes = 0;
+    let completed = false;
+    try {
+      while (true) {
+        let chunk: ReadableStreamReadResult<Uint8Array>;
+        try {
+          const readPromise = Promise.resolve(reader.read())
+            .catch(() => { throw new LocalAgentBridgeError("BRIDGE_UNAVAILABLE"); });
+          chunk = await Promise.race([readPromise, abortPromise]);
+        } catch (error) {
+          if (error instanceof LocalAgentBridgeError) throw error;
+          throw new LocalAgentBridgeError("BRIDGE_UNAVAILABLE");
+        }
+        if (chunk.done) {
+          completed = true;
+          break;
+        }
+        if (!ArrayBuffer.isView(chunk.value) || chunk.value.BYTES_PER_ELEMENT !== 1) {
+          throw invalidBridgeResponse();
+        }
+        const bytes = new Uint8Array(chunk.value.buffer, chunk.value.byteOffset, chunk.value.byteLength);
+        receivedBytes += bytes.byteLength;
+        if (receivedBytes > MAX_RESPONSE_BYTES) throw invalidBridgeResponse();
+        try {
+          source += decoder.decode(bytes, { stream: true });
+        } catch {
+          throw invalidBridgeResponse();
+        }
+      }
+      try {
+        source += decoder.decode();
+      } catch {
+        throw invalidBridgeResponse();
+      }
+    } finally {
+      if (!completed) {
+        try {
+          void Promise.resolve(reader.cancel()).catch(() => undefined);
+        } catch {
+          // Best-effort cancellation; the explicit abort race has already settled the caller.
+        }
+      }
+      try { reader.releaseLock(); } catch { /* a non-cooperative pending reader stays isolated */ }
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(source);
+    } catch {
+      throw invalidBridgeResponse();
+    }
+    if (hasPrototypeKey(parsed)) throw invalidBridgeResponse();
+    return parsed;
+  }
+
+  async prepare(options?: RequestOptions): Promise<PreparedAgentRun>;
+  async prepare(scope: AgentScope[], options?: RequestOptions): Promise<PreparedAgentRun>;
+  async prepare(
+    optionsOrScope: RequestOptions | AgentScope[] = {},
+    legacyOptions: RequestOptions = {},
+  ): Promise<PreparedAgentRun> {
+    const options = Array.isArray(optionsOrScope) ? legacyOptions : optionsOrScope;
     const response = await this.request("POST", "/v1/agent-runs/prepare", {}, options.signal);
     const parsed = PrepareResponseSchema.safeParse(response);
-    if (!parsed.success) throw new LocalAgentBridgeError("INVALID_BRIDGE_RESPONSE");
+    if (!parsed.success) throw invalidBridgeResponse();
     return parsed.data.data;
   }
 
@@ -190,7 +304,7 @@ export class LocalAgentBridgeClient implements LocalAgentBridge {
     );
     const parsed = ClaimResponseSchema.safeParse(response);
     if (!parsed.success || parsed.data.data.agentRunId !== agentRunId) {
-      throw new LocalAgentBridgeError("INVALID_BRIDGE_RESPONSE");
+      throw invalidBridgeResponse();
     }
     return parsed.data.data;
   }
@@ -211,21 +325,38 @@ export class LocalAgentBridgeClient implements LocalAgentBridge {
     input: ResumeTravelResearchInput,
     options: RequestOptions = {},
   ): Promise<ResearchStatus> {
-    return this.researchPost("/v1/agent-runs/resume-travel-research", ResumeTravelResearchInputSchema.parse(input), options);
+    const parsedInput = ResumeTravelResearchInputSchema.parse(input);
+    return this.researchPost(
+      "/v1/agent-runs/resume-travel-research",
+      parsedInput,
+      options,
+      parsedInput.researchTaskId,
+    );
   }
 
   async cancelResearch(input: CancelResearchInput, options: RequestOptions = {}): Promise<ResearchStatus> {
-    return this.researchPost("/v1/agent-runs/cancel-research", CancelResearchInputSchema.parse(input), options);
+    const parsedInput = CancelResearchInputSchema.parse(input);
+    return this.researchPost("/v1/agent-runs/cancel-research", parsedInput, options, parsedInput.researchTaskId);
   }
 
-  private async researchPost(path: string, body: Record<string, unknown>, options: RequestOptions) {
+  private async researchPost(
+    path: string,
+    body: Record<string, unknown>,
+    options: RequestOptions,
+    expectedResearchTaskId?: string,
+  ) {
     const response = await this.request("POST", path, body, options.signal);
-    return this.parseResearchStatus(response);
+    return this.parseResearchStatus(response, expectedResearchTaskId);
   }
 
-  private parseResearchStatus(response: unknown) {
+  private parseResearchStatus(response: unknown, expectedResearchTaskId?: string) {
     const parsed = ResearchStatusResponseSchema.safeParse(response);
-    if (!parsed.success) throw new LocalAgentBridgeError("INVALID_BRIDGE_RESPONSE");
+    if (!parsed.success) throw invalidBridgeResponse();
+    if (expectedResearchTaskId !== undefined
+      && parsed.data.data.phase !== "idle"
+      && parsed.data.data.researchTaskId !== expectedResearchTaskId) {
+      throw invalidBridgeResponse();
+    }
     return parsed.data.data;
   }
 }
