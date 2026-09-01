@@ -12,6 +12,7 @@ import {
 import { createMacosNotifier } from "./macos-notifier.mjs";
 
 const STATE_FILE = "travel-research-state.json";
+const PUBLIC_RESOLVER = async () => [{ address: "8.8.8.8", family: 4 }];
 
 function recoverableState(overrides = {}) {
   return {
@@ -38,7 +39,7 @@ async function temporaryStore(context, options = {}) {
   return {
     directory,
     filePath: join(directory, STATE_FILE),
-    store: createResearchStateStore({ directory, ...options }),
+    store: createResearchStateStore({ directory, resolveHostname: PUBLIC_RESOLVER, ...options }),
   };
 }
 
@@ -118,6 +119,7 @@ test("cleans an exclusively-created temporary file when writing fails", async (c
     directory,
     fileSystem,
     tempToken: () => "failed-write-token",
+    resolveHostname: PUBLIC_RESOLVER,
   });
 
   await assert.rejects(store.save(recoverableState()), { code: "RESEARCH_STATE_UNAVAILABLE" });
@@ -182,7 +184,7 @@ test("persists a new owner-action transition before notifying and does not re-no
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].persisted, first);
 
-  const restarted = createResearchStateStore({ directory });
+  const restarted = createResearchStateStore({ directory, resolveHostname: PUBLIC_RESOLVER });
   await restarted.persistNeedsOwnerAction(first, notifier);
   assert.equal(calls.length, 1);
 
@@ -231,8 +233,8 @@ test("a hanging macOS notification cannot keep a persisted transition pending", 
 
 test("two independent stores serialize the same transition and notify only once", async (context) => {
   const { directory } = await temporaryStore(context);
-  const first = createResearchStateStore({ directory });
-  const second = createResearchStateStore({ directory });
+  const first = createResearchStateStore({ directory, resolveHostname: PUBLIC_RESOLVER });
+  const second = createResearchStateStore({ directory, resolveHostname: PUBLIC_RESOLVER });
   const observedLockContents = [];
   let notificationCalls = 0;
   const notifier = {
@@ -262,12 +264,24 @@ test("recovers an owner-only stale lock but bounds waiting on a live lock", asyn
   await chmod(lockPath, 0o600);
   await utimes(lockPath, new Date(0), new Date(0));
 
-  const recovered = createResearchStateStore({ directory, lockWaitMs: 100, lockRetryMs: 2, lockStaleMs: 10 });
+  const recovered = createResearchStateStore({
+    directory,
+    lockWaitMs: 100,
+    lockRetryMs: 2,
+    lockStaleMs: 10,
+    resolveHostname: PUBLIC_RESOLVER,
+  });
   await recovered.persistNeedsOwnerAction(recoverableState(), { notifyOwnerAction: async () => true });
   await assert.rejects(stat(lockPath), { code: "ENOENT" });
 
   await writeFile(lockPath, "", { flag: "wx", mode: 0o600 });
-  const bounded = createResearchStateStore({ directory, lockWaitMs: 20, lockRetryMs: 2, lockStaleMs: 60_000 });
+  const bounded = createResearchStateStore({
+    directory,
+    lockWaitMs: 20,
+    lockRetryMs: 2,
+    lockStaleMs: 60_000,
+    resolveHostname: PUBLIC_RESOLVER,
+  });
   await assert.rejects(
     bounded.persistNeedsOwnerAction(recoverableState({ updatedAt: "2026-09-01T01:05:06.000Z" }), {
       notifyOwnerAction: async () => true,
@@ -290,7 +304,7 @@ test("cleans a newly-created lock when lock validation fails", async (context) =
       };
     },
   };
-  const store = createResearchStateStore({ directory, fileSystem });
+  const store = createResearchStateStore({ directory, fileSystem, resolveHostname: PUBLIC_RESOLVER });
 
   await assert.rejects(
     store.persistNeedsOwnerAction(recoverableState(), { notifyOwnerAction: async () => true }),
@@ -304,6 +318,7 @@ test("load reads and validates through one no-follow file descriptor", async (co
   await store.save(recoverableState());
   const fdOnly = createResearchStateStore({
     directory,
+    resolveHostname: PUBLIC_RESOLVER,
     fileSystem: {
       ...fs,
       async readFile() { throw new Error("path read must not be used"); },
@@ -344,4 +359,136 @@ test("rejects local, private, reserved, and IP-literal blocked sources", async (
   }
 
   await assert.doesNotReject(store.save(recoverableState({ blockedHostname: "login.booking.com" })));
+});
+
+test("renews a short lock lease throughout a slow write so a second store cannot steal it", async (context) => {
+  const { directory } = await temporaryStore(context);
+  let slowWriteReached;
+  const reachedSlowWrite = new Promise((resolve) => { slowWriteReached = resolve; });
+  let delayed = false;
+  const slowFileSystem = {
+    ...fs,
+    async rename(from, to) {
+      if (!delayed && to.endsWith(STATE_FILE)) {
+        delayed = true;
+        slowWriteReached();
+        await new Promise((resolve) => setTimeout(resolve, 60));
+      }
+      return fs.rename(from, to);
+    },
+  };
+  const lockOptions = {
+    lockWaitMs: 250,
+    lockRetryMs: 2,
+    lockStaleMs: 15,
+    resolveHostname: PUBLIC_RESOLVER,
+  };
+  const first = createResearchStateStore({ directory, fileSystem: slowFileSystem, ...lockOptions });
+  const second = createResearchStateStore({ directory, ...lockOptions });
+  let notifications = 0;
+  const notifier = { notifyOwnerAction: async () => { notifications += 1; return true; } };
+
+  const firstRun = first.persistNeedsOwnerAction(recoverableState(), notifier);
+  await reachedSlowWrite;
+  const secondRun = second.persistNeedsOwnerAction(recoverableState(), notifier);
+  await Promise.all([firstRun, secondRun]);
+
+  assert.equal(notifications, 1);
+});
+
+test("an old owner never removes a replacement lock it does not own", async (context) => {
+  const { directory, store } = await temporaryStore(context, {
+    lockStaleMs: 1_000,
+  });
+  const lockPath = join(directory, ".travel-research-state.lock");
+  const notifier = {
+    async notifyOwnerAction() {
+      await fs.unlink(lockPath);
+      await writeFile(lockPath, "", { flag: "wx", mode: 0o600 });
+      await chmod(lockPath, 0o600);
+      return true;
+    },
+  };
+
+  await assert.rejects(
+    store.persistNeedsOwnerAction(recoverableState(), notifier),
+    { code: "RESEARCH_STATE_UNAVAILABLE" },
+  );
+  assert.equal((await stat(lockPath)).isFile(), true);
+});
+
+test("DNS validation rejects hostnames resolving to any non-global address on save and load", async (context) => {
+  const { directory } = await temporaryStore(context);
+  const privateAnswers = [
+    "127.0.0.1",
+    "10.0.0.8",
+    "100.64.0.1",
+    "169.254.1.1",
+    "192.168.1.1",
+    "198.51.100.2",
+    "224.0.0.1",
+    "::1",
+    "::127.0.0.1",
+    "::ffff:127.0.0.1",
+    "fc00::1",
+    "fe80::1",
+    "2001:db8::1",
+    "ff00::1",
+  ];
+  for (const address of privateAnswers) {
+    const store = createResearchStateStore({
+      directory,
+      resolveHostname: async () => [{ address }],
+    });
+    await assert.rejects(
+      store.save(recoverableState({ blockedHostname: "127.0.0.1.nip.io" })),
+      { code: "RESEARCH_STATE_INVALID" },
+    );
+  }
+
+  const mixed = createResearchStateStore({
+    directory,
+    resolveHostname: async () => ["8.8.8.8", "192.168.1.1"],
+  });
+  await assert.rejects(mixed.save(recoverableState()), { code: "RESEARCH_STATE_INVALID" });
+
+  const writer = createResearchStateStore({ directory, resolveHostname: PUBLIC_RESOLVER });
+  await writer.save(recoverableState({ blockedHostname: "127.0.0.1.nip.io" }));
+  const reader = createResearchStateStore({
+    directory,
+    resolveHostname: async () => [{ address: "127.0.0.1", family: 4 }],
+  });
+  await assert.rejects(reader.load(), { code: "RESEARCH_STATE_INVALID" });
+});
+
+test("DNS validation fails closed on empty, malformed, failed, and timed-out resolution", async (context) => {
+  const { directory } = await temporaryStore(context);
+  const resolvers = [
+    async () => [],
+    async () => [{ address: "not-an-ip" }],
+    async () => { throw new Error("raw DNS failure"); },
+    async () => new Promise(() => {}),
+  ];
+
+  for (const resolveHostname of resolvers) {
+    const store = createResearchStateStore({ directory, resolveHostname, dnsTimeoutMs: 5 });
+    await assert.rejects(store.save(recoverableState()), { code: "RESEARCH_STATE_INVALID" });
+  }
+});
+
+test("DNS validation accepts only a hostname whose complete answer set is global", async (context) => {
+  const calls = [];
+  const { store } = await temporaryStore(context, {
+    resolveHostname: async (hostname) => {
+      calls.push(hostname);
+      return [
+        { address: "8.8.8.8", family: 4 },
+        { address: "2606:4700:4700::1111", family: 6 },
+      ];
+    },
+  });
+
+  await store.save(recoverableState({ blockedHostname: "login.booking.com" }));
+  assert.deepEqual(await store.load(), recoverableState({ blockedHostname: "login.booking.com" }));
+  assert.deepEqual(calls, ["login.booking.com", "login.booking.com"]);
 });
