@@ -78,6 +78,59 @@ test("returns stable decision state errors", async () => {
   assert.deepEqual(await handler({ action: "setConfirmationReceipt" }), { ok: false, error: "INVALID_CONFIRMATION_STATE" });
 });
 
+test("Decision mutations use only the declared failure envelope without changing legacy read failures", async () => {
+  const unauthenticated = createTripHandler({ getUserInfo: () => undefined, commands: { execute: async () => ({}) } });
+  const mutation = {
+    action: "upsertPreference",
+    tripId: "trip-1",
+    expectedRevision: 0,
+    idempotencyKey: "request-001",
+    answers: {},
+  };
+
+  assert.deepEqual(await unauthenticated(mutation), { ok: false, error: "AUTH_REQUIRED" });
+  assert.deepEqual(await unauthenticated({ action: "getTrip", tripId: "trip-1" }), { error: "AUTH_REQUIRED" });
+  const unavailable = createTripHandler({ getUserInfo: () => ({ customUserId: "fs_admin" }), env: {} });
+  assert.deepEqual(await unavailable(mutation), { ok: false, error: "INVALID_REQUEST" });
+
+  for (const [internalCode, publicCode] of [
+    ["TRIP_NOT_FOUND", "FORBIDDEN"],
+    ["MEMBER_NOT_FOUND", "INVALID_REQUEST"],
+    ["TRIP_API_UNAVAILABLE", "INVALID_REQUEST"],
+    ["UNEXPECTED_PROVIDER_ERROR", "INVALID_REQUEST"],
+  ]) {
+    const handler = createTripHandler({
+      getUserInfo: () => ({ customUserId: "fs_admin" }),
+      commands: { execute: async () => { const error = new Error(internalCode); error.code = internalCode; throw error; } },
+    });
+    assert.deepEqual(await handler(mutation), { ok: false, error: publicCode });
+  }
+});
+
+test("Agent failures always use a declared ok-false envelope and hide internal resource errors", async () => {
+  const input = {
+    action: "getDecisionContext",
+    agentRunId: "agent-run-1",
+    sequence: 1,
+    idempotencyKey: "context-001",
+    payload: {},
+    signature: "signature",
+  };
+  for (const [internalCode, publicCode] of [
+    ["TRIP_NOT_FOUND", "FORBIDDEN"],
+    ["MEMBER_NOT_FOUND", "INVALID_REQUEST"],
+    ["TRIP_API_UNAVAILABLE", "INVALID_REQUEST"],
+    ["UNEXPECTED_PROVIDER_ERROR", "INVALID_REQUEST"],
+  ]) {
+    const handler = createTripHandler({
+      commands: { executeAgent: async () => { const error = new Error(internalCode); error.code = internalCode; throw error; } },
+    });
+    const result = await handler(input);
+    assert.deepEqual(result, { ok: false, error: publicCode });
+    assert.deepEqual(Object.keys(result).sort(), ["error", "ok"]);
+  }
+});
+
 test("the local bridge can claim an agent run without a browser identity", async () => {
   const calls = [];
   const claimed = { agentRunId: "agent-run-1", claimedAt: "2026-08-28T00:00:00.000Z", expiresAt: "2026-08-28T00:15:00.000Z", nextSequence: 1 };
@@ -299,7 +352,7 @@ test("the public Agent adapter maps unexpected handler failures to 503", async (
     body: JSON.stringify({ action: "claimAgentRun", agentRunId: "run", pairingCode: "code", clientNonce: "nonce-001", signature: "signature" }),
   });
   assert.equal(response.statusCode, 503);
-  assert.deepEqual(JSON.parse(response.body), { ok: false, error: "TRIP_API_UNAVAILABLE" });
+  assert.deepEqual(JSON.parse(response.body), { ok: false, error: "INVALID_REQUEST" });
 });
 
 test("the public Agent adapter maps a returned backend outage to 503", async () => {
@@ -312,9 +365,38 @@ test("the public Agent adapter maps a returned backend outage to 503", async () 
   });
 
   assert.equal(response.statusCode, 503);
-  assert.deepEqual(JSON.parse(response.body), { ok: false, error: "TRIP_API_UNAVAILABLE" });
+  assert.deepEqual(JSON.parse(response.body), { ok: false, error: "INVALID_REQUEST" });
   assert.equal(response.headers["cache-control"], "no-store");
   assert.equal(response.body.includes("database"), false);
+});
+
+test("the real Agent handler preserves transport-unavailable status without exposing it in the contract body", async () => {
+  const handler = createTripHandler({
+    commands: {
+      executeAgent: async () => {
+        const error = new Error("database unavailable");
+        error.code = "TRIP_API_UNAVAILABLE";
+        throw error;
+      },
+    },
+  });
+  const transport = createAgentHttpHandler({ handler });
+  const response = await transport({
+    httpMethod: "POST",
+    path: "/api/agent",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      action: "getDecisionContext",
+      agentRunId: "agent-run-1",
+      sequence: 1,
+      idempotencyKey: "context-001",
+      payload: {},
+      signature: "signature",
+    }),
+  });
+
+  assert.equal(response.statusCode, 503);
+  assert.deepEqual(JSON.parse(response.body), { ok: false, error: "INVALID_REQUEST" });
 });
 
 test("the public Agent entry rejects an invalid signature through the real command verifier", async () => {

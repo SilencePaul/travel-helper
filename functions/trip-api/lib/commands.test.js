@@ -1161,6 +1161,111 @@ test("demotion blocks old context and submit replays while the self-revoke repla
   assert.deepEqual(replay, { ...first, replayed: true });
 });
 
+test("demotion blocks legacy scoped Agent actions on replay and fresh envelopes without writes", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const db = createDb({
+    members: [member("fs_admin", "admin"), member("fs_member", "member")],
+    trips: [{ ...trip(), memberUids: ["fs_admin", "fs_member"] }],
+    candidates: [candidate({
+      entity: { name: "海边酒店", address: "香港" },
+      applicability: { dates: { start: "2026-10-01", end: "2026-10-02" }, travelers: 2 },
+      recommendation: { round: 1, reason: "位置合适", preferenceRevisionIds: [], feedbackIds: [] },
+      verificationState: "candidate",
+      decisionState: "none",
+    })],
+  });
+  for (const uid of ["fs_admin", "fs_member"]) {
+    db.data.trip_preferences.set(`trip-2026-autumn:${uid}`, {
+      id: `trip-2026-autumn:${uid}`,
+      tripId: "trip-2026-autumn",
+      ownerUid: uid,
+      answers: { pace: "slow" },
+      status: "completed",
+      revision: 1,
+      updatedAt: "2026-08-28T07:00:00.000Z",
+      updatedBy: uid,
+    });
+  }
+  db.data.trip_agent_runs.set("legacy-run-1", {
+    id: "legacy-run-1",
+    tripId: "trip-2026-autumn",
+    creatorUid: "fs_admin",
+    publicKeyJwk: publicKey.export({ format: "jwk" }),
+    scope: ["appendEvidenceSnapshot", "reportVerificationBlocked", "generatePreferenceSummary"],
+    status: "claimed",
+    lastSequence: 0,
+    revision: 2,
+    expiresAt: "2026-08-28T08:00:00.000Z",
+  });
+  const commands = createTripCommands({
+    db,
+    now: () => new Date("2026-08-28T07:10:00.000Z"),
+    randomId: () => "legacy-evidence-1",
+  });
+  const append = {
+    agentRunId: "legacy-run-1",
+    sequence: 1,
+    idempotencyKey: "legacy-append-001",
+    action: "appendEvidenceSnapshot",
+    payload: {
+      candidateId: "candidate-1",
+      expectedCandidateRevision: 2,
+      evidence: {
+        sourceKind: "manual",
+        sourceName: "管理员手工证据",
+        capturedAt: "2026-08-28T07:00:00.000Z",
+        queryContext: {},
+        captureMethod: "manual",
+        facts: { name: "海边酒店", address: "香港", openInformation: "not_provided", priceSnapshot: "not_provided" },
+      },
+    },
+  };
+  const report = {
+    agentRunId: "legacy-run-1",
+    sequence: 2,
+    idempotencyKey: "legacy-report-001",
+    action: "reportVerificationBlocked",
+    payload: { candidateId: "candidate-1", expectedCandidateRevision: 3, reason: "captcha" },
+  };
+  const summary = {
+    agentRunId: "legacy-run-1",
+    sequence: 3,
+    idempotencyKey: "legacy-summary-001",
+    action: "generatePreferenceSummary",
+    payload: { sourcePreferenceRevisions: { fs_admin: 1, fs_member: 1 } },
+  };
+  for (const envelope of [append, report, summary]) {
+    await commands.executeAgent({ ...envelope, signature: agentSignature(privateKey, envelope) });
+  }
+  const beforeDemotion = {
+    candidate: structuredClone(db.data.trip_candidates.get("candidate-1")),
+    evidenceCount: db.data.trip_evidence_snapshots.size,
+    summary: structuredClone(db.data.trip_preference_summaries.get("trip-2026-autumn")),
+    eventCount: db.data.trip_decision_events.size,
+    auditCount: db.data.decisionAudits.length,
+    run: structuredClone(db.data.trip_agent_runs.get("legacy-run-1")),
+  };
+  db.data.members.get("fs_admin").role = "member";
+
+  for (const envelope of [append, report, summary]) {
+    await assert.rejects(
+      () => commands.executeAgent({ ...envelope, signature: agentSignature(privateKey, envelope) }),
+      { code: "ADMIN_REQUIRED" },
+    );
+    const fresh = { ...envelope, sequence: 4, idempotencyKey: `${envelope.action}-fresh` };
+    await assert.rejects(
+      () => commands.executeAgent({ ...fresh, signature: agentSignature(privateKey, fresh) }),
+      { code: "ADMIN_REQUIRED" },
+    );
+  }
+  assert.deepEqual(db.data.trip_candidates.get("candidate-1"), beforeDemotion.candidate);
+  assert.equal(db.data.trip_evidence_snapshots.size, beforeDemotion.evidenceCount);
+  assert.deepEqual(db.data.trip_preference_summaries.get("trip-2026-autumn"), beforeDemotion.summary);
+  assert.equal(db.data.trip_decision_events.size, beforeDemotion.eventCount);
+  assert.equal(db.data.decisionAudits.length, beforeDemotion.auditCount);
+  assert.deepEqual(db.data.trip_agent_runs.get("legacy-run-1"), beforeDemotion.run);
+});
+
 test("a claimed scoped agent submits an atomic two-candidate proposal batch", async () => {
   const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
   const ids = ["agent-run-1", "candidate-1", "evidence-1", "evidence-2", "candidate-2", "evidence-3", "evidence-4"];
@@ -1335,6 +1440,40 @@ test("Agent decision context returns a whitelist Trip projection using traveler 
   assert.equal(result.context.workspace.tripId, "trip-2026-autumn");
 });
 
+test("Agent decision context fails closed when a stored Trip has no travelers", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const db = createDb({
+    members: [member("fs_admin", "admin")],
+    trips: [{ ...trip(), travelers: [], memberUids: ["fs_admin"] }],
+  });
+  db.data.trip_agent_runs.set("agent-run-1", {
+    id: "agent-run-1",
+    tripId: "trip-2026-autumn",
+    creatorUid: "fs_admin",
+    publicKeyJwk: publicKey.export({ format: "jwk" }),
+    scope: ["submitProposalBatch"],
+    status: "claimed",
+    lastSequence: 0,
+    revision: 2,
+    expiresAt: "2026-08-28T08:00:00.000Z",
+  });
+  const commands = createTripCommands({ db, now: () => new Date("2026-08-28T07:05:00.000Z") });
+  const signed = {
+    agentRunId: "agent-run-1",
+    sequence: 1,
+    idempotencyKey: "empty-travelers-001",
+    action: "getDecisionContext",
+    payload: {},
+  };
+
+  await assert.rejects(
+    () => commands.executeAgent({ ...signed, signature: agentSignature(privateKey, signed) }),
+    { code: "INVALID_REQUEST" },
+  );
+  assert.equal(db.data.trip_agent_idempotency.size, 0);
+  assert.equal(db.data.trip_agent_runs.get("agent-run-1").lastSequence, 0);
+});
+
 test("proposal batches reject duplicate normalized HTTPS origins before writing anything", async () => {
   const variants = [
     ["https://source.example/a", "https://source.example/b?different=1"],
@@ -1430,7 +1569,7 @@ test("proposal-only schemas require deep-strict HTTPS evidence", async () => {
 test("agent web evidence is server-verified, changed evidence becomes stale, and blockage is explicit", async () => {
   const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
   const db = createDb({
-    members: [member("fs_member", "member")],
+    members: [member("fs_member", "admin")],
     trips: [{ ...trip(), memberUids: ["fs_member"] }],
     candidates: [candidate({
       category: "hotel",

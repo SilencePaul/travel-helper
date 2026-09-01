@@ -379,6 +379,11 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
   }
 
   function safeAgentTrip(trip) {
+    if (!Array.isArray(trip.travelers)
+      || trip.travelers.length === 0
+      || trip.travelers.some((traveler) => !traveler || typeof traveler.name !== "string")) {
+      throw codedError("INVALID_REQUEST");
+    }
     return {
       version: trip.version,
       days: trip.days.map(({ id, date, city }) => ({ id, date, city })),
@@ -1078,7 +1083,7 @@ function createTripCommands({ db, now = () => new Date(), randomId = randomUUID,
           if (input.action === "generatePreferenceSummary") return generateAgentPreferenceSummary(transaction, input, run);
           return getAgentDecisionContext(transaction, authorization.trip);
         },
-        ["submitProposalBatch", "getDecisionContext"].includes(input.action)
+        input.action !== "revokeAgentRunSelf"
           ? (run) => assertTripAdmin(transaction, run.tripId, run.creatorUid)
           : undefined,
       ));

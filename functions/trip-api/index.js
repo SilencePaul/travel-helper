@@ -43,6 +43,29 @@ function safeError(error) {
   return allowed.has(code) ? code : "TRIP_API_UNAVAILABLE";
 }
 
+const publicDecisionErrors = new Set([
+  "AUTH_REQUIRED", "MEMBERSHIP_REQUIRED", "ADMIN_REQUIRED", "FORBIDDEN", "INVALID_REQUEST",
+  "VERSION_CONFLICT", "IDEMPOTENCY_KEY_REUSED", "SUMMARY_NOT_READY", "AGENT_RUN_EXPIRED",
+  "AGENT_SCOPE_FORBIDDEN", "INVALID_AGENT_CLAIM", "INVALID_CONFIRMATION_STATE",
+  "INVALID_PLACEMENT", "INVALID_PLACEMENT_STATE", "VERIFICATION_INCOMPLETE", "CURSOR_EXPIRED",
+]);
+const agentTransportUnavailable = Symbol("agentTransportUnavailable");
+
+function publicDecisionError(code) {
+  if (publicDecisionErrors.has(code)) return code;
+  if (code === "TRIP_NOT_FOUND") return "FORBIDDEN";
+  return "INVALID_REQUEST";
+}
+
+function agentFailure(error) {
+  const internalCode = safeError(error);
+  const failure = { ok: false, error: publicDecisionError(internalCode) };
+  if (internalCode === "TRIP_API_UNAVAILABLE") {
+    Object.defineProperty(failure, agentTransportUnavailable, { value: true });
+  }
+  return failure;
+}
+
 const decisionMutationActions = new Set([
   "upsertPreference", "completePreference", "skipPreference", "generatePreferenceSummary",
   "recordFeedback", "placeTentative", "attachTentativeToLegacyTrip", "detachTentativeFromLegacyTrip",
@@ -94,14 +117,17 @@ function createAgentHttpHandler({ handler, maxBodyBytes = 64 * 1024 } = {}) {
     }
     try {
       const result = await handler(payload);
+      const rawError = result?.error;
+      const publicError = publicDecisionError(rawError);
+      const unavailable = result?.[agentTransportUnavailable] === true || rawError === "TRIP_API_UNAVAILABLE";
       const statusCode = result?.ok === true ? 200
-        : result?.error === "AGENT_RUN_EXPIRED" ? 410
-          : result?.error === "TRIP_API_UNAVAILABLE" ? 503
-            : ["INVALID_AGENT_CLAIM", "AGENT_SCOPE_FORBIDDEN", "ADMIN_REQUIRED", "FORBIDDEN"].includes(result?.error) ? 403
+        : unavailable ? 503
+          : publicError === "AGENT_RUN_EXPIRED" ? 410
+            : ["INVALID_AGENT_CLAIM", "AGENT_SCOPE_FORBIDDEN", "ADMIN_REQUIRED", "FORBIDDEN"].includes(publicError) ? 403
               : 400;
-      return json(statusCode, result?.ok === true || result?.ok === false ? result : { ok: false, error: "TRIP_API_UNAVAILABLE" });
+      return json(statusCode, result?.ok === true ? result : { ok: false, error: publicError });
     } catch {
-      return json(503, { ok: false, error: "TRIP_API_UNAVAILABLE" });
+      return json(503, { ok: false, error: "INVALID_REQUEST" });
     }
   };
 }
@@ -139,6 +165,7 @@ function createTripHandler({ db, commands, env = process.env, getUserInfo } = {}
   let effectiveGetUserInfo = getUserInfo;
   return async (event = {}) => {
     const payload = payloadFromEvent(event);
+    const isDecisionMutation = decisionMutationActions.has(payload?.action);
     const ensureCommands = () => {
       if (effectiveCommands) return effectiveCommands;
       const database = db || createDatabase(env);
@@ -151,25 +178,43 @@ function createTripHandler({ db, commands, env = process.env, getUserInfo } = {}
     if (isAgentRequest) {
       try {
         const agentCommands = ensureCommands();
-        if (!agentCommands) return { ok: false, error: "TRIP_API_UNAVAILABLE" };
+        if (!agentCommands) {
+          const error = new Error("TRIP_API_UNAVAILABLE");
+          error.code = "TRIP_API_UNAVAILABLE";
+          return agentFailure(error);
+        }
         return agentSuccess(payload.action, await agentCommands.executeAgent(payload));
       } catch (error) {
-        return { ok: false, error: safeError(error), ...(error?.latest ? { latest: error.latest } : {}) };
+        const failure = agentFailure(error);
+        if (failure.error === "VERSION_CONFLICT" && error?.latest) {
+          return { ...failure, latest: error.latest };
+        }
+        return failure;
       }
     }
     effectiveGetUserInfo ||= createRuntimeGetUserInfo(env);
     let runtimeIdentity;
     try { runtimeIdentity = effectiveGetUserInfo?.(); } catch { runtimeIdentity = undefined; }
     const actorUid = uidFromIdentity(runtimeIdentity);
-    if (!actorUid || typeof actorUid !== "string") return { error: "AUTH_REQUIRED" };
-    const isDecisionMutation = decisionMutationActions.has(payload?.action);
+    if (!actorUid || typeof actorUid !== "string") {
+      return isDecisionMutation ? { ok: false, error: "AUTH_REQUIRED" } : { error: "AUTH_REQUIRED" };
+    }
     try {
-      if (!ensureCommands()) return { error: "TRIP_API_UNAVAILABLE" };
+      if (!ensureCommands()) {
+        return isDecisionMutation ? { ok: false, error: "INVALID_REQUEST" } : { error: "TRIP_API_UNAVAILABLE" };
+      }
       const result = await effectiveCommands.execute(payload, actorUid);
       return isDecisionMutation ? decisionSuccess(payload.action, result) : result;
     } catch (error) {
       const code = safeError(error);
-      if (isDecisionMutation) return { ok: false, error: code, ...(error?.latest ? { latest: error.latest } : {}) };
+      if (isDecisionMutation) {
+        const publicCode = publicDecisionError(code);
+        return {
+          ok: false,
+          error: publicCode,
+          ...(publicCode === "VERSION_CONFLICT" && error?.latest ? { latest: error.latest } : {}),
+        };
+      }
       return { error: code, ...(code === "VERSION_CONFLICT" && Number.isInteger(error.currentVersion) ? { currentVersion: error.currentVersion } : {}) };
     }
   };
