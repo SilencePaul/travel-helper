@@ -370,9 +370,7 @@ function parseJsonLines(stdout) {
       state = "output";
       continue;
     }
-    if (event.type.startsWith("turn.")) {
-      throw codedError("CODEX_OUTPUT_INVALID");
-    }
+    throw codedError("CODEX_OUTPUT_INVALID");
   }
   if (state !== "done" || !codexThreadId || !webSearchSeen || !output) throw codedError("CODEX_OUTPUT_INVALID");
   return { codexThreadId, output };
@@ -413,6 +411,7 @@ export function createCodexRunner(options) {
     projectDir,
     schemaPath,
     spawnImpl = spawn,
+    processKillImpl = process.kill.bind(process),
     probeIsolation = probeCodexIsolation,
     probeAdapter,
     probePaths,
@@ -436,7 +435,7 @@ export function createCodexRunner(options) {
   if (containsPath(projectDir, isolatedDir) || containsPath(isolatedDir, projectDir)) throw codedError(CODEX_ISOLATION_ERROR);
   validateAbsolutePath(schemaPath, "CODEX_OUTPUT_INVALID");
   if (typeof probeIsolation !== "function" || typeof pathVerifier !== "function") throw codedError(CODEX_ISOLATION_ERROR);
-  if (typeof spawnImpl !== "function" || typeof monotonicNow !== "function"
+  if (typeof spawnImpl !== "function" || typeof processKillImpl !== "function" || typeof monotonicNow !== "function"
     || (customValidateOutput !== undefined && typeof customValidateOutput !== "function")) {
     throw codedError("CODEX_RESEARCH_FAILED");
   }
@@ -470,6 +469,7 @@ export function createCodexRunner(options) {
   let boundThreadId = initialState?.codexThreadId;
   let correctionUsed = initialState?.correctionUsed ?? false;
   let inFlight = false;
+  let poisoned = false;
   let lastClock = -Infinity;
 
   function now() {
@@ -534,6 +534,7 @@ export function createCodexRunner(options) {
         probeAdapter,
         probePaths,
         spawnImpl,
+        processKillImpl,
         sourceEnv: environment,
         permissionOverrides: buildPermissionOverrides(),
         probeTotalTimeoutMs: Math.max(1, Math.floor(remaining)),
@@ -550,6 +551,7 @@ export function createCodexRunner(options) {
         throw new Error("incomplete isolation evidence");
       }
     } catch (error) {
+      if (error?.processTreeUnconfirmed === true) poisoned = true;
       if (error?.code === "CODEX_RESEARCH_TIMEOUT") throw error;
       throw codedError(CODEX_ISOLATION_ERROR);
     }
@@ -589,7 +591,8 @@ export function createCodexRunner(options) {
       };
       const signal = (name) => {
         try {
-          child.kill(name);
+          if (!Number.isSafeInteger(child.pid) || child.pid <= 0) throw new Error("invalid child pid");
+          processKillImpl(-child.pid, name);
         } catch {
           // The final teardown deadline still bounds a child that rejects a signal.
         }
@@ -599,7 +602,10 @@ export function createCodexRunner(options) {
         terminationError = error;
         signal("SIGTERM");
         killTimer = setTimeout(() => signal("SIGKILL"), killGraceMs);
-        teardownTimer = setTimeout(() => finish(error), killGraceMs + teardownTimeoutMs);
+        teardownTimer = setTimeout(() => {
+          poisoned = true;
+          finish(error);
+        }, killGraceMs + teardownTimeoutMs);
       };
       const collectStdout = (chunk) => {
         if (terminationError) return;
@@ -631,7 +637,7 @@ export function createCodexRunner(options) {
       };
 
       try {
-        child = spawnImpl(codexPath, args, { shell: false, cwd: isolatedDir, env: environment });
+        child = spawnImpl(codexPath, args, { shell: false, detached: true, cwd: isolatedDir, env: environment });
       } catch (error) {
         finish(codedError(error?.code === "ENOENT" ? "CODEX_NOT_AVAILABLE" : "CODEX_RESEARCH_FAILED"));
         return;
@@ -713,6 +719,7 @@ export function createCodexRunner(options) {
 
   async function runExclusive(task) {
     if (inFlight) throw codedError("CODEX_RESEARCH_FAILED");
+    if (poisoned) throw codedError("CODEX_RESEARCH_FAILED");
     if (activeDurationMs >= activeTimeoutMs) throw codedError("CODEX_RESEARCH_TIMEOUT");
     const startedAt = now();
     inFlight = true;

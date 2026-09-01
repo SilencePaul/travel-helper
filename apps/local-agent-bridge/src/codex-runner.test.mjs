@@ -22,6 +22,8 @@ const TOP_LEVEL_ARGS = [
   "-c", 'default_permissions="travel_research"',
 ];
 
+const CODEX_CLI_FIXTURE_VERSION = "0.151.0-alpha.7.2";
+
 function factsFor(category, index) {
   if (category === "hotel") {
     return {
@@ -129,7 +131,9 @@ function createFakeSpawn(outcomes) {
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
     child.signals = [];
+    child.pid = 10_000 + calls.length;
     const call = { executable, args, options, stdin: "", child };
+    call.groupSignals = [];
     child.stdin = new EventEmitter();
     child.stdin.end = (value = "") => {
       if (outcome.stdinEndError) throw new Error("raw stdin end failure");
@@ -158,7 +162,17 @@ function createFakeSpawn(outcomes) {
     });
     return child;
   };
-  return { calls, spawnImpl };
+  const processKillImpl = (groupPid, signal) => {
+    const call = calls.find(({ child }) => -child.pid === groupPid);
+    if (!call) throw new Error("unknown fake process group");
+    call.groupSignals.push({ groupPid, signal });
+    call.child.signals.push(signal);
+    const outcome = outcomes[calls.indexOf(call)] ?? {};
+    if (outcome.killThrows?.includes(signal)) throw new Error("raw group kill failure");
+    if (outcome.closeOnSignal === signal) queueMicrotask(() => call.child.emit("close", null, signal));
+    return outcome.killReturnsFalse !== true;
+  };
+  return { calls, processKillImpl, spawnImpl };
 }
 
 function makeRunner(fake, overrides = {}) {
@@ -168,6 +182,7 @@ function makeRunner(fake, overrides = {}) {
     projectDir: "/project",
     schemaPath: "/schema.json",
     spawnImpl: fake.spawnImpl,
+    processKillImpl: fake.processKillImpl,
     probeIsolation: async () => COMPLETE_ISOLATION_REPORT,
     sourceEnv: {
       PATH: "/usr/bin:/bin",
@@ -237,6 +252,7 @@ test("runner spawns a controlled absolute binary in the isolated directory and s
   assert.equal(fake.calls[0].executable, "/Applications/ChatGPT.app/Contents/Resources/codex");
   assert.equal(fake.calls[0].stdin, "untrusted travel context");
   assert.equal(fake.calls[0].options.shell, false);
+  assert.equal(fake.calls[0].options.detached, true);
   assert.equal(fake.calls[0].options.cwd, "/isolated");
   assert.deepEqual(fake.calls[0].options.env, {
     PATH: "/usr/bin:/bin",
@@ -580,18 +596,54 @@ test("JSONL accepts the documented public web-search event and the current inter
   }
 });
 
-test("JSONL accepts one turn.started between session configuration and research events", async () => {
+test(`JSONL accepts the verified Codex ${CODEX_CLI_FIXTURE_VERSION} event sequence`, async () => {
   const events = [
     { type: "thread.started", thread_id: "thread-1" },
-    { type: "session_configured", session_id: "thread-1", approval_policy: "never", active_permission_profile: { id: "travel_research" } },
-    { type: "turn.started" },
-    { type: "item.completed", item: { type: "web_search", query: "hotel" } },
-    { type: "item.completed", item: { type: "agent_message", text: JSON.stringify(VALID_OUTPUT) } },
-    { type: "turn.completed" },
+    {
+      type: "session_configured",
+      session_id: "thread-1",
+      approval_policy: "never",
+      permission_profile: "travel_research",
+      active_permission_profile: { id: "travel_research", extends: "default" },
+    },
+    { type: "turn.started", turn_id: "turn-1" },
+    { type: "item.completed", item: { id: "search-1", type: "web_search", query: "hotel" } },
+    { type: "item.completed", item: { id: "message-1", type: "agent_message", text: JSON.stringify(VALID_OUTPUT) } },
+    { type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } },
   ];
   const fake = createFakeSpawn([{ stdout: rawJsonl(events) }]);
 
   assert.deepEqual((await makeRunner(fake).runInitial({ prompt: "private" })).output, VALID_OUTPUT);
+});
+
+test(`JSONL rejects non-allowlisted Codex ${CODEX_CLI_FIXTURE_VERSION} research events`, async () => {
+  const prefix = [
+    { type: "thread.started", thread_id: "thread-1" },
+    { type: "session_configured", session_id: "thread-1", approval_policy: "never", active_permission_profile: { id: "travel_research" } },
+    { type: "turn.started" },
+  ];
+  const suffix = [
+    { type: "item.completed", item: { type: "web_search", query: "hotel" } },
+    { type: "item.completed", item: { type: "agent_message", text: JSON.stringify(VALID_OUTPUT) } },
+    { type: "turn.completed" },
+  ];
+  const rejectedEvents = [
+    { type: "error", error: { code: "provider_error" } },
+    { type: "approval_request", request_id: "approval-1" },
+    { type: "request_permissions", permissions: ["write"] },
+    { type: "permission_profile_changed", active_permission_profile: { id: "dangerous" } },
+    { type: "config_changed", key: "approval_policy", value: "on-request" },
+    { type: "item.failed", item: { type: "web_search" } },
+    { type: "item.aborted", item: { type: "web_search" } },
+    { type: "turn.failed", error: { message: "failed" } },
+    { type: "turn.aborted" },
+    { type: "future.unknown", payload: {} },
+  ];
+
+  for (const rejectedEvent of rejectedEvents) {
+    const fake = createFakeSpawn([{ stdout: rawJsonl([...prefix, rejectedEvent, ...suffix]) }]);
+    await assert.rejects(makeRunner(fake).runInitial({ prompt: "private" }), { code: "CODEX_OUTPUT_INVALID" });
+  }
 });
 
 test("JSONL state machine rejects missing, reordered, conflicting or inherited session evidence", async () => {
@@ -764,6 +816,29 @@ test("teardown remains bounded when kill throws or returns false", async () => {
     await assert.rejects(runner.runInitial({ prompt: "private" }), { code: "CODEX_RESEARCH_FAILED" });
     assert.deepEqual(fake.calls[0].child.signals, ["SIGTERM", "SIGKILL"]);
   }
+});
+
+test("an unconfirmed process-group teardown permanently poisons the runner", async () => {
+  const fake = createFakeSpawn([{ hang: true }]);
+  let probeCalls = 0;
+  const runner = makeRunner(fake, {
+    activeTimeoutMs: 10,
+    killGraceMs: 5,
+    teardownTimeoutMs: 5,
+    probeIsolation: async () => { probeCalls += 1; return COMPLETE_ISOLATION_REPORT; },
+  });
+
+  await assert.rejects(runner.runInitial({ prompt: "private" }), { code: "CODEX_RESEARCH_TIMEOUT" });
+  assert.deepEqual(fake.calls[0].groupSignals, [
+    { groupPid: -fake.calls[0].child.pid, signal: "SIGTERM" },
+    { groupPid: -fake.calls[0].child.pid, signal: "SIGKILL" },
+  ]);
+  await assert.rejects(
+    runner.resume({ codexThreadId: "thread-1", prompt: "must not restart" }),
+    { code: "CODEX_RESEARCH_FAILED" },
+  );
+  assert.equal(fake.calls.length, 1);
+  assert.equal(probeCalls, 1);
 });
 
 test("process failure classification trusts structured errors and only bounded stderr fallback", async () => {

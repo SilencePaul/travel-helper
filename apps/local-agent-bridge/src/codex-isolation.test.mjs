@@ -326,13 +326,14 @@ function createProbeSpawn(outcomes) {
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
     child.signals = [];
+    child.pid = 20_000 + calls.length;
     child.stdin = { end() {} };
     child.kill = (signal) => {
       child.signals.push(signal);
       if (outcome.closeOnSignal === signal) queueMicrotask(() => child.emit("close", null, signal));
       return true;
     };
-    calls.push({ executable, args, options, child });
+    calls.push({ executable, args, options, child, groupSignals: [] });
     queueMicrotask(() => {
       if (outcome.stdout !== undefined) child.stdout.emit("data", Buffer.from(outcome.stdout));
       if (outcome.stderr !== undefined) child.stderr.emit("data", Buffer.from(outcome.stderr));
@@ -340,7 +341,17 @@ function createProbeSpawn(outcomes) {
     });
     return child;
   };
-  return { calls, spawnImpl };
+  const processKillImpl = (groupPid, signal) => {
+    const call = calls.find(({ child }) => -child.pid === groupPid);
+    if (!call) throw new Error("unknown fake process group");
+    call.groupSignals.push({ groupPid, signal });
+    call.child.signals.push(signal);
+    const outcome = outcomes[calls.indexOf(call)] ?? {};
+    if (outcome.killThrows?.includes(signal)) throw new Error("raw group kill failure");
+    if (outcome.closeOnSignal === signal) queueMicrotask(() => call.child.emit("close", null, signal));
+    return outcome.killReturnsFalse !== true;
+  };
+  return { calls, processKillImpl, spawnImpl };
 }
 
 function doctorOutput() {
@@ -354,6 +365,24 @@ function doctorOutput() {
       "network.websocket_reachability": { status: "ok", details: {} },
     },
   });
+}
+
+async function createDefaultProbeFixture(context, prefix) {
+  const root = await realpath(await mkdtemp(join(tmpdir(), prefix)));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const codexPath = join(root, "codex");
+  const isolatedDir = join(root, "isolated");
+  const projectDir = join(root, "project");
+  await Promise.all([mkdir(isolatedDir), mkdir(projectDir)]);
+  await writeFile(codexPath, "#!/bin/sh\nexit 0\n");
+  await chmod(codexPath, 0o700);
+  const probePaths = {
+    isolatedFile: join(isolatedDir, "inside.txt"),
+    outsideFile: join(root, "outside.txt"),
+    projectFile: join(projectDir, "project.txt"),
+  };
+  await Promise.all(Object.values(probePaths).map((path) => writeFile(path, "probe")));
+  return { codexPath, isolatedDir, projectDir, probePaths };
 }
 
 test("the default probe adapter runs fixed doctor and sandbox commands without a model task", async (context) => {
@@ -379,7 +408,7 @@ test("the default probe adapter runs fixed doctor and sandbox commands without a
     { code: 0 },
     { code: 1 },
     { code: 1 },
-    { code: 0 },
+    { code: 0, stdout: "200" },
     { code: 0, stdout: doctorOutput() },
   ]);
 
@@ -389,6 +418,7 @@ test("the default probe adapter runs fixed doctor and sandbox commands without a
     projectDir,
     probePaths,
     spawnImpl: fake.spawnImpl,
+    processKillImpl: fake.processKillImpl,
     sourceEnv: { PATH: "/usr/bin:/bin", HOME: "/Users/owner", PROJECT_SECRET: "no" },
   }), COMPLETE_REPORT);
 
@@ -397,14 +427,46 @@ test("the default probe adapter runs fixed doctor and sandbox commands without a
     ["sandbox", "-P", "travel_research", "-C", isolatedDir, ...permissionArgs, "--", "/bin/cat", probePaths.isolatedFile],
     ["sandbox", "-P", "travel_research", "-C", isolatedDir, ...permissionArgs, "--", "/bin/cat", probePaths.outsideFile],
     ["sandbox", "-P", "travel_research", "-C", isolatedDir, ...permissionArgs, "--", "/bin/cat", probePaths.projectFile],
-    ["sandbox", "-P", "travel_research", "-C", isolatedDir, ...permissionArgs, "--", "/usr/bin/curl", "--fail", "--silent", "--show-error", "--max-time", "5", "--head", "https://chatgpt.com/"],
+    ["sandbox", "-P", "travel_research", "-C", isolatedDir, ...permissionArgs, "--", "/usr/bin/curl", "--silent", "--show-error", "--max-time", "5", "--head", "--output", "/dev/null", "--write-out", "%{http_code}", "https://chatgpt.com/"],
     ["doctor", ...permissionArgs, "--json"],
   ]);
   for (const call of fake.calls) {
     assert.equal(call.executable, codexPath);
     assert.equal(call.options.shell, false);
+    assert.equal(call.options.detached, true);
     assert.equal(call.options.cwd, isolatedDir);
     assert.deepEqual(call.options.env, { PATH: "/usr/bin:/bin", HOME: "/Users/owner" });
+  }
+});
+
+test("the HTTPS probe accepts any real HTTP response and rejects transport failure or code 000", async (context) => {
+  const paths = await createDefaultProbeFixture(context, "codex-network-probe-test-");
+  for (const httpCode of ["200", "403", "405"]) {
+    const fake = createProbeSpawn([
+      { code: 0 },
+      { code: 1 },
+      { code: 1 },
+      { code: 0, stdout: httpCode },
+      { code: 0, stdout: doctorOutput() },
+    ]);
+    assert.deepEqual(await isolation.probeCodexIsolation({ ...paths, spawnImpl: fake.spawnImpl, processKillImpl: fake.processKillImpl }), COMPLETE_REPORT);
+  }
+
+  for (const networkOutcome of [
+    { code: 6, stdout: "000", stderr: "DNS failure" },
+    { code: 0, stdout: "000" },
+  ]) {
+    const fake = createProbeSpawn([
+      { code: 0 },
+      { code: 1 },
+      { code: 1 },
+      networkOutcome,
+    ]);
+    await assert.rejects(
+      isolation.probeCodexIsolation({ ...paths, spawnImpl: fake.spawnImpl, processKillImpl: fake.processKillImpl }),
+      { code: "CODEX_ISOLATION_UNAVAILABLE" },
+    );
+    assert.equal(fake.calls.length, 4);
   }
 });
 
@@ -431,10 +493,15 @@ test("the default probe adapter times out with TERM then KILL and fails closed",
     projectDir,
     probePaths,
     spawnImpl: fake.spawnImpl,
+    processKillImpl: fake.processKillImpl,
     probeTimeoutMs: 10,
     probeKillGraceMs: 10,
   }), { code: "CODEX_ISOLATION_UNAVAILABLE" });
   assert.deepEqual(fake.calls[0].child.signals, ["SIGTERM", "SIGKILL"]);
+  assert.deepEqual(fake.calls[0].groupSignals, [
+    { groupPid: -fake.calls[0].child.pid, signal: "SIGTERM" },
+    { groupPid: -fake.calls[0].child.pid, signal: "SIGKILL" },
+  ]);
 });
 
 test("the isolation probe rejects canonical probe paths that cross a boundary through symlinks", async (context) => {

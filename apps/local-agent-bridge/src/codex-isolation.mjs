@@ -136,15 +136,21 @@ function parseProbeEvidence(response, check) {
   }
 }
 
-function safeKill(child, signal) {
+function safeKillProcessGroup(processKillImpl, child, signal) {
   try {
-    child.kill(signal);
+    if (!Number.isSafeInteger(child.pid) || child.pid <= 0) throw new Error("invalid child pid");
+    processKillImpl(-child.pid, signal);
   } catch {
     // A failed signal is handled by the final teardown deadline.
   }
 }
 
-function runProbeProcess({ executable, args, cwd, env, spawnImpl, timeoutMs, killGraceMs }) {
+function markProcessTreeUnconfirmed(error) {
+  Object.defineProperty(error, "processTreeUnconfirmed", { value: true });
+  return error;
+}
+
+function runProbeProcess({ executable, args, cwd, env, spawnImpl, processKillImpl, timeoutMs, killGraceMs }) {
   return new Promise((resolve, reject) => {
     let child;
     let stdout = "";
@@ -174,9 +180,9 @@ function runProbeProcess({ executable, args, cwd, env, spawnImpl, timeoutMs, kil
     const terminate = (error) => {
       if (terminationError) return;
       terminationError = error;
-      safeKill(child, "SIGTERM");
-      killTimer = setTimeout(() => safeKill(child, "SIGKILL"), killGraceMs);
-      finalTimer = setTimeout(() => finish(error), killGraceMs * 2 + 10);
+      safeKillProcessGroup(processKillImpl, child, "SIGTERM");
+      killTimer = setTimeout(() => safeKillProcessGroup(processKillImpl, child, "SIGKILL"), killGraceMs);
+      finalTimer = setTimeout(() => finish(markProcessTreeUnconfirmed(error)), killGraceMs * 2 + 10);
     };
     const collect = (streamName, chunk) => {
       if (terminationError) return;
@@ -192,7 +198,7 @@ function runProbeProcess({ executable, args, cwd, env, spawnImpl, timeoutMs, kil
     };
 
     try {
-      child = spawnImpl(executable, args, { shell: false, cwd, env });
+      child = spawnImpl(executable, args, { shell: false, detached: true, cwd, env });
     } catch {
       finish(new Error("probe spawn failed"));
       return;
@@ -270,10 +276,11 @@ function probeEvidenceResponse(check, observed, extra = {}) {
 
 function createDefaultProbeAdapter(options) {
   const spawnImpl = options.spawnImpl ?? spawn;
+  const processKillImpl = options.processKillImpl ?? process.kill.bind(process);
   const timeoutMs = options.probeTimeoutMs ?? 5_000;
   const killGraceMs = options.probeKillGraceMs ?? 500;
   const totalTimeoutMs = options.probeTotalTimeoutMs ?? 30_000;
-  if (typeof spawnImpl !== "function"
+  if (typeof spawnImpl !== "function" || typeof processKillImpl !== "function"
     || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0
     || !Number.isSafeInteger(killGraceMs) || killGraceMs < 0
     || !Number.isSafeInteger(totalTimeoutMs) || totalTimeoutMs <= 0) {
@@ -291,6 +298,7 @@ function createDefaultProbeAdapter(options) {
       cwd: request.cwd,
       env: request.env,
       spawnImpl,
+      processKillImpl,
       timeoutMs: Math.min(timeoutMs, remainingMs - teardownReserveMs),
       killGraceMs,
     });
@@ -318,10 +326,13 @@ function createDefaultProbeAdapter(options) {
     if (request.check.name === "httpsNetworkAvailable") {
       const result = await run(request, [
         ...sandboxPrefix,
-        "/usr/bin/curl", "--fail", "--silent", "--show-error", "--max-time", "5", "--head", NETWORK_PROBE_URL,
+        "/usr/bin/curl", "--silent", "--show-error", "--max-time", "5", "--head",
+        "--output", "/dev/null", "--write-out", "%{http_code}", NETWORK_PROBE_URL,
       ]);
       if (result.signal !== null || !Number.isInteger(result.exitCode)) throw new Error("network probe failed");
-      return probeEvidenceResponse(request.check, result.exitCode === 0 ? "available" : "unavailable");
+      const httpCode = result.stdout.trim();
+      const available = result.exitCode === 0 && /^[1-5]\d{2}$/u.test(httpCode);
+      return probeEvidenceResponse(request.check, available ? "available" : "unavailable");
     }
     if (request.check.name === "authenticationAvailable") {
       await doctor(request);
@@ -411,8 +422,12 @@ export async function probeCodexIsolation(options) {
       parseProbeEvidence(response, check);
     }
     return Object.fromEntries(REQUIRED_PROBE_CHECKS.map((check) => [check, true]));
-  } catch {
-    throw codedError(CODEX_ISOLATION_ERROR);
+  } catch (error) {
+    const safeError = codedError(CODEX_ISOLATION_ERROR);
+    if (error?.processTreeUnconfirmed === true) {
+      Object.defineProperty(safeError, "processTreeUnconfirmed", { value: true });
+    }
+    throw safeError;
   }
 }
 
