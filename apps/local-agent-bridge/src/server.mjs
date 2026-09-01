@@ -1,10 +1,49 @@
 import { createServer } from "node:http";
 
+import { safeResearchStatus } from "./travel-research-service.mjs";
+
 const PREPARE_PATH = "/v1/agent-runs/prepare";
 const CLAIM_PATH = "/v1/agent-runs/claim";
+const EXECUTE_PATH = "/v1/agent-runs/execute-travel-research";
+const STATUS_PATH = "/v1/agent-runs/research-status";
+const RESUME_PATH = "/v1/agent-runs/resume-travel-research";
+const CANCEL_PATH = "/v1/agent-runs/cancel-research";
+const CATEGORIES = new Set(["hotel", "restaurant", "attraction"]);
+const RESUME_ACTIONS = new Set(["retry_codex_auth", "skip_blocked_source"]);
+const BUSINESS_ERRORS = new Set([
+  "CODEX_NOT_AVAILABLE",
+  "CODEX_NOT_AUTHENTICATED",
+  "CODEX_ISOLATION_UNAVAILABLE",
+  "CODEX_USAGE_UNAVAILABLE",
+  "CODEX_RESEARCH_TIMEOUT",
+  "CODEX_OUTPUT_INVALID",
+  "CODEX_INSUFFICIENT_EVIDENCE",
+  "INVALID_RESEARCH_TARGET",
+  "DISCLOSURE_CONTEXT_CHANGED",
+  "CODEX_RESEARCH_CANCELLED",
+  "AGENT_RUN_INACTIVE",
+  "AGENT_TRANSPORT_UNAVAILABLE",
+  "CODEX_RESEARCH_FAILED",
+]);
 
 function codedError(code) {
   return Object.assign(new Error(code), { code });
+}
+
+function plainObject(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function exactKeys(value, keys) {
+  return plainObject(value)
+    && Reflect.ownKeys(value).length === keys.length
+    && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function opaqueIdentifier(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 1_024;
 }
 
 function validAppUrl(value, allowInsecureLoopbackApp = false) {
@@ -70,6 +109,118 @@ function readBody(request, maxBodyBytes, bodyTimeoutMs) {
   });
 }
 
+function validPrepare(value) {
+  return exactKeys(value, []);
+}
+
+function validClaim(value) {
+  return exactKeys(value, ["agentRunId"]) && opaqueIdentifier(value.agentRunId);
+}
+
+function validExecute(value) {
+  return exactKeys(value, ["agentRunId", "targetCategory", "targetScopeId", "disclosureFingerprint"])
+    && opaqueIdentifier(value.agentRunId)
+    && CATEGORIES.has(value.targetCategory)
+    && typeof value.targetScopeId === "string"
+    && /^scope_[a-f0-9]{64}$/u.test(value.targetScopeId)
+    && typeof value.disclosureFingerprint === "string"
+    && /^[a-f0-9]{64}$/u.test(value.disclosureFingerprint);
+}
+
+function validResume(value) {
+  return exactKeys(value, ["agentRunId", "researchTaskId", "resumeAction"])
+    && opaqueIdentifier(value.agentRunId)
+    && opaqueIdentifier(value.researchTaskId)
+    && RESUME_ACTIONS.has(value.resumeAction);
+}
+
+function validCancel(value) {
+  return exactKeys(value, ["researchTaskId"]) && opaqueIdentifier(value.researchTaskId);
+}
+
+function projectPrepared(value) {
+  const key = value?.publicKeyJwk;
+  if (!plainObject(value) || !plainObject(key)
+    || key.kty !== "EC" || key.crv !== "P-256"
+    || typeof key.x !== "string" || key.x.length === 0
+    || typeof key.y !== "string" || key.y.length === 0
+    || typeof value.pairingCodeHash !== "string" || value.pairingCodeHash.length !== 43
+    || typeof value.pairingCodeFingerprint !== "string"
+    || value.pairingCodeFingerprint.length === 0 || value.pairingCodeFingerprint.length > 128) {
+    throw codedError("CODEX_RESEARCH_FAILED");
+  }
+  return {
+    publicKeyJwk: { kty: "EC", crv: "P-256", x: key.x, y: key.y },
+    pairingCodeHash: value.pairingCodeHash,
+    pairingCodeFingerprint: value.pairingCodeFingerprint,
+  };
+}
+
+function projectClaimed(value, requestBody) {
+  if (!plainObject(value) || value.agentRunId !== requestBody.agentRunId || value.status !== "claimed") {
+    throw codedError("CODEX_RESEARCH_FAILED");
+  }
+  return { agentRunId: value.agentRunId, status: "claimed" };
+}
+
+const ROUTES = new Map([
+  [PREPARE_PATH, {
+    method: "POST",
+    validate: validPrepare,
+    invoke: (runtime) => runtime.prepare(),
+    project: projectPrepared,
+    prepared: true,
+  }],
+  [CLAIM_PATH, {
+    method: "POST",
+    validate: validClaim,
+    invoke: (runtime, body) => runtime.claim(body.agentRunId),
+    project: projectClaimed,
+  }],
+  [EXECUTE_PATH, {
+    method: "POST",
+    validate: validExecute,
+    invoke: (runtime, body) => runtime.executeTravelResearch(body),
+    project: safeResearchStatus,
+  }],
+  [STATUS_PATH, {
+    method: "GET",
+    invoke: (runtime) => runtime.getResearchStatus(),
+    project: safeResearchStatus,
+  }],
+  [RESUME_PATH, {
+    method: "POST",
+    validate: validResume,
+    invoke: (runtime, body) => runtime.resumeTravelResearch(body),
+    project: safeResearchStatus,
+  }],
+  [CANCEL_PATH, {
+    method: "POST",
+    validate: validCancel,
+    invoke: (runtime, body) => runtime.cancelResearch(body),
+    project: safeResearchStatus,
+  }],
+]);
+
+function parseRequestTarget(value) {
+  if (typeof value !== "string" || !value.startsWith("/")) return undefined;
+  try {
+    const parsed = new URL(value, "http://127.0.0.1");
+    if (parsed.origin !== "http://127.0.0.1" || parsed.hash) return undefined;
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+function requestError(error) {
+  if (error?.code === "REQUEST_TOO_LARGE") return { status: 413, code: "INVALID_REQUEST" };
+  if (error?.code === "REQUEST_TIMEOUT") return { status: 408, code: "INVALID_REQUEST" };
+  if (error?.code === "INVALID_REQUEST") return { status: 400, code: "INVALID_REQUEST" };
+  if (BUSINESS_ERRORS.has(error?.code)) return { status: 409, code: error.code };
+  return { status: 500, code: "CODEX_RESEARCH_FAILED" };
+}
+
 export function buildConnectionUrl(appUrl, bridgeOrigin, { allowInsecureLoopbackApp = false } = {}) {
   const url = validAppUrl(appUrl, allowInsecureLoopbackApp);
   if (!url) throw codedError("INVALID_APP_URL");
@@ -90,6 +241,7 @@ export async function startLocalAgentBridge({
   bodyTimeoutMs = 5_000,
   allowInsecureLoopbackApp = false,
   onPrepared,
+  onClose,
 } = {}) {
   const app = validAppUrl(appUrl, allowInsecureLoopbackApp);
   if (!app) throw codedError("INVALID_APP_URL");
@@ -97,28 +249,40 @@ export async function startLocalAgentBridge({
   if (!Number.isSafeInteger(port) || port < 0 || port > 65_535) throw codedError("INVALID_PORT");
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes <= 0) throw codedError("INVALID_MAX_BODY_BYTES");
   if (!Number.isSafeInteger(bodyTimeoutMs) || bodyTimeoutMs <= 0) throw codedError("INVALID_BODY_TIMEOUT");
-  if (!runtime || typeof runtime.prepare !== "function" || typeof runtime.claim !== "function") throw codedError("INVALID_RUNTIME");
+  const requiredMethods = [
+    "prepare", "claim", "executeTravelResearch", "getResearchStatus", "resumeTravelResearch", "cancelResearch",
+  ];
+  if (!runtime || requiredMethods.some((method) => typeof runtime[method] !== "function")) throw codedError("INVALID_RUNTIME");
   if (onPrepared !== undefined && typeof onPrepared !== "function") throw codedError("INVALID_PREPARE_CALLBACK");
+  if (onClose !== undefined && typeof onClose !== "function") throw codedError("INVALID_CLOSE_CALLBACK");
+  if (runtime.close !== undefined && typeof runtime.close !== "function") throw codedError("INVALID_RUNTIME");
 
   let actualPort;
   const server = createServer(async (request, response) => {
     const corsHeaders = {
       "access-control-allow-origin": app.origin,
-      "access-control-allow-methods": "POST, OPTIONS",
+      "access-control-allow-methods": "GET, POST, OPTIONS",
       "access-control-allow-headers": "content-type",
       vary: "Origin",
     };
     const expectedHost = `127.0.0.1:${actualPort}`;
     const originAllowed = request.headers.origin === app.origin;
     const hostAllowed = request.headers.host === expectedHost;
-    const pathAllowed = request.url === PREPARE_PATH || request.url === CLAIM_PATH;
-    if (!originAllowed || !hostAllowed || !pathAllowed) {
+    const target = parseRequestTarget(request.url);
+    const route = target && ROUTES.get(target.pathname);
+    if (!originAllowed || !hostAllowed || !route) {
       json(response, 403, { ok: false, error: "INVALID_REQUEST" });
       return;
     }
+    if (target.search || request.url !== target.pathname) {
+      json(response, 400, { ok: false, error: "INVALID_REQUEST" }, corsHeaders);
+      return;
+    }
     if (request.method === "OPTIONS") {
-      if (request.headers["access-control-request-method"] !== "POST") {
-        json(response, 400, { ok: false, error: "INVALID_REQUEST" });
+      if (request.headers["access-control-request-method"] !== route.method
+        || Number(request.headers["content-length"] || 0) !== 0) {
+        request.resume();
+        json(response, 400, { ok: false, error: "INVALID_REQUEST" }, corsHeaders);
         return;
       }
       const privateNetwork = request.headers["access-control-request-private-network"] === "true"
@@ -128,28 +292,59 @@ export async function startLocalAgentBridge({
       response.end();
       return;
     }
-    if (request.method !== "POST" || !/^application\/json(?:\s*;|$)/i.test(String(request.headers["content-type"] || ""))) {
+    if (request.method !== route.method) {
+      request.resume();
       json(response, 405, { ok: false, error: "INVALID_REQUEST" }, corsHeaders);
       return;
     }
-    const declaredLength = Number(request.headers["content-length"]);
-    if (Number.isFinite(declaredLength) && declaredLength > maxBodyBytes) {
+    if (request.headers.cookie !== undefined || request.headers.authorization !== undefined) {
+      request.resume();
+      json(response, 400, { ok: false, error: "INVALID_REQUEST" }, corsHeaders);
+      return;
+    }
+    if (route.method === "POST"
+      && !/^application\/json(?:\s*;\s*charset=utf-8)?$/iu.test(String(request.headers["content-type"] || ""))) {
+      request.resume();
+      json(response, 400, { ok: false, error: "INVALID_REQUEST" }, corsHeaders);
+      return;
+    }
+    const declaredHeader = request.headers["content-length"];
+    const declaredLength = declaredHeader === undefined ? undefined : Number(declaredHeader);
+    if (declaredLength !== undefined && (!Number.isSafeInteger(declaredLength) || declaredLength < 0)) {
+      request.resume();
+      json(response, 400, { ok: false, error: "INVALID_REQUEST" }, corsHeaders);
+      return;
+    }
+    if (declaredLength !== undefined && declaredLength > maxBodyBytes) {
       request.resume();
       json(response, 413, { ok: false, error: "INVALID_REQUEST" }, corsHeaders);
       return;
     }
+    if (route.method === "GET" && declaredLength !== undefined && declaredLength > 0) {
+      request.resume();
+      json(response, 400, { ok: false, error: "INVALID_REQUEST" }, corsHeaders);
+      return;
+    }
     try {
       const source = await readBody(request, maxBodyBytes, bodyTimeoutMs);
-      const body = JSON.parse(source);
-      if (!body || typeof body !== "object" || Array.isArray(body)) throw codedError("INVALID_REQUEST");
-      const data = request.url === PREPARE_PATH
-        ? await runtime.prepare(body.scope)
-        : await runtime.claim(body.agentRunId);
-      if (request.url === PREPARE_PATH) await onPrepared?.(data);
+      let body;
+      if (route.method === "GET") {
+        if (source.length !== 0) throw codedError("INVALID_REQUEST");
+      } else {
+        try {
+          body = JSON.parse(source);
+        } catch {
+          throw codedError("INVALID_REQUEST");
+        }
+        if (!route.validate(body)) throw codedError("INVALID_REQUEST");
+      }
+      const rawData = await route.invoke(runtime, body);
+      const data = route.project(rawData, body);
+      if (route.prepared) await onPrepared?.(data);
       json(response, 200, { ok: true, data }, corsHeaders);
     } catch (error) {
-      const status = error?.code === "REQUEST_TOO_LARGE" ? 413 : error?.code === "REQUEST_TIMEOUT" ? 408 : 400;
-      json(response, status, { ok: false, error: "INVALID_REQUEST" }, corsHeaders);
+      const failure = requestError(error);
+      json(response, failure.status, { ok: false, error: failure.code }, corsHeaders);
     }
   });
 
@@ -171,8 +366,13 @@ export async function startLocalAgentBridge({
     connectionUrl: buildConnectionUrl(app.toString(), origin, { allowInsecureLoopbackApp }),
     close: () => {
       if (closePromise) return closePromise;
-      if (!server.listening) return Promise.resolve();
-      closePromise = new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      const serverClose = server.listening
+        ? new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+        : Promise.resolve();
+      const cleanup = Promise.resolve()
+        .then(() => runtime.close?.())
+        .then(() => onClose?.());
+      closePromise = Promise.all([serverClose, cleanup]).then(() => undefined);
       return closePromise;
     },
   };
