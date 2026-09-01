@@ -131,6 +131,12 @@ async function unmountAndFlush(view: { unmount: () => void }) {
   });
 }
 
+function makeCreateAndRevokeCommand() {
+  return vi.fn(async (input: { action: string }) => input.action === "createAgentRun"
+    ? { ok: true, action: "createAgentRun" as const, data: { agentRunId: "agent-run-1", expiresAt: "2099-08-28T00:15:00.000Z" } }
+    : { ok: true, action: "revokeAgentRun" as const, data: { agentRunId: "agent-run-1", revokedAt: "2026-08-28T00:05:00.000Z" } });
+}
+
 describe("DecisionAgentPanel", () => {
   it("准备只检查本机，并展示准确且无内部 ID 的授权披露", async () => {
     const { bridge, repository, container } = setup();
@@ -325,6 +331,85 @@ describe("DecisionAgentPanel", () => {
     await waitFor(() => expect(command).toHaveBeenCalledTimes(2));
     expect(command.mock.calls.map(([input]) => input.action)).toEqual(["createAgentRun", "revokeAgentRun"]);
     expect(screen.getByText("research-task-1")).toBeVisible();
+  });
+
+  it.each([
+    ["failed", { phase: "failed", ...timestamps, errorCode: "CODEX_RESEARCH_FAILED" as const } satisfies ResearchStatus],
+    ["superseded", { phase: "superseded", ...timestamps, errorCode: "DISCLOSURE_CONTEXT_CHANGED" as const } satisfies ResearchStatus],
+  ] as const)("旧 %s 清除 UI 后，新 execute 未到 Bridge 仍以最后真实观测为 baseline 并撤销", async (_label, terminal) => {
+    const command = makeCreateAndRevokeCommand();
+    const bridge = makeBridge({
+      getResearchStatus: vi.fn().mockResolvedValue(terminal),
+      executeTravelResearch: vi.fn().mockRejectedValue(new Error("request did not reach bridge")),
+    });
+    setup({ bridge, repository: makeRepository(command) });
+    await userEvent.click(await screen.findByRole("button", { name: "重新选择研究范围" }));
+    await prepareAndConfirm();
+
+    await userEvent.click(screen.getByRole("button", { name: "开始研究酒店候选" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledTimes(2));
+    expect(command.mock.calls.map(([input]) => input.action)).toEqual(["createAgentRun", "revokeAgentRun"]);
+    expect(screen.getByRole("alert")).toHaveTextContent(/启动响应未确认/);
+  });
+
+  it.each([
+    ["新进展", "progress", 1],
+    ["原 baseline", "baseline", 2],
+    ["状态读取失败", "error", 1],
+  ] as const)("execute promise pending 时卸载，Bridge %s 按接管证据决定是否撤销", async (_label, cleanupResult, expectedCommands) => {
+    const command = makeCreateAndRevokeCommand();
+    const getResearchStatus = vi.fn().mockResolvedValueOnce({ phase: "idle" });
+    if (cleanupResult === "progress") getResearchStatus.mockResolvedValueOnce(researching);
+    else if (cleanupResult === "baseline") getResearchStatus.mockResolvedValueOnce({ phase: "idle" });
+    else getResearchStatus.mockRejectedValueOnce(new Error("status unavailable"));
+    const bridge = makeBridge({
+      getResearchStatus,
+      executeTravelResearch: vi.fn(() => new Promise<ResearchStatus>(() => undefined)),
+    });
+    const view = setup({ bridge, repository: makeRepository(command) });
+    await prepareAndConfirm();
+    await userEvent.click(screen.getByRole("button", { name: "开始研究酒店候选" }));
+    await waitFor(() => expect(bridge.executeTravelResearch).toHaveBeenCalledTimes(1));
+
+    await unmountAndFlush(view);
+
+    expect(getResearchStatus).toHaveBeenCalledTimes(2);
+    expect(getResearchStatus.mock.calls[1]?.[0]).toEqual({ signal: expect.any(AbortSignal) });
+    expect(getResearchStatus.mock.calls[1]?.[0]?.signal).not.toBe(vi.mocked(bridge.executeTravelResearch).mock.calls[0]?.[1]?.signal);
+    if (expectedCommands === 2) await waitFor(() => expect(command).toHaveBeenCalledTimes(2));
+    else expect(command).toHaveBeenCalledTimes(1);
+    expect(bridge.cancelResearch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["新进展", "progress", 1],
+    ["原 baseline", "baseline", 2],
+    ["状态读取失败", "error", 1],
+  ] as const)("resume promise pending 时卸载，Bridge %s 按接管证据决定是否撤销", async (_label, cleanupResult, expectedCommands) => {
+    const blocked = { phase: "needs_owner_action", ...timestamps, blockedReason: "codex_auth_required" as const } satisfies ResearchStatus;
+    const resuming = { phase: "resuming", ...timestamps, updatedAt: "2026-08-28T00:02:00.000Z" } satisfies ResearchStatus;
+    const command = makeCreateAndRevokeCommand();
+    const getResearchStatus = vi.fn().mockResolvedValueOnce(blocked);
+    if (cleanupResult === "progress") getResearchStatus.mockResolvedValueOnce(resuming);
+    else if (cleanupResult === "baseline") getResearchStatus.mockResolvedValueOnce(blocked);
+    else getResearchStatus.mockRejectedValueOnce(new Error("status unavailable"));
+    const bridge = makeBridge({
+      getResearchStatus,
+      resumeTravelResearch: vi.fn(() => new Promise<ResearchStatus>(() => undefined)),
+    });
+    const view = setup({ bridge, repository: makeRepository(command) });
+    await userEvent.click(await screen.findByRole("button", { name: "已恢复登录，继续研究" }));
+    await waitFor(() => expect(bridge.resumeTravelResearch).toHaveBeenCalledTimes(1));
+
+    await unmountAndFlush(view);
+
+    expect(getResearchStatus).toHaveBeenCalledTimes(2);
+    expect(getResearchStatus.mock.calls[1]?.[0]).toEqual({ signal: expect.any(AbortSignal) });
+    expect(getResearchStatus.mock.calls[1]?.[0]?.signal).not.toBe(vi.mocked(bridge.resumeTravelResearch).mock.calls[0]?.[1]?.signal);
+    if (expectedCommands === 2) await waitFor(() => expect(command).toHaveBeenCalledTimes(2));
+    else expect(command).toHaveBeenCalledTimes(1);
+    expect(bridge.cancelResearch).not.toHaveBeenCalled();
   });
 
   it("execute 成功接管 run 后卸载不撤销也不取消，本机任务继续", async () => {
