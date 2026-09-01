@@ -29,6 +29,9 @@ const URL_PATTERN = /\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'<>\u3001\uff0c\u3002\uf
 const NON_HIERARCHICAL_URL_PATTERN = /\b(?:data|javascript|mailto):[^\s"'<>\u3001\uff0c\u3002\uff1b]+/giu;
 const PROTOCOL_RELATIVE_URL_PATTERN = /(?<!:)\/\/[^\s"'<>\u3001\uff0c\u3002\uff1b]+/gu;
 const IP_TOKEN_PATTERN = /(?<![A-Za-z0-9])(?:\[[0-9A-Fa-f:.%]+\]|(?:\d{1,3}\.){3}\d{1,3}|[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]+)(?::\d{1,5})?(?:\/[^\s"'<>]*)?(?![A-Za-z0-9])/gu;
+const TRAILING_SENTENCE_PUNCTUATION = new Set([
+  ".", ",", ";", "!", "?", ")", "]", "}", "，", "。", "；", "！", "？", "、", "）", "】", "》", "」", "』",
+]);
 const BARE_LOCAL_HOST_PATTERN = /\b(?:(?:[a-z0-9-]+\.)*localhost|[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:local|internal|lan|home|home\.arpa|localdomain|corp|intranet|private|test|invalid|example|onion))\.?(?::\d{1,5})?(?:\/[^\s"'<>]*)?(?=$|[\s"'<>\u3001\uff0c\u3002\uff1b;,])/giu;
 const CREDENTIAL_PATTERN = /(?:\bBearer\s+[A-Za-z0-9._~+\/-]{8,}|\b(?:authorization|cookie|password|passwd|api[_ -]?key|access[_ -]?key(?:\s*id)?|secret[_ -]?(?:key|id)|access[_ -]?token|refresh[_ -]?token)\s*[:=]\s*[^\s,;]{4,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:AKID|AKIA|ASIA)[A-Za-z0-9]{12,}|\b(?:sk|ghp|xox[baprs])[-_][A-Za-z0-9_-]{8,})/giu;
 const SENSITIVE_KEY_PATTERN = /(?:credential|password|passwd|authorization|cookie|apikey|accesskey|secretkey|secretid|accesstoken|refreshtoken|privatekey|localpath|filepath|projectpath)/u;
@@ -156,10 +159,23 @@ function ipTokenHost(value) {
   return ipv4WithPort?.[1] ?? "";
 }
 
+function splitIpTokenPunctuation(value) {
+  let boundary = value.length;
+  while (boundary > 0 && TRAILING_SENTENCE_PUNCTUATION.has(value[boundary - 1])) boundary -= 1;
+  if (boundary < value.length) {
+    const core = value.slice(0, boundary);
+    if (isIP(ipTokenHost(core)) !== 0) {
+      return { core, punctuation: value.slice(boundary) };
+    }
+  }
+  return { core: value, punctuation: "" };
+}
+
 function redactIpTokens(value) {
-  return value.replace(IP_TOKEN_PATTERN, (token) => (
-    isIP(ipTokenHost(token)) !== 0 ? "[REDACTED_URL]" : token
-  ));
+  return value.replace(IP_TOKEN_PATTERN, (token) => {
+    const { core, punctuation } = splitIpTokenPunctuation(token);
+    return isIP(ipTokenHost(core)) !== 0 ? `[REDACTED_URL]${punctuation}` : token;
+  });
 }
 
 function decodedPathForInspection(pathname) {

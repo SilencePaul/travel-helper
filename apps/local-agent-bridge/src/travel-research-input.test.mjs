@@ -251,6 +251,29 @@ test("buildTravelResearchInput keeps names and selected public data while exclud
   assert.equal(built.prompt.includes("resourceCommitments"), false);
 });
 
+test("IP redaction preserves sentence punctuation without mistaking times or short tuples for IPv6", async () => {
+  const context = contextFixture();
+  context.workspace.preferences[0].freeText.note = [
+    "2001:db8::1. fc00::1, ::1; 2001:db8::2! 2001:db8::3?",
+    "(2001:db8::4) [2001:db8::5]。 2001:db8::6， 8.8.8.8.",
+    "[2001:db8::7]:443/path. 192.0.2.1/path!",
+    "10:30:00. 集合 1:2:3, 正常文字",
+  ].join(" ");
+
+  const built = await buildTravelResearchInput(context, {
+    targetCategory: "hotel",
+    targetScopeId: scopeId,
+    aliasSalt: "task-salt-123",
+  }, webcrypto);
+
+  assert.equal(built.codexInput.preferences[0].freeText.note, [
+    "[REDACTED_URL]. [REDACTED_URL], [REDACTED_URL]; [REDACTED_URL]! [REDACTED_URL]?",
+    "([REDACTED_URL]) [REDACTED_URL]。 [REDACTED_URL]， [REDACTED_URL].",
+    "[REDACTED_URL]. [REDACTED_URL]!",
+    "10:30:00. 集合 1:2:3, 正常文字",
+  ].join(" "));
+});
+
 test("the fixed prompt contains canonical untrusted JSON and never promotes prompt injection to instructions", async () => {
   const built = await buildTravelResearchInput(contextFixture(), {
     targetCategory: "hotel",
