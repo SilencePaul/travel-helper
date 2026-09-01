@@ -259,6 +259,9 @@ test("input inspection catches normalized, URI and encoded private or credential
     Buffer.from("access%5Ftoken%3Dopaque-secret-value", "utf8").toString("hex"),
     "access\u200Btoken=opaque-secret-value",
     "cHJl ZmVy ZW5j ZS1z ZWNy ZXQ=",
+    "cHJl.ZmVy.ZW5j.ZS1z.ZWNy.ZXQ=",
+    "access   token=opaque-secret-value",
+    "access.token=opaque-secret-value",
     "_https://alice:password@publicsite.com/private",
     "ａｃｃｅｓｓＫｅｙ＝opaque-secret-value",
     "%E0%A4%A",
@@ -299,6 +302,8 @@ test("input inspection catches normalized, URI and encoded private or credential
     safePercent: "公开优惠 50%",
     safeIgnorable: "行程\u200B说明",
     safeFragmentedBase64Like: "Q2hp bmVz ZVRy YXZl bElu Zm8=",
+    safeExplanation: "This page explains an access token without a value",
+    safeLongEnglish: "This hotel has a very convenient location and provides comfortable rooms with excellent service near popular attractions",
   };
   safeContext.workspace.preferences[0].freeText = { note: "普通说明" };
   const safeBuilt = await buildTravelResearchInput(safeContext, {
@@ -311,6 +316,8 @@ test("input inspection catches normalized, URI and encoded private or credential
   assert.equal(safeBuilt.codexInput.preferences[0].answers.safePercent, "公开优惠 50%");
   assert.equal(safeBuilt.codexInput.preferences[0].answers.safeIgnorable, "行程\u200B说明");
   assert.equal(safeBuilt.codexInput.preferences[0].answers.safeFragmentedBase64Like, "Q2hp bmVz ZVRy YXZl bElu Zm8=");
+  assert.equal(safeBuilt.codexInput.preferences[0].answers.safeExplanation, "This page explains an access token without a value");
+  assert.equal(safeBuilt.codexInput.preferences[0].answers.safeLongEnglish, "This hotel has a very convenient location and provides comfortable rooms with excellent service near popular attractions");
   assert.equal(safeBuilt.codexInput.preferences[0].answers["安全，键"], "保留原键");
 });
 

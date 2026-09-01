@@ -240,6 +240,7 @@ test("canonical URL inspection rejects encoded paths and search data before remo
     "https://hotel1.com/%3Cscript%3Ealert(1)%3C%2Fscript%3E",
     `https://hotel1.com/${encodedRawId}`,
     "https://hotel1.com/cHJl%20ZmVy%20ZW5j%20ZS1z%20ZWNy%20ZXQ=",
+    "https://hotel1.com/cHJl.ZmVy.ZW5j.ZS1z.ZWNy.ZXQ=",
     `https://hotel1.com/${layeredCredential}`,
     "https://hotel1.com/%68%74%74%70%73%3A%2F%2Fother.example.com%2Fa",
     "https://hotel1.com/rooms?access%5Ftoken=opaque-secret",
@@ -248,6 +249,7 @@ test("canonical URL inspection rejects encoded paths and search data before remo
     "https://hotel1.com/rooms?markup=%253Cscript%253E",
     `https://hotel1.com/rooms?reference=${encodedRawId}`,
     `https://hotel1.com/rooms?reference=${layeredCredential}`,
+    "https://hotel1.com/rooms?reference=cHJl.ZmVy.ZW5j.ZS1z.ZWNy.ZXQ=",
     "https://hotel1.com/%ZZ",
     "https://hotel1.com/abc%2",
   ]) {
@@ -370,6 +372,9 @@ test("recursively rejects secret keys, token values, HTML, local paths, and over
     (value) => { value.candidates[0].recommendation.reason = "leaked preference-secret"; },
     (value) => { value.candidates[0].recommendation.reason = layeredCredential; },
     (value) => { value.candidates[0].recommendation.reason = "access%5Ftoken%3Dopaque-secret%E0%A4%A"; },
+    (value) => { value.candidates[0].recommendation.reason = "cHJl.ZmVy.ZW5j.ZS1z.ZWNy.ZXQ="; },
+    (value) => { value.candidates[0].recommendation.reason = "access   token=opaque-secret"; },
+    (value) => { value.candidates[0].recommendation.reason = "access.token=opaque-secret"; },
     (value) => { value.candidates[0].evidence[0].facts["%70reference-raw-1%E0%A4%A"] = "opaque"; },
   ];
   for (const mutate of mutations) {
@@ -381,6 +386,41 @@ test("recursively rejects secret keys, token values, HTML, local paths, and over
   const huge = completedOutput();
   huge.padding = "x".repeat(300_000);
   await assert.rejects(() => validateTravelResearchOutput(huge, options()), { message: "CODEX_OUTPUT_INVALID" });
+});
+
+test("accepts visible safe prose without rewriting ignorable characters", async () => {
+  const output = completedOutput();
+  const longEnglish = "This hotel has a very convenient location and provides comfortable rooms with excellent service near popular attractions";
+  output.candidates[0].recommendation.reason = longEnglish;
+  output.candidates[1].recommendation.reason = "This page explains an access token without a value";
+  output.candidates[0].evidence[0].sourceName = "行程\u200B说明";
+
+  const result = await validateTravelResearchOutput(output, options());
+  assert.equal(result.payload.candidates[0].recommendation.reason, longEnglish);
+  assert.equal(result.payload.candidates[0].evidence[0].sourceName, "行程\u200B说明");
+});
+
+test("rejects required text that has no visible characters", async () => {
+  const invisible = "\u200B\u2060";
+  const cases = [
+    (value) => {
+      value.candidates[0].entity.name = invisible;
+      for (const evidence of value.candidates[0].evidence) evidence.facts.propertyName = invisible;
+    },
+    (value) => {
+      value.candidates[0].entity.address = invisible;
+      for (const evidence of value.candidates[0].evidence) evidence.facts.address = invisible;
+    },
+    (value) => { value.candidates[0].recommendation.reason = invisible; },
+    (value) => { value.candidates[0].evidence[0].facts.roomTypeOrBed = invisible; },
+  ];
+  for (const mutate of cases) {
+    const output = completedOutput();
+    mutate(output);
+    await assert.rejects(() => validateTravelResearchOutput(output, options()), {
+      message: "CODEX_OUTPUT_INVALID",
+    });
+  }
 });
 
 test("rejects Tencent, AWS, access-key and secret-key variants before producing a payload", async () => {

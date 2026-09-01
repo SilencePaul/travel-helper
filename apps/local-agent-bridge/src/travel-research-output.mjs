@@ -25,9 +25,10 @@ const NON_PUBLIC_HOST_SUFFIXES = [
   "private", "test", "invalid", "example", "onion",
 ];
 const SENSITIVE_KEY_PATTERN = /(?:credential|password|passwd|token|authorization|cookie|privatekey|agentrun|signature|sequence|idempotency|pairingcode|codexthread|cloudbase|tencent|accesskey|secretid|secretkey)/u;
-const SENSITIVE_VALUE_PATTERN = /(?:\bBearer\s+[A-Za-z0-9._~+\/-]{4,}|\b(?:authorization|cookie|password|passwd|api[_ -]?key|access[_ -]?token|refresh[_ -]?token)\b|\b(?:access[\s_-]*key(?:[\s_-]*id)?|secret[\s_-]*(?:id|key)|tencent[\s_-]*cloud[\s_-]*secret[\s_-]*(?:id|key))\s*[:=]\s*[^\s,;]{4,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:AKID|AKIA|ASIA)[A-Za-z0-9]{12,}|\b(?:sk|ghp|xox[baprs])[-_][A-Za-z0-9_-]{8,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|\b(?:agent\s*run|idempotency|signature|sequence)\b)/iu;
+const SENSITIVE_VALUE_PATTERN = /(?:\bBearer\s+[A-Za-z0-9._~+\/-]{4,}|\b(?:authorization|cookie|password|passwd|api[._\s-]*key|access[._\s-]*token|refresh[._\s-]*token)\s*[:=]\s*[A-Za-z0-9._~+\/-]{4,}|\b(?:access[._\s-]*key(?:[._\s-]*id)?|secret[._\s-]*(?:id|key)|tencent[._\s-]*cloud[._\s-]*secret[._\s-]*(?:id|key))\s*[:=]\s*[A-Za-z0-9._~+\/-]{4,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:AKID|AKIA|ASIA)[A-Za-z0-9]{12,}|\b(?:sk|ghp|xox[baprs])[-_][A-Za-z0-9_-]{8,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|\b(?:agent\s*run|idempotency|signature|sequence)\b)/iu;
 const LOCAL_PATH_PATTERN = /(?:file:\/\/|\/(?:Users|home|etc|private|var|tmp)\/|[A-Za-z]:\\(?:Users|Documents|Windows)\\)/iu;
 const HTML_PATTERN = /<(?:!--[\s\S]*?--|!doctype(?:\s[^<>]*)?|!\[cdata\[[\s\S]*?\]\]|\?[\p{L}_:][^<>]*\?|\/?[\p{L}_:][\p{L}\p{N}:._-]*(?:(?:\s+|\/)[^<>]*)?)>/iu;
+const DEFAULT_IGNORABLE_PATTERN = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
 const NESTED_URL_PATTERN = /[A-Za-z][A-Za-z0-9+.-]*:\/\//u;
 const NON_HIERARCHICAL_URL_PATTERN = /(?:data|javascript|mailto):/iu;
 const PROTOCOL_RELATIVE_URL_PATTERN = /(?<!:)\/\//u;
@@ -70,7 +71,7 @@ function safeString(value, maxLength) {
   return typeof value === "string"
     && value.length <= maxLength
     && value === value.trim()
-    && /\S/u.test(value);
+    && /\S/u.test(value.replace(DEFAULT_IGNORABLE_PATTERN, ""));
 }
 
 function validDate(value) {
@@ -210,8 +211,10 @@ function canonicalHttpsUrl(value, aliasMap) {
       const entry = separator < 0 ? "" : pair.slice(separator + 1);
       if (unsafeUrlComponent(key, aliasMap)
         || unsafeUrlComponent(entry, aliasMap)
+        || unsafeUrlComponent(`${key}=${entry}`, aliasMap)
         || unsafeUrlComponent(key.replace(/\+/gu, " "), aliasMap)
-        || unsafeUrlComponent(entry.replace(/\+/gu, " "), aliasMap)) {
+        || unsafeUrlComponent(entry.replace(/\+/gu, " "), aliasMap)
+        || unsafeUrlComponent(`${key}=${entry}`.replace(/\+/gu, " "), aliasMap)) {
         throw codedError("CODEX_OUTPUT_INVALID");
       }
     }

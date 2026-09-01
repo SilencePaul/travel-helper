@@ -43,7 +43,7 @@ const TRAILING_SENTENCE_PUNCTUATION = new Set([
   ".", ",", ";", "!", "?", ")", "]", "}", "，", "。", "；", "！", "？", "、", "）", "】", "》", "」", "』",
 ]);
 const BARE_LOCAL_HOST_PATTERN = /\b(?:(?:[a-z0-9-]+\.)*localhost|[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:local|internal|lan|home|home\.arpa|localdomain|corp|intranet|private|test|invalid|example|onion))\.?(?::\d{1,5})?(?:\/[^\s"'<>]*)?(?=$|[\s"'<>\u3001\uff0c\u3002\uff1b;,])/giu;
-const CREDENTIAL_PATTERN = /(?:\bBearer\s+[A-Za-z0-9._~+\/-]{8,}|\b(?:authorization|cookie|password|passwd|api[_ -]?key|access[_ -]?key(?:\s*id)?|secret[_ -]?(?:key|id)|access[_ -]?token|refresh[_ -]?token)\s*[:=]\s*[^\s,;]{4,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:AKID|AKIA|ASIA)[A-Za-z0-9]{12,}|\b(?:sk|ghp|xox[baprs])[-_][A-Za-z0-9_-]{8,})/giu;
+const CREDENTIAL_PATTERN = /(?:\bBearer\s+[A-Za-z0-9._~+\/-]{8,}|\b(?:authorization|cookie|password|passwd|api[._\s-]*key|access[._\s-]*key(?:[._\s-]*id)?|secret[._\s-]*(?:key|id)|access[._\s-]*token|refresh[._\s-]*token)\s*[:=]\s*[A-Za-z0-9._~+\/-]{4,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:AKID|AKIA|ASIA)[A-Za-z0-9]{12,}|\b(?:sk|ghp|xox[baprs])[-_][A-Za-z0-9_-]{8,})/giu;
 const SENSITIVE_KEY_PATTERN = /(?:credential|password|passwd|authorization|cookie|apikey|accesskey|secretkey|secretid|accesstoken|refreshtoken|privatekey|localpath|filepath|projectpath)/u;
 const aliasMapRecords = new WeakMap();
 const readonlyMapTargets = new WeakMap();
@@ -295,26 +295,32 @@ export function researchInspectionViews(value) {
       if (decoded !== current) pending.push({ pass: currentEntry.pass + 1, value: decoded });
     }
   }
-  function decodedFragmentToken(rawToken, pattern, maxLength) {
+  function decodedFragmentToken(rawToken, pattern, maxLength, alignment) {
     const candidates = rawToken.startsWith("/")
       ? [rawToken.replace(/^\/+/, ""), rawToken]
       : [rawToken];
     return candidates.find((candidate) => candidate.length > 0
       && candidate.length <= maxLength
+      && candidate.length % alignment === 0
       && pattern.test(candidate));
   }
-  function inspectJoinedFragments(view, pattern, minimumLength, maximumLength, decoder) {
+  function inspectJoinedFragments(view, pattern, minimumLength, maximumLength, alignment, decoder) {
     const run = [];
-    for (const match of view.matchAll(/\S+/gu)) {
-      const token = decodedFragmentToken(match[0], pattern, maximumLength);
+    for (const match of view.matchAll(/[^.\s]+/gu)) {
+      const token = decodedFragmentToken(match[0], pattern, maximumLength, alignment);
       if (!token) {
         run.length = 0;
         continue;
       }
       run.push(token);
       if (run.length > MAX_JOINED_FRAGMENTS) {
-        truncated = true;
-        return;
+        const fullCandidate = run.join("");
+        if (!consumeCandidate()) return;
+        if (fullCandidate.length <= maximumLength && decoder(fullCandidate) !== undefined) {
+          truncated = true;
+          return;
+        }
+        run.shift();
       }
       let joined = token;
       for (let start = run.length - 2; start >= 0; start -= 1) {
@@ -344,9 +350,9 @@ export function researchInspectionViews(value) {
       if (decoded !== undefined) addUriViews(decoded);
     }
     if (truncated) break;
-    inspectJoinedFragments(view, BASE_FRAGMENT_PATTERN, 12, 4_098, decodeBaseToken);
+    inspectJoinedFragments(view, BASE_FRAGMENT_PATTERN, 12, 4_098, 4, decodeBaseToken);
     if (truncated) break;
-    inspectJoinedFragments(view, HEX_FRAGMENT_PATTERN, 16, 8_192, decodeHexToken);
+    inspectJoinedFragments(view, HEX_FRAGMENT_PATTERN, 16, 8_192, 2, decodeHexToken);
   }
   return Object.freeze({ views: Object.freeze(views), malformed, truncated });
 }
