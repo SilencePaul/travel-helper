@@ -122,6 +122,15 @@ async function prepareAndConfirm() {
   await userEvent.click(screen.getByRole("checkbox", { name: /我确认以上授权范围/ }));
 }
 
+async function unmountAndFlush(view: { unmount: () => void }) {
+  await act(async () => {
+    view.unmount();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
 describe("DecisionAgentPanel", () => {
   it("准备只检查本机，并展示准确且无内部 ID 的授权披露", async () => {
     const { bridge, repository, container } = setup();
@@ -246,7 +255,7 @@ describe("DecisionAgentPanel", () => {
       getResearchStatus: vi.fn().mockResolvedValueOnce({ phase: "idle" }).mockResolvedValue(researching),
     });
     const repository = makeRepository();
-    setup({ bridge, repository });
+    const view = setup({ bridge, repository });
     await prepareAndConfirm();
 
     await userEvent.click(screen.getByRole("button", { name: "开始研究酒店候选" }));
@@ -254,6 +263,8 @@ describe("DecisionAgentPanel", () => {
     expect(await screen.findByText("正在请 Codex 搜索候选与可核验来源")).toBeVisible();
     expect(repository.command).toHaveBeenCalledTimes(1);
     expect(bridge.getResearchStatus).toHaveBeenCalledTimes(2);
+    await unmountAndFlush(view);
+    expect(repository.command).toHaveBeenCalledTimes(1);
   });
 
   it("resume 响应丢失时只恢复同一 researchTaskId 的本机状态", async () => {
@@ -263,13 +274,89 @@ describe("DecisionAgentPanel", () => {
       resumeTravelResearch: vi.fn().mockRejectedValue(new Error("resume response lost")),
     });
     const repository = makeRepository();
-    setup({ bridge, repository });
+    const view = setup({ bridge, repository });
 
     await userEvent.click(await screen.findByRole("button", { name: "已恢复登录，继续研究" }));
 
     expect(await screen.findByText("正在请 Codex 搜索候选与可核验来源")).toBeVisible();
     expect(repository.command).toHaveBeenCalledTimes(1);
     expect(bridge.getResearchStatus).toHaveBeenCalledTimes(2);
+    await unmountAndFlush(view);
+    expect(repository.command).toHaveBeenCalledTimes(1);
+  });
+
+  it("resume 响应未到且状态仍是原 blocker 时撤销本次 run，不把旧状态当作新进展", async () => {
+    const blocked = { phase: "needs_owner_action", ...timestamps, blockedReason: "codex_auth_required" as const } satisfies ResearchStatus;
+    const command = vi.fn()
+      .mockResolvedValueOnce({ ok: true, action: "createAgentRun", data: { agentRunId: "agent-run-1", expiresAt: "2099-08-28T00:15:00.000Z" } })
+      .mockResolvedValueOnce({ ok: true, action: "revokeAgentRun", data: { agentRunId: "agent-run-1", revokedAt: "2026-08-28T00:05:00.000Z" } });
+    const bridge = makeBridge({
+      getResearchStatus: vi.fn().mockResolvedValue(blocked),
+      resumeTravelResearch: vi.fn().mockRejectedValue(new Error("request did not reach bridge")),
+    });
+    const repository = makeRepository(command);
+    setup({ bridge, repository });
+
+    await userEvent.click(await screen.findByRole("button", { name: "已恢复登录，继续研究" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledTimes(2));
+    expect(command.mock.calls.map(([input]) => input.action)).toEqual(["createAgentRun", "revokeAgentRun"]);
+    expect(bridge.resumeTravelResearch).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("research-task-1")).toBeVisible();
+  });
+
+  it("execute 响应未到且旧终态只变 updatedAt 时撤销本次 run，不把时间戳当作新进展", async () => {
+    const oldCompleted = { phase: "completed", ...timestamps } satisfies ResearchStatus;
+    const oldCompletedWithNewTimestamp = { ...oldCompleted, updatedAt: "2026-08-28T00:02:00.000Z" } satisfies ResearchStatus;
+    const command = vi.fn()
+      .mockResolvedValueOnce({ ok: true, action: "createAgentRun", data: { agentRunId: "agent-run-1", expiresAt: "2099-08-28T00:15:00.000Z" } })
+      .mockResolvedValueOnce({ ok: true, action: "revokeAgentRun", data: { agentRunId: "agent-run-1", revokedAt: "2026-08-28T00:05:00.000Z" } });
+    const bridge = makeBridge({
+      getResearchStatus: vi.fn().mockResolvedValueOnce(oldCompleted).mockResolvedValue(oldCompletedWithNewTimestamp),
+      executeTravelResearch: vi.fn().mockRejectedValue(new Error("request did not reach bridge")),
+    });
+    const repository = makeRepository(command);
+    setup({ bridge, repository });
+    await screen.findByText("Codex 候选已写入共同决定");
+    await prepareAndConfirm();
+
+    await userEvent.click(screen.getByRole("button", { name: "开始研究酒店候选" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledTimes(2));
+    expect(command.mock.calls.map(([input]) => input.action)).toEqual(["createAgentRun", "revokeAgentRun"]);
+    expect(screen.getByText("research-task-1")).toBeVisible();
+  });
+
+  it("execute 成功接管 run 后卸载不撤销也不取消，本机任务继续", async () => {
+    const bridge = makeBridge({ executeTravelResearch: vi.fn().mockResolvedValue(researching) });
+    const repository = makeRepository();
+    const view = setup({ bridge, repository });
+    await prepareAndConfirm();
+    await userEvent.click(screen.getByRole("button", { name: "开始研究酒店候选" }));
+    await screen.findByText("正在请 Codex 搜索候选与可核验来源");
+
+    await unmountAndFlush(view);
+
+    expect(repository.command).toHaveBeenCalledTimes(1);
+    expect(bridge.cancelResearch).not.toHaveBeenCalled();
+  });
+
+  it("resume 成功接管 run 后卸载不撤销也不取消，本机任务继续", async () => {
+    const blocked = { phase: "needs_owner_action", ...timestamps, blockedReason: "codex_auth_required" as const } satisfies ResearchStatus;
+    const resuming = { phase: "resuming", ...timestamps, updatedAt: "2026-08-28T00:02:00.000Z" } satisfies ResearchStatus;
+    const bridge = makeBridge({
+      getResearchStatus: vi.fn().mockResolvedValue(blocked),
+      resumeTravelResearch: vi.fn().mockResolvedValue(resuming),
+    });
+    const repository = makeRepository();
+    const view = setup({ bridge, repository });
+    await userEvent.click(await screen.findByRole("button", { name: "已恢复登录，继续研究" }));
+    await screen.findByText("Codex 正在继续研究");
+
+    await unmountAndFlush(view);
+
+    expect(repository.command).toHaveBeenCalledTimes(1);
+    expect(bridge.cancelResearch).not.toHaveBeenCalled();
   });
 
   it("撤销响应丢失时保留 pending run 并用稳定 key 先对账，不启动新 run", async () => {
