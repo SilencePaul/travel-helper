@@ -1,7 +1,15 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
-import { chmodSync, lstatSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import {
+  chmodSync,
+  lstatSync,
+  mkdtempSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { rename, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -21,6 +29,10 @@ const DEFAULT_PROJECT_PROBE_PATH = join(DEFAULT_PROJECT_DIRECTORY, "package.json
 const DEFAULT_OUTSIDE_PROBE_PATH = "/etc/hosts";
 const DEFAULT_TRUSTED_TEMP_ROOT = resolve(realpathSync(tmpdir()));
 const TEMP_DIRECTORY_PREFIX = "travel-research-";
+const QUARANTINE_DIRECTORY_PREFIX = ".travel-research-quarantine-";
+const ACTIVE_RESEARCH_PHASES = new Set(["researching", "resuming", "validating", "writing", "cancelling"]);
+const SUCCESSFUL_SHUTDOWN_PHASES = new Set(["completed", "cancelled", "superseded"]);
+const PASSIVE_RESEARCH_PHASES = new Set(["idle", "needs_owner_action", "completed", "failed", "cancelled", "superseded"]);
 const DEFAULT_STATE_DIRECTORY = join(
   homedir(),
   "Library",
@@ -61,6 +73,14 @@ function defaultRemoveDirectorySync(path) {
   rmSync(path, { recursive: true, force: true });
 }
 
+function defaultMoveDirectory(from, to) {
+  return rename(from, to);
+}
+
+function defaultMoveDirectorySync(from, to) {
+  renameSync(from, to);
+}
+
 function sameOrDescendant(parent, candidate) {
   return candidate === parent || candidate.startsWith(`${parent}${sep}`);
 }
@@ -81,8 +101,11 @@ export function createManagedCodexRunnerFactory({
   discoverCodex = discoverCodexExecutable,
   makeTempDirectory = defaultMakeTempDirectory,
   writeProbeFile = defaultWriteProbeFile,
+  moveDirectory = defaultMoveDirectory,
+  moveDirectorySync = defaultMoveDirectorySync,
   removeDirectory = defaultRemoveDirectory,
   removeDirectorySync = defaultRemoveDirectorySync,
+  quarantineToken = randomUUID,
   createRunner = createCodexRunner,
 } = {}) {
   if (![projectDir, schemaPath, projectProbePath, outsideProbePath, trustedTempRoot].every(normalizedAbsolutePath)
@@ -91,8 +114,11 @@ export function createManagedCodexRunnerFactory({
     || typeof inspectPath !== "function"
     || typeof makeTempDirectory !== "function"
     || typeof writeProbeFile !== "function"
+    || typeof moveDirectory !== "function"
+    || typeof moveDirectorySync !== "function"
     || typeof removeDirectory !== "function"
     || typeof removeDirectorySync !== "function"
+    || typeof quarantineToken !== "function"
     || typeof createRunner !== "function") {
     throw codedError("CODEX_RESEARCH_FAILED");
   }
@@ -114,14 +140,17 @@ export function createManagedCodexRunnerFactory({
     throw codedError("CODEX_RESEARCH_FAILED");
   }
   const managedSessions = new Set();
-  const ownedDirectories = new Map();
+  const ownedDirectories = new Set();
+  const quarantinePaths = new Set();
   let closed = false;
+  let closePromise;
 
-  function inspectOwnedDirectory(path) {
+  function inspectManagedDirectory(path, prefix) {
     if (!normalizedAbsolutePath(path)
       || path === canonicalTempRoot
       || dirname(path) !== canonicalTempRoot
-      || !new RegExp(`^${TEMP_DIRECTORY_PREFIX}[A-Za-z0-9][A-Za-z0-9_-]*$`, "u").test(basename(path))
+      || !basename(path).startsWith(prefix)
+      || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/u.test(basename(path).slice(prefix.length))
       || pathsOverlap(path, canonicalProjectDir)) {
       return undefined;
     }
@@ -131,7 +160,8 @@ export function createManagedCodexRunnerFactory({
       if (!info || typeof info.isDirectory !== "function" || typeof info.isSymbolicLink !== "function"
         || !info.isDirectory() || info.isSymbolicLink()
         || canonical !== path || dirname(canonical) !== canonicalTempRoot
-        || pathsOverlap(canonical, canonicalProjectDir)) {
+        || pathsOverlap(canonical, canonicalProjectDir)
+        || info.dev === undefined || info.ino === undefined) {
         return undefined;
       }
       return { dev: info.dev, ino: info.ino };
@@ -140,26 +170,64 @@ export function createManagedCodexRunnerFactory({
     }
   }
 
-  function sameIdentity(path, identity) {
-    const current = inspectOwnedDirectory(path);
-    return Boolean(current && current.dev === identity.dev && current.ino === identity.ino);
+  function sameIdentity(record) {
+    const prefix = record.quarantined ? QUARANTINE_DIRECTORY_PREFIX : TEMP_DIRECTORY_PREFIX;
+    const current = inspectManagedDirectory(record.path, prefix);
+    return Boolean(current && current.dev === record.identity.dev && current.ino === record.identity.ino);
   }
 
-  function removeOwnedSync(path) {
-    const identity = ownedDirectories.get(path);
-    if (!identity) return false;
-    ownedDirectories.delete(path);
-    if (!sameIdentity(path, identity)) return false;
-    removeDirectorySync(path);
+  function nextQuarantinePath() {
+    const token = quarantineToken();
+    if (typeof token !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/u.test(token)) {
+      throw codedError("CODEX_ISOLATION_UNAVAILABLE");
+    }
+    const path = join(canonicalTempRoot, `${QUARANTINE_DIRECTORY_PREFIX}${token}`);
+    if (quarantinePaths.has(path)) throw codedError("CODEX_ISOLATION_UNAVAILABLE");
+    quarantinePaths.add(path);
+    return path;
+  }
+
+  function requireOwnedIdentity(record) {
+    if (!ownedDirectories.has(record) || !sameIdentity(record)) {
+      throw codedError("CODEX_ISOLATION_UNAVAILABLE");
+    }
+  }
+
+  function quarantineOwnedSync(record) {
+    if (record.quarantined) return;
+    requireOwnedIdentity(record);
+    const quarantinePath = nextQuarantinePath();
+    moveDirectorySync(record.path, quarantinePath);
+    record.path = quarantinePath;
+    record.quarantined = true;
+    requireOwnedIdentity(record);
+  }
+
+  async function quarantineOwned(record) {
+    if (record.quarantined) return;
+    requireOwnedIdentity(record);
+    const quarantinePath = nextQuarantinePath();
+    await moveDirectory(record.path, quarantinePath);
+    record.path = quarantinePath;
+    record.quarantined = true;
+    requireOwnedIdentity(record);
+  }
+
+  function removeOwnedSync(record) {
+    if (!ownedDirectories.has(record)) return false;
+    quarantineOwnedSync(record);
+    requireOwnedIdentity(record);
+    removeDirectorySync(record.path);
+    ownedDirectories.delete(record);
     return true;
   }
 
-  async function removeOwned(path) {
-    const identity = ownedDirectories.get(path);
-    if (!identity) return false;
-    ownedDirectories.delete(path);
-    if (!sameIdentity(path, identity)) return false;
-    await removeDirectory(path);
+  async function removeOwned(record) {
+    if (!ownedDirectories.has(record)) return false;
+    await quarantineOwned(record);
+    requireOwnedIdentity(record);
+    await removeDirectory(record.path);
+    ownedDirectories.delete(record);
     return true;
   }
 
@@ -173,11 +241,12 @@ export function createManagedCodexRunnerFactory({
       throw codedError("CODEX_RESEARCH_FAILED");
     }
     const isolatedDir = makeTempDirectory(join(canonicalTempRoot, TEMP_DIRECTORY_PREFIX));
-    const identity = inspectOwnedDirectory(isolatedDir);
+    const identity = inspectManagedDirectory(isolatedDir, TEMP_DIRECTORY_PREFIX);
     if (!identity) {
       throw codedError("CODEX_ISOLATION_UNAVAILABLE");
     }
-    ownedDirectories.set(isolatedDir, identity);
+    const ownership = { path: isolatedDir, identity, quarantined: false, managed: undefined };
+    ownedDirectories.add(ownership);
     const isolatedFile = join(isolatedDir, "inside.txt");
     let session;
     try {
@@ -201,7 +270,7 @@ export function createManagedCodexRunnerFactory({
         throw codedError("CODEX_RESEARCH_FAILED");
       }
     } catch (error) {
-      try { removeOwnedSync(isolatedDir); } catch { /* preserve the original stable error */ }
+      try { removeOwnedSync(ownership); } catch { /* close retries retained ownership */ }
       throw error;
     }
 
@@ -215,43 +284,63 @@ export function createManagedCodexRunnerFactory({
         activeOperations -= 1;
       }
     };
+    let runnerCancelled = false;
     const managed = {
       getState: () => session.getState(),
       runInitial: (input) => run(() => session.runInitial(input)),
       resume: (input) => run(() => session.resume(input)),
       cancel() {
         if (cleanupPromise) return cleanupPromise;
-        cleanupPromise = (async () => {
+        const attempt = Promise.resolve().then(async () => {
           let result = false;
-          try {
+          if (!runnerCancelled) {
             result = await session.cancel();
-          } finally {
-            try {
-              await removeOwned(isolatedDir);
-            } finally {
-              managedSessions.delete(managed);
-            }
+            runnerCancelled = true;
           }
+          await removeOwned(ownership);
+          managedSessions.delete(managed);
+          ownership.managed = undefined;
           return result;
-        })();
-        return cleanupPromise;
+        });
+        cleanupPromise = attempt;
+        attempt.catch(() => {
+          if (cleanupPromise === attempt) cleanupPromise = undefined;
+        });
+        return attempt;
       },
     };
+    ownership.managed = managed;
     managedSessions.add(managed);
     Object.defineProperty(managed, "idle", { get: () => activeOperations === 0 });
     return Object.freeze(managed);
   }
 
+  async function settleStrict(promises) {
+    const results = await Promise.allSettled(promises);
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure) throw failure.reason;
+  }
+
   async function cleanupIdle() {
-    await Promise.allSettled([...managedSessions]
+    await settleStrict([...managedSessions]
       .filter((session) => session.idle)
       .map((session) => session.cancel()));
   }
 
-  async function close() {
-    if (closed && managedSessions.size === 0) return;
+  function close() {
+    if (closePromise) return closePromise;
     closed = true;
-    await Promise.allSettled([...managedSessions].map((session) => session.cancel()));
+    const attempt = Promise.resolve().then(async () => {
+      await settleStrict([...managedSessions].map((session) => session.cancel()));
+      await settleStrict([...ownedDirectories]
+        .filter((record) => !record.managed)
+        .map((record) => removeOwned(record)));
+    });
+    closePromise = attempt;
+    attempt.catch(() => {
+      if (closePromise === attempt) closePromise = undefined;
+    });
+    return attempt;
   }
 
   return Object.freeze({ create, cleanupIdle, close });
@@ -273,6 +362,41 @@ function fixedLoopbackRuntime(service, runner) {
     resumeTravelResearch: (input) => finishRunnerSession(() => service.resumeTravelResearch(input)),
     cancelResearch: (input) => finishRunnerSession(() => service.cancelResearch(input)),
   });
+}
+
+function createServiceAwareShutdown(service, runner) {
+  let shutdownPromise;
+  return () => {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = Promise.resolve().then(async () => {
+      let shutdownError;
+      try {
+        const status = await service.getResearchStatus();
+        if (ACTIVE_RESEARCH_PHASES.has(status?.phase)) {
+          if (typeof status.researchTaskId !== "string" || status.researchTaskId.length === 0) {
+            throw codedError("CODEX_RESEARCH_FAILED");
+          }
+          const terminal = await service.cancelResearch({ researchTaskId: status.researchTaskId });
+          if (!SUCCESSFUL_SHUTDOWN_PHASES.has(terminal?.phase)) {
+            throw codedError(terminal?.phase === "failed"
+              ? terminal.errorCode || "CODEX_RESEARCH_FAILED"
+              : "CODEX_RESEARCH_FAILED");
+          }
+        } else if (!PASSIVE_RESEARCH_PHASES.has(status?.phase)) {
+          throw codedError("CODEX_RESEARCH_FAILED");
+        }
+      } catch (error) {
+        shutdownError = error;
+      }
+      try {
+        await runner.close();
+      } catch (error) {
+        shutdownError ??= error;
+      }
+      if (shutdownError) throw shutdownError;
+    });
+    return shutdownPromise;
+  };
 }
 
 export function parseCliArguments(argv) {
@@ -323,6 +447,7 @@ export async function runCli(argv = process.argv.slice(2), output = process.stdo
   const notifier = createNotifier();
   const service = createService({ transport, runner, store, notifier, clock, idGenerator });
   const runtime = fixedLoopbackRuntime(service, runner);
+  const shutdown = createServiceAwareShutdown(service, runner);
   let bridge;
   try {
     bridge = await startBridge({
@@ -330,10 +455,10 @@ export async function runCli(argv = process.argv.slice(2), output = process.stdo
       port: options.port,
       runtime,
       onPrepared: (data) => output.write(`本机配对指纹：${data.pairingCodeFingerprint}\n`),
-      onClose: () => runner.close(),
+      onClose: shutdown,
     });
   } catch (error) {
-    await runner.close();
+    await shutdown();
     throw error;
   }
   output.write(`请在浏览器中打开：${bridge.connectionUrl}\n`);
@@ -354,7 +479,7 @@ export async function runCli(argv = process.argv.slice(2), output = process.stdo
   return bridge;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (typeof process.argv[1] === "string" && import.meta.url === pathToFileURL(process.argv[1]).href) {
   runCli().catch((error) => {
     process.stderr.write(`本地 Agent Bridge 启动失败：${error?.code || error?.message || "UNKNOWN"}\n`);
     process.exitCode = 1;

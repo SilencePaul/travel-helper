@@ -278,10 +278,14 @@ export async function startLocalAgentBridge({
       json(response, 400, { ok: false, error: "INVALID_REQUEST" }, corsHeaders);
       return;
     }
+    if (request.headers["transfer-encoding"] !== undefined) {
+      request.resume();
+      json(response, 400, { ok: false, error: "INVALID_REQUEST" }, corsHeaders);
+      return;
+    }
     if (request.method === "OPTIONS") {
       const preflightLength = request.headers["content-length"];
       if (request.headers["access-control-request-method"] !== route.method
-        || request.headers["transfer-encoding"] !== undefined
         || (preflightLength !== undefined && preflightLength !== "0")) {
         request.resume();
         json(response, 400, { ok: false, error: "INVALID_REQUEST" }, corsHeaders);

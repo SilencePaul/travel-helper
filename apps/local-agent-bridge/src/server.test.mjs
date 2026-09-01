@@ -54,7 +54,12 @@ function slowRequest(port) {
       port,
       method: "POST",
       path: "/v1/agent-runs/prepare",
-      headers: { host: `127.0.0.1:${port}`, origin: APP_ORIGIN, "content-type": "application/json" },
+      headers: {
+        host: `127.0.0.1:${port}`,
+        origin: APP_ORIGIN,
+        "content-type": "application/json",
+        "content-length": "2",
+      },
     }, (res) => {
       const chunks = [];
       res.on("data", (chunk) => chunks.push(chunk));
@@ -313,6 +318,41 @@ test("CORS preflight is path-specific, supports GET status and preserves PNA", a
     headers: { "access-control-request-method": "POST" },
   });
   assert.equal(declaredBody.status, 400);
+  assert.equal(events.length, 0);
+});
+
+test("every fixed GET, POST and OPTIONS route rejects Transfer-Encoding before runtime", async (context) => {
+  const events = [];
+  const bridge = await startLocalAgentBridge({ appUrl: APP_ORIGIN, runtime: fakeRuntime(events) });
+  context.after(() => bridge.close());
+  const routes = [
+    ["POST", "/v1/agent-runs/prepare", "POST", "{}"],
+    ["POST", "/v1/agent-runs/claim", "POST", JSON.stringify({ agentRunId: "agent-run-1" })],
+    ["POST", "/v1/agent-runs/execute-travel-research", "POST", "{}"],
+    ["GET", "/v1/agent-runs/research-status", "GET", "{}"],
+    ["POST", "/v1/agent-runs/resume-travel-research", "POST", "{}"],
+    ["POST", "/v1/agent-runs/cancel-research", "POST", "{}"],
+    ["OPTIONS", "/v1/agent-runs/prepare", "POST", "{}"],
+    ["OPTIONS", "/v1/agent-runs/research-status", "GET", "{}"],
+  ];
+  for (const [method, path, requestedMethod, body] of routes) {
+    const response = await rawSocketRequest(bridge.port, [
+      `${method} ${path} HTTP/1.1`,
+      `Host: 127.0.0.1:${bridge.port}`,
+      `Origin: ${APP_ORIGIN}`,
+      `Access-Control-Request-Method: ${requestedMethod}`,
+      "Content-Type: application/json",
+      "Transfer-Encoding: chunked",
+      "Connection: close",
+      "",
+      Buffer.byteLength(body).toString(16),
+      body,
+      "0",
+      "",
+      "",
+    ].join("\r\n"));
+    assert.match(response, /^HTTP\/1\.1 400 /u, `${method} ${path}`);
+  }
   assert.equal(events.length, 0);
 });
 
