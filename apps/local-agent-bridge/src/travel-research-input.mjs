@@ -9,7 +9,10 @@ import {
 
 const CATEGORY_SET = new Set(["hotel", "restaurant", "attraction"]);
 const ALIAS_PREFIX = Object.freeze({ preference: "pref_", feedback: "feed_" });
+const MIN_ALIAS_SALT_BYTES = 16;
+const MAX_ALIAS_SALT_BYTES = 1_024;
 const MAX_INPUT_BYTES = 256 * 1_024;
+const MAX_INSPECTION_VIEWS = 64;
 const NON_PUBLIC_HOST_SUFFIXES = [
   "localhost", "local", "internal", "lan", "home", "home.arpa", "localdomain", "corp", "intranet",
   "private", "test", "invalid", "example", "onion",
@@ -25,9 +28,11 @@ const SAFE_STRUCTURAL_KEYS = new Set([
   "openInformation", "priceSnapshot", "ticketType",
 ]);
 const LOCAL_PATH_PATTERN = /(?:file:\/\/[^\s"']+|\/(?:Users|home|etc|private|var|tmp)\/[^\s"']+|[A-Za-z]:\\(?:Users|Documents|Windows)\\[^\s"']+)/giu;
-const URL_PATTERN = /\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'<>\u3001\uff0c\u3002\uff1b]+/gu;
-const NON_HIERARCHICAL_URL_PATTERN = /\b(?:data|javascript|mailto):[^\s"'<>\u3001\uff0c\u3002\uff1b]+/giu;
+const URL_PATTERN = /[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'<>\u3001\uff0c\u3002\uff1b]+/gu;
+const NON_HIERARCHICAL_URL_PATTERN = /(?:data|javascript|mailto):[^\s"'<>\u3001\uff0c\u3002\uff1b]+/giu;
 const PROTOCOL_RELATIVE_URL_PATTERN = /(?<!:)\/\/[^\s"'<>\u3001\uff0c\u3002\uff1b]+/gu;
+const BASE_TOKEN_PATTERN = /(?<![A-Za-z0-9_+-])[A-Za-z0-9][A-Za-z0-9_+\/-]{11,4095}={0,2}(?![A-Za-z0-9_=+\/-])/gu;
+const HEX_TOKEN_PATTERN = /(?<![A-Fa-f0-9])[A-Fa-f0-9]{16,8192}(?![A-Fa-f0-9])/gu;
 const IP_TOKEN_PATTERN = /(?<![A-Za-z0-9])(?:\[[0-9A-Fa-f:.%]+\]|(?:\d{1,3}\.){3}\d{1,3}|[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]+)(?::\d{1,5})?(?:\/[^\s"'<>]*)?(?![A-Za-z0-9])/gu;
 const TRAILING_SENTENCE_PUNCTUATION = new Set([
   ".", ",", ";", "!", "?", ")", "]", "}", "，", "。", "；", "！", "？", "、", "）", "】", "》", "」", "』",
@@ -35,6 +40,8 @@ const TRAILING_SENTENCE_PUNCTUATION = new Set([
 const BARE_LOCAL_HOST_PATTERN = /\b(?:(?:[a-z0-9-]+\.)*localhost|[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:local|internal|lan|home|home\.arpa|localdomain|corp|intranet|private|test|invalid|example|onion))\.?(?::\d{1,5})?(?:\/[^\s"'<>]*)?(?=$|[\s"'<>\u3001\uff0c\u3002\uff1b;,])/giu;
 const CREDENTIAL_PATTERN = /(?:\bBearer\s+[A-Za-z0-9._~+\/-]{8,}|\b(?:authorization|cookie|password|passwd|api[_ -]?key|access[_ -]?key(?:\s*id)?|secret[_ -]?(?:key|id)|access[_ -]?token|refresh[_ -]?token)\s*[:=]\s*[^\s,;]{4,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:AKID|AKIA|ASIA)[A-Za-z0-9]{12,}|\b(?:sk|ghp|xox[baprs])[-_][A-Za-z0-9_-]{8,})/giu;
 const SENSITIVE_KEY_PATTERN = /(?:credential|password|passwd|authorization|cookie|apikey|accesskey|secretkey|secretid|accesstoken|refreshtoken|privatekey|localpath|filepath|projectpath)/u;
+const aliasMapRecords = new WeakMap();
+const readonlyMapTargets = new WeakMap();
 
 function codedError(code) {
   return Object.assign(new Error(code), { code });
@@ -60,11 +67,18 @@ function validAliasIdentity(type, id, revision) {
     && revision >= 0;
 }
 
+function validAliasSalt(aliasSalt) {
+  if (typeof aliasSalt === "string") {
+    const byteLength = Buffer.byteLength(aliasSalt, "utf8");
+    return byteLength >= MIN_ALIAS_SALT_BYTES && byteLength <= MAX_ALIAS_SALT_BYTES;
+  }
+  return ArrayBuffer.isView(aliasSalt)
+    && aliasSalt.byteLength >= MIN_ALIAS_SALT_BYTES
+    && aliasSalt.byteLength <= MAX_ALIAS_SALT_BYTES;
+}
+
 export function hmacAlias(aliasSalt, type, id, revision) {
-  if ((typeof aliasSalt !== "string" && !ArrayBuffer.isView(aliasSalt))
-    || (typeof aliasSalt === "string" && aliasSalt.length === 0)
-    || (ArrayBuffer.isView(aliasSalt) && aliasSalt.byteLength === 0)
-    || !validAliasIdentity(type, id, revision)) {
+  if (!validAliasSalt(aliasSalt) || !validAliasIdentity(type, id, revision)) {
     throw codedError("CODEX_OUTPUT_INVALID");
   }
   try {
@@ -78,20 +92,76 @@ export function hmacAlias(aliasSalt, type, id, revision) {
   }
 }
 
+function readonlyMap(entries) {
+  const target = new Map(entries);
+  for (const value of target.values()) Object.freeze(value);
+  let proxy;
+  proxy = new Proxy(target, {
+    get(map, property) {
+      if (["set", "delete", "clear"].includes(property)) {
+        return () => { throw codedError("CODEX_OUTPUT_INVALID"); };
+      }
+      if (property === "size") return map.size;
+      if (property === "forEach") {
+        return (callback, thisArg) => map.forEach((value, key) => callback.call(thisArg, value, key, proxy));
+      }
+      if (["get", "has", "entries", "keys", "values", Symbol.iterator].includes(property)) {
+        return map[property].bind(map);
+      }
+      const value = Reflect.get(map, property, proxy);
+      return typeof value === "function" ? value.bind(proxy) : value;
+    },
+  });
+  readonlyMapTargets.set(proxy, target);
+  return Object.freeze(proxy);
+}
+
 function aliasMap(preferences, feedback) {
   const result = {};
+  const preference = readonlyMap(preferences);
+  const feedbackMap = readonlyMap(feedback);
   Object.defineProperties(result, {
-    preference: { value: new Map(preferences), enumerable: false, writable: false },
-    feedback: { value: new Map(feedback), enumerable: false, writable: false },
+    preference: { value: preference, enumerable: false, writable: false },
+    feedback: { value: feedbackMap, enumerable: false, writable: false },
   });
-  return Object.freeze(result);
+  const frozen = Object.freeze(result);
+  const privateVariants = privateValueVariants([
+    ...readonlyMapTargets.get(preference).values(),
+    ...readonlyMapTargets.get(feedbackMap).values(),
+  ].map((entry) => entry.id));
+  aliasMapRecords.set(frozen, Object.freeze({ preference, feedback: feedbackMap, privateVariants }));
+  return frozen;
+}
+
+export function isResearchAliasMap(map) {
+  try {
+    const record = map && typeof map === "object" ? aliasMapRecords.get(map) : undefined;
+    return Boolean(record
+      && readonlyMapTargets.has(record.preference)
+      && readonlyMapTargets.has(record.feedback)
+      && map.preference === record.preference
+      && map.feedback === record.feedback);
+  } catch {
+    return false;
+  }
 }
 
 export function resolveResearchAlias(map, type, alias) {
-  if (!map || !Object.hasOwn(ALIAS_PREFIX, type) || typeof alias !== "string") return undefined;
-  const entry = map[type] instanceof Map ? map[type].get(alias) : undefined;
+  const record = isResearchAliasMap(map) ? aliasMapRecords.get(map) : undefined;
+  if (!record || !Object.hasOwn(ALIAS_PREFIX, type) || typeof alias !== "string") return undefined;
+  const target = readonlyMapTargets.get(record[type]);
+  const entry = target?.get(alias);
   if (!entry || typeof entry.id !== "string" || !Number.isSafeInteger(entry.revision)) return undefined;
   return { id: entry.id, revision: entry.revision };
+}
+
+export function researchTextContainsAliasPrivateValue(map, value) {
+  const record = isResearchAliasMap(map) ? aliasMapRecords.get(map) : undefined;
+  if (!record || typeof value !== "string") return false;
+  const inspection = researchInspectionViews(value);
+  return inspection.views.some((view) => (
+    [...record.privateVariants].some((variant) => view.includes(variant))
+  ));
 }
 
 function sensitiveValues(context) {
@@ -123,6 +193,115 @@ function sensitiveValues(context) {
   }
   visit(context);
   return [...values].sort((left, right) => right.length - left.length);
+}
+
+function printableDecoded(buffer) {
+  const decoded = buffer.toString("utf8");
+  return decoded.length > 0
+    && Buffer.from(decoded, "utf8").equals(buffer)
+    && !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\uFFFD]/u.test(decoded);
+}
+
+function decodeBaseToken(token) {
+  const withoutPadding = token.replace(/=+$/u, "");
+  const encoding = /[-_]/u.test(withoutPadding) ? "base64url" : "base64";
+  if (withoutPadding.length % 4 === 1) return undefined;
+  try {
+    const buffer = Buffer.from(token, encoding);
+    const roundTrip = buffer.toString(encoding).replace(/=+$/u, "");
+    return roundTrip === withoutPadding && printableDecoded(buffer) ? buffer.toString("utf8") : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function decodeHexToken(token) {
+  if (token.length % 2 !== 0) return undefined;
+  try {
+    const buffer = Buffer.from(token, "hex");
+    return buffer.toString("hex") === token.toLowerCase() && printableDecoded(buffer)
+      ? buffer.toString("utf8")
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function researchInspectionViews(value) {
+  if (typeof value !== "string") {
+    return Object.freeze({ views: Object.freeze([]), malformed: true, truncated: false });
+  }
+  const views = [];
+  const seen = new Set();
+  let truncated = false;
+  function add(view) {
+    const normalized = view.normalize("NFKC");
+    if (views.length >= MAX_INSPECTION_VIEWS && !seen.has(normalized)) {
+      truncated = true;
+      return;
+    }
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      views.push(normalized);
+      return true;
+    }
+    return false;
+  }
+  let malformed = false;
+  function addUriViews(seed) {
+    let current = seed.normalize("NFKC");
+    add(current);
+    for (let pass = 0; pass < 3 && /%[0-9A-Fa-f]{2}/u.test(current); pass += 1) {
+      let decoded;
+      try {
+        decoded = decodeURIComponent(current).normalize("NFKC");
+      } catch {
+        malformed = true;
+        return;
+      }
+      if (decoded === current) break;
+      add(decoded);
+      current = decoded;
+    }
+    if (/%[0-9A-Fa-f]{2}/u.test(current)) malformed = true;
+  }
+  addUriViews(value);
+  for (let index = 0; index < views.length; index += 1) {
+    const view = views[index];
+    BASE_TOKEN_PATTERN.lastIndex = 0;
+    for (const match of view.matchAll(BASE_TOKEN_PATTERN)) {
+      const decoded = decodeBaseToken(match[0]);
+      if (decoded !== undefined) addUriViews(decoded);
+    }
+    HEX_TOKEN_PATTERN.lastIndex = 0;
+    for (const match of view.matchAll(HEX_TOKEN_PATTERN)) {
+      const decoded = decodeHexToken(match[0]);
+      if (decoded !== undefined) addUriViews(decoded);
+    }
+  }
+  return Object.freeze({ views: Object.freeze(views), malformed, truncated });
+}
+
+function percentEncodeAll(value) {
+  return [...Buffer.from(value, "utf8")]
+    .map((byte) => `%${byte.toString(16).padStart(2, "0").toUpperCase()}`)
+    .join("");
+}
+
+function privateValueVariants(privateValues) {
+  const variants = new Set();
+  for (const rawValue of privateValues) {
+    if (typeof rawValue !== "string" || rawValue.length === 0) continue;
+    const normalized = rawValue.normalize("NFKC");
+    for (const view of researchInspectionViews(normalized).views) variants.add(view);
+    variants.add(encodeURIComponent(normalized));
+    variants.add(percentEncodeAll(normalized));
+    const buffer = Buffer.from(normalized, "utf8");
+    variants.add(buffer.toString("base64"));
+    variants.add(buffer.toString("base64url"));
+    variants.add(buffer.toString("hex"));
+  }
+  return variants;
 }
 
 function normalizedPublicHostname(hostname) {
@@ -178,23 +357,15 @@ function redactIpTokens(value) {
   });
 }
 
-function decodedPathForInspection(pathname) {
-  let decoded = pathname;
-  for (let pass = 0; pass < 3; pass += 1) {
-    let next;
-    try {
-      next = decodeURIComponent(decoded);
-    } catch {
-      return undefined;
-    }
-    if (next === decoded) return decoded;
-    decoded = next;
+function containsPrivateVariant(value, privateVariants) {
+  for (const variant of privateVariants) {
+    if (variant.length > 0 && value.includes(variant)) return true;
   }
-  return /%[0-9A-Fa-f]{2}/u.test(decoded) ? undefined : decoded;
+  return false;
 }
 
-function unsafeDecodedPath(pathname, privateValues) {
-  if (privateValues.some((privateValue) => privateValue.length > 0 && pathname.includes(privateValue))) return true;
+function unsafeDecodedPath(pathname, privateVariants) {
+  if (containsPrivateVariant(pathname, privateVariants)) return true;
   if (patternMatches(CREDENTIAL_PATTERN, pathname)
     || patternMatches(LOCAL_PATH_PATTERN, pathname)
     || patternMatches(URL_PATTERN, pathname)
@@ -206,16 +377,20 @@ function unsafeDecodedPath(pathname, privateValues) {
   return redactIpTokens(pathname) !== pathname;
 }
 
-function sanitizeUrl(value, privateValues) {
+function sanitizeUrl(value, privateVariants) {
   try {
-    const parsed = new URL(value);
-    if (parsed.protocol !== "https:" || parsed.username !== "" || parsed.password !== "" || value.includes("#")) {
+    const normalizedValue = value.normalize("NFKC");
+    const parsed = new URL(normalizedValue);
+    if (parsed.protocol !== "https:" || parsed.username !== "" || parsed.password !== "" || normalizedValue.includes("#")) {
       return "[REDACTED_URL]";
     }
     const hostname = normalizedPublicHostname(parsed.hostname);
     if (!hostname) return "[REDACTED_URL]";
-    const decodedPath = decodedPathForInspection(parsed.pathname);
-    if (decodedPath === undefined || unsafeDecodedPath(decodedPath, privateValues)) return "[REDACTED_URL]";
+    const inspection = researchInspectionViews(parsed.pathname);
+    if (inspection.malformed || inspection.truncated
+      || inspection.views.some((view) => unsafeDecodedPath(view, privateVariants))) {
+      return "[REDACTED_URL]";
+    }
     const port = parsed.port === "443" || parsed.port === "" ? "" : `:${parsed.port}`;
     return `https://${hostname}${port}${parsed.pathname}`;
   } catch {
@@ -223,46 +398,71 @@ function sanitizeUrl(value, privateValues) {
   }
 }
 
-function sanitizeString(value, privateValues) {
+function containsUnsafeUrl(value, privateVariants) {
+  URL_PATTERN.lastIndex = 0;
+  for (const match of value.matchAll(URL_PATTERN)) {
+    if (sanitizeUrl(match[0], privateVariants) === "[REDACTED_URL]") return true;
+  }
+  return patternMatches(NON_HIERARCHICAL_URL_PATTERN, value)
+    || patternMatches(PROTOCOL_RELATIVE_URL_PATTERN, value);
+}
+
+function directSensitiveContent(value, privateVariants) {
+  return containsPrivateVariant(value, privateVariants)
+    || patternMatches(CREDENTIAL_PATTERN, value)
+    || patternMatches(LOCAL_PATH_PATTERN, value)
+    || containsUnsafeUrl(value, privateVariants);
+}
+
+function sanitizeString(value, privateVariants) {
+  const inspection = researchInspectionViews(value);
+  if (inspection.malformed || inspection.truncated
+    || inspection.views.slice(1).some((view) => directSensitiveContent(view, privateVariants))
+    || directSensitiveContent(inspection.views[0], privateVariants)) {
+    return "[REDACTED_SENSITIVE]";
+  }
   let sanitized = value
-    .replace(URL_PATTERN, (url) => sanitizeUrl(url, privateValues))
+    .replace(URL_PATTERN, (url) => sanitizeUrl(url, privateVariants))
     .replace(NON_HIERARCHICAL_URL_PATTERN, "[REDACTED_URL]")
     .replace(PROTOCOL_RELATIVE_URL_PATTERN, "[REDACTED_URL]")
     .replace(BARE_LOCAL_HOST_PATTERN, "[REDACTED_URL]")
     .replace(LOCAL_PATH_PATTERN, "[REDACTED_LOCAL_PATH]")
     .replace(CREDENTIAL_PATTERN, "[REDACTED_CREDENTIAL]");
   sanitized = redactIpTokens(sanitized);
-  for (const privateValue of privateValues) {
-    if (privateValue.length > 0) sanitized = sanitized.split(privateValue).join("[REDACTED_ID]");
-  }
   return sanitized;
 }
 
-function sanitizeKey(key, privateValues) {
-  const sanitized = sanitizeString(key, privateValues);
+function sanitizeKey(key, privateVariants) {
+  const inspection = researchInspectionViews(key);
+  const sensitiveView = inspection.malformed || inspection.truncated || inspection.views.some((view) => (
+    SENSITIVE_KEY_PATTERN.test(view.toLowerCase().replace(/[^a-z0-9]/gu, ""))
+    || directSensitiveContent(view, privateVariants)
+  ));
+  if (sensitiveView) {
+    if (SAFE_STRUCTURAL_KEYS.has(key)) throw codedError("CODEX_OUTPUT_INVALID");
+    return "[REDACTED_SENSITIVE_KEY]";
+  }
+  const sanitized = sanitizeString(key, privateVariants);
   if (sanitized !== key) {
     if (SAFE_STRUCTURAL_KEYS.has(key)) throw codedError("CODEX_OUTPUT_INVALID");
     return sanitized;
   }
-  if (SAFE_STRUCTURAL_KEYS.has(key)) return key;
-  const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/gu, "");
-  if (SENSITIVE_KEY_PATTERN.test(normalizedKey)) return "[REDACTED_SENSITIVE_KEY]";
   return key;
 }
 
-function sanitizeUntrusted(value, privateValues) {
-  if (typeof value === "string") return sanitizeString(value, privateValues);
+function sanitizeUntrusted(value, privateVariants) {
+  if (typeof value === "string") return sanitizeString(value, privateVariants);
   if (value === null || typeof value === "number" || typeof value === "boolean") return value;
-  if (Array.isArray(value)) return value.map((entry) => sanitizeUntrusted(entry, privateValues));
+  if (Array.isArray(value)) return value.map((entry) => sanitizeUntrusted(entry, privateVariants));
   if (!plainObject(value)) throw codedError("CODEX_OUTPUT_INVALID");
   const result = {};
   for (const [key, entry] of Object.entries(value)) {
-    const sanitizedKey = sanitizeKey(key, privateValues);
+    const sanitizedKey = sanitizeKey(key, privateVariants);
     if (!sanitizedKey || Object.hasOwn(result, sanitizedKey)) throw codedError("CODEX_OUTPUT_INVALID");
     result[sanitizedKey] = sanitizedKey === "[REDACTED_SENSITIVE_KEY]"
       || sanitizedKey.includes("[REDACTED_CREDENTIAL]")
       ? "[REDACTED_CREDENTIAL]"
-      : sanitizeUntrusted(entry, privateValues);
+      : sanitizeUntrusted(entry, privateVariants);
   }
   return result;
 }
@@ -326,6 +526,7 @@ export async function buildTravelResearchInput(context, options, cryptoProvider 
     || options.targetScopeId.length === 0) {
     throw codedError("INVALID_RESEARCH_TARGET");
   }
+  if (!validAliasSalt(options.aliasSalt)) throw codedError("CODEX_OUTPUT_INVALID");
   if (!plainObject(context) || !plainObject(context.trip) || !plainObject(context.workspace)) {
     throw codedError("CODEX_OUTPUT_INVALID");
   }
@@ -346,7 +547,7 @@ export async function buildTravelResearchInput(context, options, cryptoProvider 
     if (pairs.preferences.length !== disclosure.preferences.length || pairs.feedback.length !== disclosure.feedback.length) {
       throw codedError("CODEX_OUTPUT_INVALID");
     }
-    const privateValues = sensitiveValues(context);
+    const privateVariants = privateValueVariants(sensitiveValues(context));
     const codexInput = sanitizeUntrusted({
       category: disclosure.category,
       segment: disclosure.segment,
@@ -361,7 +562,7 @@ export async function buildTravelResearchInput(context, options, cryptoProvider 
         feedbackAlias: pairs.feedback[index].alias,
       })),
       existingCandidates: disclosure.existingCandidates,
-    }, privateValues);
+    }, privateVariants);
     const serialized = canonicalJson(codexInput);
     if (Buffer.byteLength(serialized, "utf8") > MAX_INPUT_BYTES) throw codedError("CODEX_OUTPUT_INVALID");
     const round = nextRound(context);

@@ -1,20 +1,51 @@
 import assert from "node:assert/strict";
+import { webcrypto } from "node:crypto";
 import test from "node:test";
 
+import { buildTravelResearchInput } from "./travel-research-input.mjs";
 import { validateTravelResearchOutput } from "./travel-research-output.mjs";
 
-const preferenceAlias = `pref_${"p".repeat(32)}`;
-const feedbackAlias = `feed_${"f".repeat(32)}`;
+const aliasFixture = await buildTravelResearchInput({
+  trip: {
+    version: 7,
+    days: [{ id: "day-sz-1", date: "2026-10-03", city: "深圳" }],
+    travelerNames: ["一鸣", "美垚"],
+    travelerCount: 2,
+  },
+  workspace: {
+    preferences: [{
+      id: "preference-raw-1",
+      revision: 4,
+      answers: { pace: "慢" },
+      status: "completed",
+    }],
+    candidates: [{
+      id: "candidate-raw-1",
+      revision: 2,
+      category: "hotel",
+      entity: { name: "旧酒店", address: "深圳市" },
+      applicability: { dates: { start: "2026-10-03", end: "2026-10-03" }, travelers: 2 },
+      recommendation: { round: 3, reason: "旧候选" },
+    }],
+    evidence: [],
+    feedback: [{
+      id: "feedback-raw-1",
+      candidateId: "candidate-raw-1",
+      revision: 3,
+      kind: "comment",
+      reason: "位置好",
+    }],
+  },
+}, {
+  targetCategory: "hotel",
+  targetScopeId: "scope_b64667f2ad33dd723ef9947c9a3531f105ecd42f01d42c7b559e9712e2764e57",
+  aliasSalt: "output-test-salt-16",
+}, webcrypto);
+const preferenceAlias = aliasFixture.codexInput.preferences[0].preferenceRevisionAlias;
+const feedbackAlias = aliasFixture.codexInput.feedback[0].feedbackAlias;
 
 function aliasMap() {
-  return Object.freeze({
-    preference: new Map([
-      [preferenceAlias, Object.freeze({ id: "preference-raw-1", revision: 4 })],
-    ]),
-    feedback: new Map([
-      [feedbackAlias, Object.freeze({ id: "feedback-raw-1", revision: 3 })],
-    ]),
-  });
+  return aliasFixture.aliasMap;
 }
 
 const segment = Object.freeze({ city: "深圳", startDate: "2026-10-03", endDate: "2026-10-03", travelerCount: 2 });
@@ -74,12 +105,13 @@ function options(overrides = {}) {
     aliasMap: aliasMap(),
     round: 4,
     now: () => new Date("2026-09-01T02:03:04.567Z"),
+    resolveHostname: async () => [{ address: "93.184.216.34", family: 4 }],
     ...overrides,
   };
 }
 
-function errorCode(block) {
-  assert.throws(block, (error) => error instanceof Error && error.message === error.code && [
+async function errorCode(block) {
+  await assert.rejects(block, (error) => error instanceof Error && error.message === error.code && [
     "CODEX_OUTPUT_INVALID",
     "CODEX_INSUFFICIENT_EVIDENCE",
     "INVALID_RESEARCH_TARGET",
@@ -87,8 +119,8 @@ function errorCode(block) {
   ].includes(error.code));
 }
 
-test("valid completed output maps current aliases and adds only trusted round/capturedAt fields", () => {
-  const result = validateTravelResearchOutput(completedOutput(), options());
+test("valid completed output maps current aliases and adds only trusted round/capturedAt fields", async () => {
+  const result = await validateTravelResearchOutput(completedOutput(), options());
 
   assert.equal(result.status, "completed");
   assert.equal(result.payload.round, 4);
@@ -100,12 +132,13 @@ test("valid completed output maps current aliases and adds only trusted round/ca
     feedbackIds: ["feedback-raw-1"],
   });
   assert.equal(result.payload.candidates[0].evidence[0].capturedAt, "2026-09-01T02:03:04.567Z");
+  assert.equal(result.payload.candidates[0].evidence[0].sourceUrl, "https://hotel1.com/rooms");
   assert.deepEqual(Object.keys(result.payload).sort(), ["candidates", "round"]);
   assert.equal(JSON.stringify(result.payload).includes("preferenceRevisionAliases"), false);
   assert.equal(JSON.stringify(result.payload).includes("status"), false);
 });
 
-test("accepts category-matched restaurant and attraction facts", () => {
+test("accepts category-matched restaurant and attraction facts", async () => {
   for (const [category, facts] of [
     ["restaurant", { name: "餐厅", address: "深圳市", openInformation: "10:00-22:00", priceSnapshot: "CNY 200/人" }],
     ["attraction", { name: "景点", address: "深圳市", openInformation: "09:00-18:00", priceSnapshot: "CNY 100", ticketType: "成人票" }],
@@ -116,16 +149,16 @@ test("accepts category-matched restaurant and attraction facts", () => {
       applicability: { dates: { start: "2026-10-03", end: "2026-10-03" }, travelers: 2 },
       recommendation: { reason: "符合需求", preferenceRevisionAliases: [], feedbackAliases: [] },
       evidence: [
-        { sourceKind: "official", sourceName: "官网", sourceUrl: `https://${category}1.com/a`, queryContext: { dates: { start: "2026-10-03", end: "2026-10-03" }, travelers: 2 }, captureMethod: "detail_page", facts },
-        { sourceKind: "web", sourceName: "平台", sourceUrl: `https://${category}2.com/b`, queryContext: { dates: { start: "2026-10-03", end: "2026-10-03" }, travelers: 2 }, captureMethod: "search_result", facts },
+        { sourceKind: "official", sourceName: "官网", sourceUrl: `https://${category}1.com/a`, queryContext: { dates: { start: "2026-10-03", end: "2026-10-03" }, travelers: 2 }, captureMethod: "detail_page", facts: structuredClone(facts) },
+        { sourceKind: "web", sourceName: "平台", sourceUrl: `https://${category}2.com/b`, queryContext: { dates: { start: "2026-10-03", end: "2026-10-03" }, travelers: 2 }, captureMethod: "search_result", facts: structuredClone(facts) },
       ],
     };
-    const result = validateTravelResearchOutput({ status: "completed", category, candidates: [candidate, structuredClone(candidate)] }, options({ targetCategory: category }));
+    const result = await validateTravelResearchOutput({ status: "completed", category, candidates: [candidate, structuredClone(candidate)] }, options({ targetCategory: category }));
     assert.equal(result.payload.candidates.every((item) => item.category === category), true);
   }
 });
 
-test("rejects fixed-shape and category violations with no partial payload", () => {
+test("rejects fixed-shape and category violations with no partial payload", async () => {
   const cases = [
     { name: "one candidate", mutate: (value) => value.candidates.pop() },
     { name: "five candidates", mutate: (value) => value.candidates.push(hotelCandidate(2), hotelCandidate(3), hotelCandidate(4)) },
@@ -143,11 +176,11 @@ test("rejects fixed-shape and category violations with no partial payload", () =
   for (const { name, mutate } of cases) {
     const output = completedOutput();
     mutate(output);
-    assert.throws(() => validateTravelResearchOutput(output, options()), { message: "CODEX_OUTPUT_INVALID" }, name);
+    await assert.rejects(() => validateTravelResearchOutput(output, options()), { message: "CODEX_OUTPUT_INVALID" }, name);
   }
 });
 
-test("requires every applicability, query, and category fact to match the selected segment", () => {
+test("requires every applicability, query, and category fact to match the selected segment", async () => {
   const cases = [
     (value) => { value.candidates[0].applicability.dates.end = "2026-10-04"; },
     (value) => { value.candidates[0].applicability.travelers = 3; },
@@ -163,15 +196,15 @@ test("requires every applicability, query, and category fact to match the select
   for (const mutate of cases) {
     const output = completedOutput();
     mutate(output);
-    assert.throws(() => validateTravelResearchOutput(output, options()), { message: "CODEX_OUTPUT_INVALID" });
+    await assert.rejects(() => validateTravelResearchOutput(output, options()), { message: "CODEX_OUTPUT_INVALID" });
   }
 });
 
-test("normalizes origins and rejects duplicate, credential-bearing, fragmented, IP, private, and special hosts", () => {
+test("normalizes origins and rejects duplicate, credential-bearing, fragmented, IP, private, and special hosts", async () => {
   const duplicate = completedOutput();
   duplicate.candidates[0].evidence[0].sourceUrl = "https://HOTEL1.com:443/a?x=1";
   duplicate.candidates[0].evidence[1].sourceUrl = "https://hotel1.com/b?x=2";
-  assert.throws(() => validateTravelResearchOutput(duplicate, options()), { message: "CODEX_INSUFFICIENT_EVIDENCE" });
+  await assert.rejects(() => validateTravelResearchOutput(duplicate, options()), { message: "CODEX_INSUFFICIENT_EVIDENCE" });
 
   for (const sourceUrl of [
     "http://hotel.com/a",
@@ -189,15 +222,114 @@ test("normalizes origins and rejects duplicate, credential-bearing, fragmented, 
   ]) {
     const output = completedOutput();
     output.candidates[0].evidence[0].sourceUrl = sourceUrl;
-    assert.throws(() => validateTravelResearchOutput(output, options()), { message: "CODEX_OUTPUT_INVALID" }, sourceUrl);
+    await assert.rejects(() => validateTravelResearchOutput(output, options()), { message: "CODEX_OUTPUT_INVALID" }, sourceUrl);
   }
 
   const distinctPort = completedOutput();
   distinctPort.candidates[0].evidence[1].sourceUrl = "https://hotel1.com:8443/b";
-  assert.doesNotThrow(() => validateTravelResearchOutput(distinctPort, options()));
+  await assert.doesNotReject(() => validateTravelResearchOutput(distinctPort, options()));
 });
 
-test("rejects unknown, old-revision, and wrong-type aliases", () => {
+test("canonical URL inspection rejects encoded paths and search data before removing the query", async () => {
+  const encodedRawId = Buffer.from("preference-raw-1", "utf8").toString("base64url");
+  const layeredCredential = Buffer.from("access%5Ftoken%3Dopaque-secret", "utf8").toString("base64url");
+  for (const sourceUrl of [
+    "https://hotel1.com/%2FUsers%2Falice%2Fsecret",
+    "https://hotel1.com/access%5Ftoken%3Dopaque-secret",
+    "https://hotel1.com/%3Cscript%3Ealert(1)%3C%2Fscript%3E",
+    `https://hotel1.com/${encodedRawId}`,
+    `https://hotel1.com/${layeredCredential}`,
+    "https://hotel1.com/%68%74%74%70%73%3A%2F%2Fother.example.com%2Fa",
+    "https://hotel1.com/rooms?access%5Ftoken=opaque-secret",
+    "https://hotel1.com/rooms?access+token=opaque-secret",
+    "https://hotel1.com/rooms?redirect=https%3A%2F%2Fother.example.com%2Fa",
+    "https://hotel1.com/rooms?markup=%253Cscript%253E",
+    `https://hotel1.com/rooms?reference=${encodedRawId}`,
+    `https://hotel1.com/rooms?reference=${layeredCredential}`,
+  ]) {
+    const output = completedOutput();
+    output.candidates[0].evidence[0].sourceUrl = sourceUrl;
+    await assert.rejects(() => validateTravelResearchOutput(output, options()), {
+      message: "CODEX_OUTPUT_INVALID",
+    }, sourceUrl);
+  }
+});
+
+test("requires a branded immutable alias map and rejects forged map-shaped options", async () => {
+  const forged = Object.freeze({
+    preference: new Map([[preferenceAlias, { id: "forged-preference", revision: 4 }]]),
+    feedback: new Map([[feedbackAlias, { id: "forged-feedback", revision: 3 }]]),
+  });
+  await assert.rejects(() => validateTravelResearchOutput(completedOutput(), options({ aliasMap: forged })), {
+    message: "CODEX_RESEARCH_FAILED",
+  });
+});
+
+test("bounds traversal depth, nodes and object identity before recursive work", async () => {
+  const deep = {};
+  let cursor = deep;
+  for (let index = 0; index < 10_000; index += 1) {
+    cursor.next = {};
+    cursor = cursor.next;
+  }
+  await assert.rejects(() => validateTravelResearchOutput(deep, options()), {
+    message: "CODEX_OUTPUT_INVALID",
+  });
+
+  const cycle = {};
+  cycle.self = cycle;
+  await assert.rejects(() => validateTravelResearchOutput(cycle, options()), {
+    message: "CODEX_OUTPUT_INVALID",
+  });
+
+  const shared = { safe: "value" };
+  await assert.rejects(() => validateTravelResearchOutput({ left: shared, right: shared }, options()), {
+    message: "CODEX_OUTPUT_INVALID",
+  });
+
+  const throwing = {};
+  Object.defineProperty(throwing, "value", { enumerable: true, get() { throw new Error("raw getter failure"); } });
+  await assert.rejects(() => validateTravelResearchOutput(throwing, options()), {
+    message: "CODEX_OUTPUT_INVALID",
+  });
+});
+
+test("DNS gate rejects failures, timeouts and any non-global current resolution", async () => {
+  const sourceOutput = (hostname = "127.0.0.1.nip.io") => {
+    const output = completedOutput();
+    output.candidates[0].evidence[0].sourceUrl = `https://${hostname}/rooms`;
+    return output;
+  };
+  for (const answers of [
+    [{ address: "127.0.0.1", family: 4 }],
+    [{ address: "10.0.0.1", family: 4 }],
+    [{ address: "100.64.0.1", family: 4 }],
+    [{ address: "192.0.2.1", family: 4 }],
+    [{ address: "::1", family: 6 }],
+    [{ address: "fc00::1", family: 6 }],
+    [{ address: "::ffff:127.0.0.1", family: 6 }],
+    [{ address: "93.184.216.34", family: 4 }, { address: "192.168.1.1", family: 4 }],
+  ]) {
+    await assert.rejects(() => validateTravelResearchOutput(sourceOutput(), options({
+      resolveHostname: async () => answers,
+    })), { message: "CODEX_OUTPUT_INVALID" }, JSON.stringify(answers));
+  }
+  await assert.rejects(() => validateTravelResearchOutput(sourceOutput("dns-failure.example.net"), options({
+    resolveHostname: async () => { throw new Error("raw DNS failure"); },
+  })), { message: "CODEX_OUTPUT_INVALID" });
+  await assert.rejects(() => validateTravelResearchOutput(sourceOutput("dns-timeout.example.net"), options({
+    resolveHostname: async () => new Promise(() => {}),
+  })), { message: "CODEX_OUTPUT_INVALID" });
+
+  await assert.doesNotReject(() => validateTravelResearchOutput(completedOutput(), options({
+    resolveHostname: async () => [
+      { address: "93.184.216.34", family: 4 },
+      { address: "2606:4700:4700::1111", family: 6 },
+    ],
+  })));
+});
+
+test("rejects unknown, old-revision, and wrong-type aliases", async () => {
   for (const [field, alias] of [
     ["preferenceRevisionAliases", "pref_unknown0000000000000000000000"],
     ["preferenceRevisionAliases", "pref_oldRevision000000000000000000"],
@@ -206,11 +338,12 @@ test("rejects unknown, old-revision, and wrong-type aliases", () => {
   ]) {
     const output = completedOutput();
     output.candidates[0].recommendation[field] = [alias];
-    assert.throws(() => validateTravelResearchOutput(output, options()), { message: "CODEX_OUTPUT_INVALID" });
+    await assert.rejects(() => validateTravelResearchOutput(output, options()), { message: "CODEX_OUTPUT_INVALID" });
   }
 });
 
-test("recursively rejects secret keys, token values, HTML, local paths, and oversized output", () => {
+test("recursively rejects secret keys, token values, HTML, local paths, and oversized output", async () => {
+  const layeredCredential = Buffer.from("access%5Ftoken%3Dopaque-secret", "utf8").toString("base64url");
   const mutations = [
     (value) => { value.candidates[0].evidence[0].facts.authorization = "Bearer abc"; },
     (value) => { value.candidates[0].evidence[0].sourceName = "Bearer abcdefghijklmnop"; },
@@ -220,19 +353,20 @@ test("recursively rejects secret keys, token values, HTML, local paths, and over
     (value) => { value.candidates[0].sequence = 12; },
     (value) => { value.candidates[0].idempotencyKey = "idem-secret"; },
     (value) => { value.candidates[0].recommendation.reason = "leaked preference-raw-1"; },
+    (value) => { value.candidates[0].recommendation.reason = layeredCredential; },
   ];
   for (const mutate of mutations) {
     const output = completedOutput();
     mutate(output);
-    assert.throws(() => validateTravelResearchOutput(output, options()), { message: "CODEX_OUTPUT_INVALID" });
+    await assert.rejects(() => validateTravelResearchOutput(output, options()), { message: "CODEX_OUTPUT_INVALID" });
   }
 
   const huge = completedOutput();
   huge.padding = "x".repeat(300_000);
-  assert.throws(() => validateTravelResearchOutput(huge, options()), { message: "CODEX_OUTPUT_INVALID" });
+  await assert.rejects(() => validateTravelResearchOutput(huge, options()), { message: "CODEX_OUTPUT_INVALID" });
 });
 
-test("rejects Tencent, AWS, access-key and secret-key variants before producing a payload", () => {
+test("rejects Tencent, AWS, access-key and secret-key variants before producing a payload", async () => {
   const credentialValues = [
     "AKIDabcdefghijklmnop",
     "AKIAABCDEFGHIJKLMNOP",
@@ -249,8 +383,8 @@ test("rejects Tencent, AWS, access-key and secret-key variants before producing 
     const output = completedOutput();
     output.candidates[0].recommendation.reason = credential;
     let result;
-    assert.throws(() => {
-      result = validateTravelResearchOutput(output, options());
+    await assert.rejects(async () => {
+      result = await validateTravelResearchOutput(output, options());
     }, { message: "CODEX_OUTPUT_INVALID" }, credential);
     assert.equal(result, undefined);
   }
@@ -258,17 +392,17 @@ test("rejects Tencent, AWS, access-key and secret-key variants before producing 
   for (const key of ["accessKey", "access_key_id", "Secret-Id", "secret key", "tencentCloudSecretKey"]) {
     const output = completedOutput();
     output.candidates[0].evidence[0].facts[key] = "opaque-value";
-    assert.throws(() => validateTravelResearchOutput(output, options()), { message: "CODEX_OUTPUT_INVALID" }, key);
+    await assert.rejects(() => validateTravelResearchOutput(output, options()), { message: "CODEX_OUTPUT_INVALID" }, key);
   }
 
-  const result = validateTravelResearchOutput(completedOutput(), options());
+  const result = await validateTravelResearchOutput(completedOutput(), options());
   const payload = JSON.stringify(result.payload);
   for (const marker of ["AKID", "AKIA", "ASIA", "accessKey", "SecretId", "SecretKey", "TENCENTCLOUD"]) {
     assert.equal(payload.includes(marker), false);
   }
 });
 
-test("rejects generic HTML, XML, SVG, comments, processing instructions, and basic encoded tags", () => {
+test("rejects generic HTML, XML, SVG, comments, processing instructions, and basic encoded tags", async () => {
   for (const markup of [
     "<p>paragraph</p>",
     "<custom-tag data-x=\"1\">value</custom-tag>",
@@ -288,16 +422,16 @@ test("rejects generic HTML, XML, SVG, comments, processing instructions, and bas
   ]) {
     const output = completedOutput();
     output.candidates[0].evidence[0].sourceName = markup;
-    assert.throws(() => validateTravelResearchOutput(output, options()), { message: "CODEX_OUTPUT_INVALID" }, markup);
+    await assert.rejects(() => validateTravelResearchOutput(output, options()), { message: "CODEX_OUTPUT_INVALID" }, markup);
   }
 
   const mathematics = completedOutput();
-  mathematics.candidates[0].recommendation.reason = "价格条件 1 < 2，且 3 > 2；符号 A <> B";
-  assert.doesNotThrow(() => validateTravelResearchOutput(mathematics, options()));
+  mathematics.candidates[0].recommendation.reason = "价格条件 1 < 2，且 3 > 2；符号 A <> B；折扣 50%";
+  await assert.doesNotReject(() => validateTravelResearchOutput(mathematics, options()));
 });
 
-test("returns only exact safe needs_owner_action branches", () => {
-  assert.deepEqual(validateTravelResearchOutput({
+test("returns only exact safe needs_owner_action branches", async () => {
+  assert.deepEqual(await validateTravelResearchOutput({
     status: "needs_owner_action",
     reason: "codex_auth_required",
     message: "请在 ChatGPT/Codex 中恢复登录后返回此页面继续。",
@@ -306,7 +440,7 @@ test("returns only exact safe needs_owner_action branches", () => {
     reason: "codex_auth_required",
     message: "请在 ChatGPT/Codex 中恢复登录后返回此页面继续。",
   });
-  assert.deepEqual(validateTravelResearchOutput({
+  assert.deepEqual(await validateTravelResearchOutput({
     status: "needs_owner_action",
     reason: "source_captcha",
     message: "请在来源网站中完成所需操作后返回此页面继续。",
@@ -316,6 +450,14 @@ test("returns only exact safe needs_owner_action branches", () => {
     reason: "source_captcha",
     message: "请在来源网站中完成所需操作后返回此页面继续。",
     sourceHostname: "booking.com",
+  });
+  await assert.rejects(() => validateTravelResearchOutput({
+    status: "needs_owner_action",
+    reason: "source_login_required",
+    message: "请在来源网站中完成所需操作后返回此页面继续。",
+    sourceHostname: "127.0.0.1.nip.io",
+  }, options({ resolveHostname: async () => [{ address: "127.0.0.1", family: 4 }] })), {
+    message: "CODEX_OUTPUT_INVALID",
   });
 
   for (const output of [
@@ -324,12 +466,12 @@ test("returns only exact safe needs_owner_action branches", () => {
     { status: "needs_owner_action", reason: "source_risk_control", message: "请在来源网站中完成所需操作后返回此页面继续。", sourceHostname: "8.8.8.8" },
     { status: "needs_owner_action", reason: "source_captcha", message: "请在来源网站中完成所需操作后返回此页面继续。", sourceHostname: "singlelabel" },
   ]) {
-    assert.throws(() => validateTravelResearchOutput(output, options()), { message: "CODEX_OUTPUT_INVALID" });
+    await assert.rejects(() => validateTravelResearchOutput(output, options()), { message: "CODEX_OUTPUT_INVALID" });
   }
 });
 
-test("uses a valid trusted UTC clock and exposes only stable sanitized errors", () => {
-  errorCode(() => validateTravelResearchOutput(completedOutput(), options({ round: 0 })));
-  errorCode(() => validateTravelResearchOutput(completedOutput(), options({ now: () => new Date(Number.NaN) })));
-  errorCode(() => validateTravelResearchOutput({ privatePath: "/Users/alice/secret" }, options()));
+test("uses a valid trusted UTC clock and exposes only stable sanitized errors", async () => {
+  await errorCode(() => validateTravelResearchOutput(completedOutput(), options({ round: 0 })));
+  await errorCode(() => validateTravelResearchOutput(completedOutput(), options({ now: () => new Date(Number.NaN) })));
+  await errorCode(() => validateTravelResearchOutput({ privatePath: "/Users/alice/secret" }, options()));
 });

@@ -1,3 +1,13 @@
+import { lookup } from "node:dns/promises";
+import { BlockList, isIP } from "node:net";
+
+import {
+  isResearchAliasMap,
+  researchInspectionViews,
+  researchTextContainsAliasPrivateValue,
+  resolveResearchAlias,
+} from "./travel-research-input.mjs";
+
 const CATEGORIES = new Set(["hotel", "restaurant", "attraction"]);
 const SOURCE_KINDS = new Set(["flyai", "amap", "web", "official", "manual"]);
 const CAPTURE_METHODS = new Set(["detail_page", "search_result", "api_result", "manual"]);
@@ -6,6 +16,10 @@ const CODEX_AUTH_MESSAGE = "请在 ChatGPT/Codex 中恢复登录后返回此页�
 const SOURCE_ACTION_MESSAGE = "请在来源网站中完成所需操作后返回此页面继续。";
 const MAX_OUTPUT_BYTES = 256 * 1_024;
 const MAX_OBJECT_KEYS = 2_048;
+const MAX_OUTPUT_DEPTH = 32;
+const MAX_OUTPUT_NODES = 10_000;
+const MAX_ARRAY_LENGTH = 128;
+const DNS_TIMEOUT_MS = 250;
 const NON_PUBLIC_HOST_SUFFIXES = [
   "localhost", "local", "internal", "lan", "home", "home.arpa", "localdomain", "corp", "intranet",
   "private", "test", "invalid", "example", "onion",
@@ -14,6 +28,26 @@ const SENSITIVE_KEY_PATTERN = /(?:credential|password|passwd|token|authorization
 const SENSITIVE_VALUE_PATTERN = /(?:\bBearer\s+[A-Za-z0-9._~+\/-]{4,}|\b(?:authorization|cookie|password|passwd|api[_ -]?key|access[_ -]?token|refresh[_ -]?token)\b|\b(?:access[\s_-]*key(?:[\s_-]*id)?|secret[\s_-]*(?:id|key)|tencent[\s_-]*cloud[\s_-]*secret[\s_-]*(?:id|key))\s*[:=]\s*[^\s,;]{4,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:AKID|AKIA|ASIA)[A-Za-z0-9]{12,}|\b(?:sk|ghp|xox[baprs])[-_][A-Za-z0-9_-]{8,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|\b(?:agent\s*run|idempotency|signature|sequence)\b)/iu;
 const LOCAL_PATH_PATTERN = /(?:file:\/\/|\/(?:Users|home|etc|private|var|tmp)\/|[A-Za-z]:\\(?:Users|Documents|Windows)\\)/iu;
 const HTML_PATTERN = /<(?:!--[\s\S]*?--|!doctype(?:\s[^<>]*)?|!\[cdata\[[\s\S]*?\]\]|\?[\p{L}_:][^<>]*\?|\/?[\p{L}_:][\p{L}\p{N}:._-]*(?:(?:\s+|\/)[^<>]*)?)>/iu;
+const NESTED_URL_PATTERN = /[A-Za-z][A-Za-z0-9+.-]*:\/\//u;
+const NON_HIERARCHICAL_URL_PATTERN = /(?:data|javascript|mailto):/iu;
+const PROTOCOL_RELATIVE_URL_PATTERN = /(?<!:)\/\//u;
+const STABLE_ERROR_CODES = new Set([
+  "CODEX_OUTPUT_INVALID", "CODEX_INSUFFICIENT_EVIDENCE", "INVALID_RESEARCH_TARGET", "CODEX_RESEARCH_FAILED",
+]);
+
+const NON_GLOBAL_IPV4 = new BlockList();
+const NON_GLOBAL_IPV6 = new BlockList();
+for (const [network, prefix] of [
+  ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8],
+  ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.0.2.0", 24],
+  ["192.88.99.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15], ["198.51.100.0", 24],
+  ["203.0.113.0", 24], ["224.0.0.0", 4], ["240.0.0.0", 4],
+]) NON_GLOBAL_IPV4.addSubnet(network, prefix, "ipv4");
+for (const [network, prefix] of [
+  ["::", 128], ["::1", 128], ["::ffff:0:0", 96], ["64:ff9b::", 96], ["64:ff9b:1::", 48],
+  ["100::", 64], ["2001::", 23], ["2001:db8::", 32], ["2002::", 16], ["3fff::", 20],
+  ["fc00::", 7], ["fe80::", 10], ["fec0::", 10], ["ff00::", 8],
+]) NON_GLOBAL_IPV6.addSubnet(network, prefix, "ipv6");
 
 function codedError(code) {
   return Object.assign(new Error(code), { code });
@@ -108,9 +142,11 @@ function validQueryContext(value) {
 
 function normalizedPublicHostname(hostname) {
   const normalized = hostname.toLowerCase().replace(/\.$/u, "");
+  const ipCandidate = normalized.startsWith("[") && normalized.endsWith("]")
+    ? normalized.slice(1, -1)
+    : normalized;
   if (!normalized || normalized.length > 253 || !normalized.includes(".")
-    || normalized.includes(":") || normalized.startsWith("[")
-    || /^\d+(?:\.\d+){3}$/u.test(normalized)
+    || isIP(ipCandidate) !== 0
     || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))+$/u.test(normalized)) {
     return undefined;
   }
@@ -134,6 +170,54 @@ function normalizedHttpsOrigin(value) {
   } catch {
     return undefined;
   }
+}
+
+function unsafeUrlComponent(value, aliasMap) {
+  const inspection = researchInspectionViews(value);
+  if (inspection.malformed || inspection.truncated) return true;
+  return inspection.views.some((view) => (
+    researchTextContainsAliasPrivateValue(aliasMap, view)
+    || SENSITIVE_VALUE_PATTERN.test(view)
+    || LOCAL_PATH_PATTERN.test(view)
+    || HTML_PATTERN.test(decodeBasicTagEntities(view))
+    || NESTED_URL_PATTERN.test(view)
+    || NON_HIERARCHICAL_URL_PATTERN.test(view)
+    || PROTOCOL_RELATIVE_URL_PATTERN.test(view)
+  ));
+}
+
+function canonicalHttpsUrl(value, aliasMap) {
+  if (typeof value !== "string" || value.length > 2_048) throw codedError("CODEX_OUTPUT_INVALID");
+  const normalizedValue = value.normalize("NFKC");
+  let parsed;
+  try {
+    parsed = new URL(normalizedValue);
+  } catch {
+    throw codedError("CODEX_OUTPUT_INVALID");
+  }
+  if (parsed.protocol !== "https:" || parsed.username !== "" || parsed.password !== ""
+    || normalizedValue.includes("#")) {
+    throw codedError("CODEX_OUTPUT_INVALID");
+  }
+  const hostname = normalizedPublicHostname(parsed.hostname);
+  if (!hostname || unsafeUrlComponent(parsed.pathname, aliasMap)) throw codedError("CODEX_OUTPUT_INVALID");
+  const rawSearch = parsed.search.startsWith("?") ? parsed.search.slice(1) : parsed.search;
+  if (rawSearch.length > 0) {
+    for (const pair of rawSearch.split("&")) {
+      const separator = pair.indexOf("=");
+      const key = separator < 0 ? pair : pair.slice(0, separator);
+      const entry = separator < 0 ? "" : pair.slice(separator + 1);
+      if (unsafeUrlComponent(key, aliasMap)
+        || unsafeUrlComponent(entry, aliasMap)
+        || unsafeUrlComponent(key.replace(/\+/gu, " "), aliasMap)
+        || unsafeUrlComponent(entry.replace(/\+/gu, " "), aliasMap)) {
+        throw codedError("CODEX_OUTPUT_INVALID");
+      }
+    }
+  }
+  const port = parsed.port === "443" || parsed.port === "" ? "" : `:${parsed.port}`;
+  const origin = `https://${hostname}${port}`;
+  return Object.freeze({ hostname, origin, sourceUrl: `${origin}${parsed.pathname || "/"}` });
 }
 
 function validEvidence(value, category) {
@@ -206,47 +290,71 @@ function decodeBasicTagEntities(value) {
   return decoded;
 }
 
-function scanForUnsafeContent(value, privateValues = []) {
+function unsafeGeneralString(value, aliasMap) {
+  const inspection = researchInspectionViews(value);
+  if (inspection.truncated) return true;
+  return inspection.views.some((view) => (
+    SENSITIVE_VALUE_PATTERN.test(view)
+    || LOCAL_PATH_PATTERN.test(view)
+    || HTML_PATTERN.test(decodeBasicTagEntities(view))
+    || (aliasMap !== undefined && researchTextContainsAliasPrivateValue(aliasMap, view))
+  ));
+}
+
+function unsafeGeneralKey(value, aliasMap) {
+  const inspection = researchInspectionViews(value);
+  if (inspection.truncated) return true;
+  return inspection.views.some((view) => {
+    const normalizedKey = view.toLowerCase().replace(/[^a-z0-9]/gu, "");
+    return SENSITIVE_KEY_PATTERN.test(normalizedKey)
+      || unsafeGeneralString(view, aliasMap);
+  });
+}
+
+function scanForUnsafeContent(value, aliasMap) {
   let keyCount = 0;
-  const seen = new Set();
-  function visit(entry) {
+  let nodeCount = 0;
+  let approximateBytes = 0;
+  const seen = new WeakSet();
+  const stack = [{ depth: 0, entry: value }];
+  while (stack.length > 0) {
+    const { depth, entry } = stack.pop();
+    nodeCount += 1;
+    if (nodeCount > MAX_OUTPUT_NODES || depth > MAX_OUTPUT_DEPTH) throw codedError("CODEX_OUTPUT_INVALID");
     if (typeof entry === "string") {
-      if (SENSITIVE_VALUE_PATTERN.test(entry)
-        || LOCAL_PATH_PATTERN.test(entry)
-        || HTML_PATTERN.test(decodeBasicTagEntities(entry))) {
+      approximateBytes += Buffer.byteLength(entry, "utf8");
+      if (approximateBytes > MAX_OUTPUT_BYTES || unsafeGeneralString(entry, aliasMap)) {
         throw codedError("CODEX_OUTPUT_INVALID");
       }
-      if (privateValues.some((privateValue) => (
-        privateValue.length >= 4 ? entry.includes(privateValue) : entry === privateValue
-      ))) throw codedError("CODEX_OUTPUT_INVALID");
-      return;
+      continue;
     }
-    if (entry === null || typeof entry === "boolean") return;
+    if (entry === null || typeof entry === "boolean") continue;
     if (typeof entry === "number") {
       if (!Number.isFinite(entry)) throw codedError("CODEX_OUTPUT_INVALID");
-      return;
+      approximateBytes += 16;
+      continue;
     }
     if (typeof entry !== "object" || seen.has(entry)) throw codedError("CODEX_OUTPUT_INVALID");
     seen.add(entry);
     if (Array.isArray(entry)) {
-      if (entry.length > 128) throw codedError("CODEX_OUTPUT_INVALID");
+      if (entry.length > MAX_ARRAY_LENGTH) throw codedError("CODEX_OUTPUT_INVALID");
       for (let index = 0; index < entry.length; index += 1) {
         if (!Object.hasOwn(entry, index)) throw codedError("CODEX_OUTPUT_INVALID");
-        visit(entry[index]);
+        stack.push({ depth: depth + 1, entry: entry[index] });
       }
     } else {
       if (!plainObject(entry)) throw codedError("CODEX_OUTPUT_INVALID");
       for (const [key, child] of Object.entries(entry)) {
         keyCount += 1;
         if (keyCount > MAX_OBJECT_KEYS) throw codedError("CODEX_OUTPUT_INVALID");
-        const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/gu, "");
-        if (SENSITIVE_KEY_PATTERN.test(normalizedKey)) throw codedError("CODEX_OUTPUT_INVALID");
-        visit(child);
+        approximateBytes += Buffer.byteLength(key, "utf8");
+        if (approximateBytes > MAX_OUTPUT_BYTES || unsafeGeneralKey(key, aliasMap)) {
+          throw codedError("CODEX_OUTPUT_INVALID");
+        }
+        stack.push({ depth: depth + 1, entry: child });
       }
     }
-    seen.delete(entry);
   }
-  visit(value);
   let serialized;
   try {
     serialized = JSON.stringify(value);
@@ -257,7 +365,11 @@ function scanForUnsafeContent(value, privateValues = []) {
 }
 
 function validValidationOptions(options) {
-  if (!exactObject(options, ["targetCategory", "segment", "aliasMap", "round", "now"])) return false;
+  if (!exactObject(
+    options,
+    ["targetCategory", "segment", "aliasMap", "round", "now"],
+    ["targetCategory", "segment", "aliasMap", "round", "now", "resolveHostname"],
+  )) return false;
   return CATEGORIES.has(options.targetCategory)
     && exactObject(options.segment, ["city", "startDate", "endDate", "travelerCount"])
     && safeString(options.segment.city, 200)
@@ -266,9 +378,10 @@ function validValidationOptions(options) {
     && options.segment.startDate <= options.segment.endDate
     && Number.isSafeInteger(options.segment.travelerCount)
     && options.segment.travelerCount >= 1 && options.segment.travelerCount <= 100
-    && options.aliasMap && options.aliasMap.preference instanceof Map && options.aliasMap.feedback instanceof Map
+    && isResearchAliasMap(options.aliasMap)
     && Number.isSafeInteger(options.round) && options.round >= 1
-    && typeof options.now === "function";
+    && typeof options.now === "function"
+    && (options.resolveHostname === undefined || typeof options.resolveHostname === "function");
 }
 
 function aliasIds(aliases, type, map) {
@@ -279,8 +392,8 @@ function aliasIds(aliases, type, map) {
   const result = [];
   for (const alias of aliases) {
     if (!alias.startsWith(prefix) || !pattern.test(alias)) throw codedError("CODEX_OUTPUT_INVALID");
-    const resolved = map[type].get(alias);
-    if (!resolved || !plainObject(resolved) || typeof resolved.id !== "string" || resolved.id.length === 0
+    const resolved = resolveResearchAlias(map, type, alias);
+    if (!resolved || typeof resolved.id !== "string" || resolved.id.length === 0
       || !Number.isSafeInteger(resolved.revision) || resolved.revision < 0) {
       throw codedError("CODEX_OUTPUT_INVALID");
     }
@@ -291,6 +404,61 @@ function aliasIds(aliases, type, map) {
 
 function matchesRange(value, segment) {
   return value.start === segment.startDate && value.end === segment.endDate;
+}
+
+async function defaultResolveHostname(hostname) {
+  return lookup(hostname, { all: true, verbatim: true });
+}
+
+function globalPublicAddress(value) {
+  const family = isIP(value);
+  if (family === 4) return !NON_GLOBAL_IPV4.check(value, "ipv4");
+  if (family === 6) return !NON_GLOBAL_IPV6.check(value, "ipv6");
+  return false;
+}
+
+async function resolvePublicHostname(hostname, resolver) {
+  let timeout;
+  try {
+    const answers = await Promise.race([
+      Promise.resolve().then(() => resolver(hostname)),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(codedError("CODEX_OUTPUT_INVALID")), DNS_TIMEOUT_MS);
+      }),
+    ]);
+    if (!Array.isArray(answers) || answers.length === 0) throw codedError("CODEX_OUTPUT_INVALID");
+    for (const answer of answers) {
+      const address = typeof answer === "string"
+        ? answer
+        : plainObject(answer) && Object.hasOwn(answer, "address") ? answer.address : undefined;
+      if (typeof address !== "string" || !globalPublicAddress(address)) {
+        throw codedError("CODEX_OUTPUT_INVALID");
+      }
+    }
+  } catch (error) {
+    if (error?.code === "CODEX_OUTPUT_INVALID") throw error;
+    throw codedError("CODEX_OUTPUT_INVALID");
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
+async function canonicalEvidenceUrls(output, options) {
+  const result = new WeakMap();
+  const hostnames = new Set();
+  for (const candidate of output.candidates) {
+    const origins = new Set();
+    for (const evidence of candidate.evidence) {
+      const canonical = canonicalHttpsUrl(evidence.sourceUrl, options.aliasMap);
+      result.set(evidence, canonical);
+      hostnames.add(canonical.hostname);
+      origins.add(canonical.origin);
+    }
+    if (origins.size < 2) throw codedError("CODEX_INSUFFICIENT_EVIDENCE");
+  }
+  const resolver = options.resolveHostname ?? defaultResolveHostname;
+  await Promise.all([...hostnames].map((hostname) => resolvePublicHostname(hostname, resolver)));
+  return result;
 }
 
 function validateCandidateBusiness(candidate, options) {
@@ -338,7 +506,7 @@ function capturedAt(now) {
   return result;
 }
 
-function proposalCandidate(candidate, options, timestamp) {
+function proposalCandidate(candidate, options, timestamp, canonicalUrls) {
   return {
     category: candidate.category,
     entity: { name: candidate.entity.name, address: candidate.entity.address },
@@ -355,7 +523,7 @@ function proposalCandidate(candidate, options, timestamp) {
     evidence: candidate.evidence.map((evidence) => ({
       sourceKind: evidence.sourceKind,
       sourceName: evidence.sourceName,
-      sourceUrl: evidence.sourceUrl,
+      sourceUrl: canonicalUrls.get(evidence)?.sourceUrl,
       capturedAt: timestamp,
       queryContext: structuredClone(evidence.queryContext),
       captureMethod: evidence.captureMethod,
@@ -364,26 +532,43 @@ function proposalCandidate(candidate, options, timestamp) {
   };
 }
 
-export function validateTravelResearchOutput(output, options) {
+async function validateOutput(output, options) {
   if (!validValidationOptions(options)) {
     const code = options && !CATEGORIES.has(options.targetCategory) ? "INVALID_RESEARCH_TARGET" : "CODEX_RESEARCH_FAILED";
     throw codedError(code);
   }
-  const privateValues = [...options.aliasMap.preference.values(), ...options.aliasMap.feedback.values()]
-    .flatMap((entry) => plainObject(entry) && typeof entry.id === "string" ? [entry.id] : []);
-  scanForUnsafeContent(output, privateValues);
+  scanForUnsafeContent(output, options.aliasMap);
 
   if (validOwnerActionShape(output)) {
+    if (Object.hasOwn(output, "sourceHostname")) {
+      await resolvePublicHostname(output.sourceHostname, options.resolveHostname ?? defaultResolveHostname);
+    }
     return Object.freeze({ ...output });
   }
   if (!validCompletedShape(output) || output.category !== options.targetCategory) {
     throw codedError("CODEX_OUTPUT_INVALID");
   }
   for (const candidate of output.candidates) validateCandidateBusiness(candidate, options);
+  const canonicalUrls = await canonicalEvidenceUrls(output, options);
   const timestamp = capturedAt(options.now);
   const payload = {
     round: options.round,
-    candidates: output.candidates.map((candidate) => proposalCandidate(candidate, options, timestamp)),
+    candidates: output.candidates.map((candidate) => proposalCandidate(
+      candidate,
+      options,
+      timestamp,
+      canonicalUrls,
+    )),
   };
+  scanForUnsafeContent(payload, undefined);
   return Object.freeze({ status: "completed", payload });
+}
+
+export async function validateTravelResearchOutput(output, options) {
+  try {
+    return await validateOutput(output, options);
+  } catch (error) {
+    if (error instanceof Error && STABLE_ERROR_CODES.has(error.code) && error.message === error.code) throw error;
+    throw codedError("CODEX_OUTPUT_INVALID");
+  }
 }
