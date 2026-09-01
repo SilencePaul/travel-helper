@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
+import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -21,6 +22,10 @@ const COMPLETE_REPORT = {
   persistenceAvailable: true,
 };
 
+async function passthroughPathVerifier(request) {
+  return { ...request, probePaths: { ...request.probePaths } };
+}
+
 const PROBE_OPTIONS = {
   codexPath: "/controlled/codex",
   isolatedDir: "/isolated",
@@ -30,6 +35,7 @@ const PROBE_OPTIONS = {
     outsideFile: "/outside/probe.txt",
     projectFile: "/project/project.txt",
   },
+  pathVerifier: passthroughPathVerifier,
 };
 
 function successfulProbeResponse(request) {
@@ -39,7 +45,7 @@ function successfulProbeResponse(request) {
       check: request.check.name,
       ...(Object.hasOwn(request.check, "target") ? { target: request.check.target } : {}),
       observed: request.check.expected,
-      ...(request.check.name === "persistenceAvailable" ? { codexThreadId: "probe-thread-1" } : {}),
+      ...(request.check.name === "persistenceAvailable" ? { capability: "thread_history_integrity" } : {}),
     })}\n`,
   };
 }
@@ -148,6 +154,7 @@ test("the isolation probe fails closed without exposing raw probe details", asyn
         projectFile: "/project/project.txt",
       },
       probeAdapter: async () => { throw new Error("raw token and /private/project/path"); },
+      pathVerifier: passthroughPathVerifier,
     }),
     (error) => {
       assert.equal(error.code, "CODEX_ISOLATION_UNAVAILABLE");
@@ -218,10 +225,11 @@ test("the isolation probe executes and parses evidence for synthetic file, HTTPS
           check: request.check.name,
           target: request.check.target,
           observed: request.check.expected,
-          ...(request.check.name === "persistenceAvailable" ? { codexThreadId: "probe-thread-1" } : {}),
+          ...(request.check.name === "persistenceAvailable" ? { capability: "thread_history_integrity" } : {}),
         })}\n`,
       };
     },
+    pathVerifier: passthroughPathVerifier,
   });
 
   assert.deepEqual(result, COMPLETE_REPORT);
@@ -230,7 +238,7 @@ test("the isolation probe executes and parses evidence for synthetic file, HTTPS
     { name: "isolatedDirectoryReadable", target: probePaths.isolatedFile, expected: "readable" },
     { name: "outsideDirectoryUnreadable", target: probePaths.outsideFile, expected: "denied" },
     { name: "projectDirectoryUnreadable", target: probePaths.projectFile, expected: "denied" },
-    { name: "httpsNetworkAvailable", target: "https://example.com/", expected: "available" },
+    { name: "httpsNetworkAvailable", target: "https://chatgpt.com/", expected: "available" },
     { name: "authenticationAvailable", expected: "authenticated" },
     { name: "persistenceAvailable", expected: "persistent" },
   ]);
@@ -252,6 +260,7 @@ test("low-level probe evidence fails closed when it is mismatched, incomplete or
       outsideFile: "/outside/probe.txt",
       projectFile: "/project/project.txt",
     },
+    pathVerifier: passthroughPathVerifier,
   };
   for (const response of [
     { exitCode: 1, stdout: "" },
@@ -291,13 +300,13 @@ test("parsed evidence required fields must be own properties", async () => {
   }
 });
 
-test("persistence thread or task ID must be an own property", async () => {
+test("persistence capability evidence must be an own property", async () => {
   const originalParse = JSON.parse;
   JSON.parse = (text) => {
     const parsed = originalParse(text);
     if (parsed.check !== "persistenceAvailable") return parsed;
-    const { codexThreadId, ...own } = parsed;
-    return Object.assign(Object.create({ codexThreadId }), own);
+    const { capability, ...own } = parsed;
+    return Object.assign(Object.create({ capability }), own);
   };
   try {
     await assert.rejects(isolation.probeCodexIsolation({
@@ -307,4 +316,158 @@ test("persistence thread or task ID must be an own property", async () => {
   } finally {
     JSON.parse = originalParse;
   }
+});
+
+function createProbeSpawn(outcomes) {
+  const calls = [];
+  const spawnImpl = (executable, args, options) => {
+    const outcome = outcomes[calls.length] ?? {};
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.signals = [];
+    child.stdin = { end() {} };
+    child.kill = (signal) => {
+      child.signals.push(signal);
+      if (outcome.closeOnSignal === signal) queueMicrotask(() => child.emit("close", null, signal));
+      return true;
+    };
+    calls.push({ executable, args, options, child });
+    queueMicrotask(() => {
+      if (outcome.stdout !== undefined) child.stdout.emit("data", Buffer.from(outcome.stdout));
+      if (outcome.stderr !== undefined) child.stderr.emit("data", Buffer.from(outcome.stderr));
+      if (!outcome.hang) child.emit("close", outcome.code ?? 0, null);
+    });
+    return child;
+  };
+  return { calls, spawnImpl };
+}
+
+function doctorOutput() {
+  return JSON.stringify({
+    schemaVersion: 1,
+    overallStatus: "warning",
+    checks: {
+      "auth.credentials": { status: "ok", details: { "stored ChatGPT tokens": "true" } },
+      "sandbox.helpers": { status: "ok", details: {} },
+      "state.paths": { status: "ok", details: { "thread history DB integrity": "ok" } },
+      "network.websocket_reachability": { status: "ok", details: {} },
+    },
+  });
+}
+
+test("the default probe adapter runs fixed doctor and sandbox commands without a model task", async (context) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "codex-default-probe-test-")));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const codexPath = join(root, "codex");
+  const isolatedDir = join(root, "isolated");
+  const projectDir = join(root, "project");
+  await Promise.all([mkdir(isolatedDir), mkdir(projectDir)]);
+  await writeFile(codexPath, "#!/bin/sh\nexit 0\n");
+  await chmod(codexPath, 0o700);
+  const probePaths = {
+    isolatedFile: join(isolatedDir, "inside.txt"),
+    outsideFile: join(root, "outside.txt"),
+    projectFile: join(projectDir, "project.txt"),
+  };
+  await Promise.all([
+    writeFile(probePaths.isolatedFile, "inside"),
+    writeFile(probePaths.outsideFile, "outside"),
+    writeFile(probePaths.projectFile, "project"),
+  ]);
+  const fake = createProbeSpawn([
+    { code: 0 },
+    { code: 1 },
+    { code: 1 },
+    { code: 0 },
+    { code: 0, stdout: doctorOutput() },
+  ]);
+
+  assert.deepEqual(await isolation.probeCodexIsolation({
+    codexPath,
+    isolatedDir,
+    projectDir,
+    probePaths,
+    spawnImpl: fake.spawnImpl,
+    sourceEnv: { PATH: "/usr/bin:/bin", HOME: "/Users/owner", PROJECT_SECRET: "no" },
+  }), COMPLETE_REPORT);
+
+  const permissionArgs = EXPECTED_OVERRIDES.flatMap((value) => ["-c", value]);
+  assert.deepEqual(fake.calls.map((call) => call.args), [
+    ["sandbox", "-P", "travel_research", "-C", isolatedDir, ...permissionArgs, "--", "/bin/cat", probePaths.isolatedFile],
+    ["sandbox", "-P", "travel_research", "-C", isolatedDir, ...permissionArgs, "--", "/bin/cat", probePaths.outsideFile],
+    ["sandbox", "-P", "travel_research", "-C", isolatedDir, ...permissionArgs, "--", "/bin/cat", probePaths.projectFile],
+    ["sandbox", "-P", "travel_research", "-C", isolatedDir, ...permissionArgs, "--", "/usr/bin/curl", "--fail", "--silent", "--show-error", "--max-time", "5", "--head", "https://chatgpt.com/"],
+    ["doctor", ...permissionArgs, "--json"],
+  ]);
+  for (const call of fake.calls) {
+    assert.equal(call.executable, codexPath);
+    assert.equal(call.options.shell, false);
+    assert.equal(call.options.cwd, isolatedDir);
+    assert.deepEqual(call.options.env, { PATH: "/usr/bin:/bin", HOME: "/Users/owner" });
+  }
+});
+
+test("the default probe adapter times out with TERM then KILL and fails closed", async (context) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "codex-default-probe-timeout-test-")));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const codexPath = join(root, "codex");
+  const isolatedDir = join(root, "isolated");
+  const projectDir = join(root, "project");
+  await Promise.all([mkdir(isolatedDir), mkdir(projectDir)]);
+  await writeFile(codexPath, "#!/bin/sh\nexit 0\n");
+  await chmod(codexPath, 0o700);
+  const probePaths = {
+    isolatedFile: join(isolatedDir, "inside.txt"),
+    outsideFile: join(root, "outside.txt"),
+    projectFile: join(projectDir, "project.txt"),
+  };
+  await Promise.all(Object.values(probePaths).map((path) => writeFile(path, "probe")));
+  const fake = createProbeSpawn([{ hang: true, closeOnSignal: "SIGKILL" }]);
+
+  await assert.rejects(isolation.probeCodexIsolation({
+    codexPath,
+    isolatedDir,
+    projectDir,
+    probePaths,
+    spawnImpl: fake.spawnImpl,
+    probeTimeoutMs: 10,
+    probeKillGraceMs: 10,
+  }), { code: "CODEX_ISOLATION_UNAVAILABLE" });
+  assert.deepEqual(fake.calls[0].child.signals, ["SIGTERM", "SIGKILL"]);
+});
+
+test("the isolation probe rejects canonical probe paths that cross a boundary through symlinks", async (context) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "codex-isolation-canonical-test-")));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const codexPath = join(root, "codex");
+  const isolatedDir = join(root, "isolated");
+  const projectDir = join(root, "project");
+  const outsideDir = join(root, "outside");
+  await Promise.all([mkdir(isolatedDir), mkdir(projectDir), mkdir(outsideDir)]);
+  await writeFile(codexPath, "#!/bin/sh\nexit 0\n");
+  await chmod(codexPath, 0o700);
+  const probePaths = {
+    isolatedFile: join(isolatedDir, "inside.txt"),
+    outsideFile: join(outsideDir, "outside-link.txt"),
+    projectFile: join(projectDir, "project.txt"),
+  };
+  await Promise.all([
+    writeFile(probePaths.isolatedFile, "inside"),
+    writeFile(probePaths.projectFile, "project"),
+    symlink(probePaths.isolatedFile, probePaths.outsideFile),
+  ]);
+  let adapterCalls = 0;
+
+  await assert.rejects(isolation.probeCodexIsolation({
+    codexPath,
+    isolatedDir,
+    projectDir,
+    probePaths,
+    probeAdapter: async (request) => {
+      adapterCalls += 1;
+      return successfulProbeResponse(request);
+    },
+  }), { code: "CODEX_ISOLATION_UNAVAILABLE" });
+  assert.equal(adapterCalls, 0);
 });
