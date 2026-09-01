@@ -6,6 +6,14 @@ import {
   AgentCommandSchema,
   AgentProposalEvidenceInputSchema,
   AgentProposalCandidateInputSchema,
+  AgentProposalApplicabilitySchema,
+  AgentProposalAttractionEvidenceFactsSchema,
+  AgentProposalDateRangeSchema,
+  AgentProposalEntitySchema,
+  AgentProposalHotelEvidenceFactsSchema,
+  AgentProposalQueryContextSchema,
+  AgentProposalRecommendationSchema,
+  AgentProposalRestaurantEvidenceFactsSchema,
   AgentTripProjectionSchema,
   CandidateSchema,
   DecisionCommandSchema,
@@ -419,11 +427,78 @@ describe("decision contracts", () => {
     }).success).toBe(false);
   });
 
+  it("rejects unknown keys at every proposal-only nested boundary", () => {
+    const unknown = { leaked: "secret" };
+    expect(AgentProposalDateRangeSchema.safeParse({
+      start: "2026-10-01",
+      end: "2026-10-02",
+      ...unknown,
+    }).success).toBe(false);
+    expect(AgentProposalQueryContextSchema.safeParse({
+      dates: { start: "2026-10-01", end: "2026-10-02" },
+      travelers: 2,
+      ...unknown,
+    }).success).toBe(false);
+    expect(AgentProposalHotelEvidenceFactsSchema.safeParse({
+      ...proposalEvidence.facts,
+      ...unknown,
+    }).success).toBe(false);
+    const restaurantFacts = {
+      name: "海鲜餐厅",
+      address: "香港",
+      openInformation: "18:00-22:00",
+      priceSnapshot: "CNY 300",
+    };
+    expect(AgentProposalRestaurantEvidenceFactsSchema.safeParse({
+      ...restaurantFacts,
+      ...unknown,
+    }).success).toBe(false);
+    expect(AgentProposalAttractionEvidenceFactsSchema.safeParse({
+      ...restaurantFacts,
+      ticketType: "成人票",
+      ...unknown,
+    }).success).toBe(false);
+    expect(AgentProposalEntitySchema.safeParse({ ...candidate.entity, ...unknown }).success).toBe(false);
+    expect(AgentProposalApplicabilitySchema.safeParse({
+      ...candidate.applicability,
+      ...unknown,
+    }).success).toBe(false);
+    expect(AgentProposalRecommendationSchema.safeParse({
+      ...candidate.recommendation,
+      ...unknown,
+    }).success).toBe(false);
+    expect(AgentProposalEvidenceInputSchema.safeParse({
+      ...proposalEvidence,
+      queryContext: { ...proposalEvidence.queryContext, ...unknown },
+    }).success).toBe(false);
+    expect(AgentProposalEvidenceInputSchema.safeParse({ ...proposalEvidence, ...unknown }).success).toBe(false);
+    expect(AgentProposalCandidateInputSchema.safeParse({
+      ...proposalCandidate,
+      entity: { ...proposalCandidate.entity, ...unknown },
+    }).success).toBe(false);
+    expect(AgentProposalCandidateInputSchema.safeParse({ ...proposalCandidate, ...unknown }).success).toBe(false);
+
+    const command = {
+      agentRunId: "agent-run-1",
+      sequence: 4,
+      idempotencyKey: "proposal-001",
+      signature: "signature",
+      action: "submitProposalBatch" as const,
+      payload: { round: 2, candidates: [proposalCandidate, proposalCandidate] },
+    };
+    expect(AgentCommandSchema.safeParse({ ...command, leaked: "secret" }).success).toBe(false);
+    expect(AgentCommandSchema.safeParse({
+      ...command,
+      payload: { ...command.payload, leaked: "secret" },
+    }).success).toBe(false);
+  });
+
   it("preserves optional URLs for manual and appended evidence", () => {
     const manualEvidence = Object.fromEntries(
       Object.entries(proposalEvidence).filter(([key]) => key !== "sourceUrl"),
     );
     expect(AgentEvidenceInputSchema.safeParse(manualEvidence).success).toBe(true);
+    expect(AgentEvidenceInputSchema.safeParse({ ...manualEvidence, legacyExtra: "preserved-compatibility" }).success).toBe(true);
     expect(AgentCommandSchema.safeParse({
       agentRunId: "agent-run-1",
       sequence: 2,

@@ -1,32 +1,5 @@
 import { z } from "zod";
-
-type DecisionConflictTrip = {
-  id: string;
-  title: string;
-  startDate: string;
-  endDate: string;
-  travelers: Array<{ id: string; name: string }>;
-  days: Array<{
-    id: string;
-    date: string;
-    city: string;
-    itemIds: string[];
-    hotelId?: string | null;
-  }>;
-  unscheduledItemIds: string[];
-  orders: Array<{
-    id: string;
-    name: string;
-    category: "flight" | "hotel" | "transport" | "ticket" | "food";
-    estimated: number;
-    paid: number;
-    currency: string;
-    status: "unpaid" | "partial" | "paid";
-    dayId?: string;
-  }>;
-  memberUids?: string[];
-  version: number;
-};
+import type { Trip } from "./trip";
 
 export const CandidateCategorySchema = z.enum(["hotel", "restaurant", "attraction"]);
 export const SummaryStatusSchema = z.enum(["ready", "outdated"]);
@@ -373,20 +346,54 @@ const HttpsUrlSchema = z.url().refine((value) => new URL(value).protocol === "ht
   message: "sourceUrl must use HTTPS",
 });
 
-export const AgentProposalEvidenceInputSchema = AgentEvidenceInputSchema.extend({
+export const AgentProposalDateRangeSchema = DateRangeSchema.strict();
+export const AgentProposalQueryContextSchema = z.object({
+  dates: AgentProposalDateRangeSchema.optional(),
+  travelers: z.number().int().positive().optional(),
+  roomOrTicket: z.string().optional(),
+}).strict();
+export const AgentProposalHotelEvidenceFactsSchema = HotelEvidenceFactsSchema.strict();
+export const AgentProposalRestaurantEvidenceFactsSchema = RestaurantEvidenceFactsSchema.strict();
+export const AgentProposalAttractionEvidenceFactsSchema = AttractionEvidenceFactsSchema.strict();
+export const AgentProposalEntitySchema = z.object({
+  name: z.string().min(1),
+  address: z.string().optional(),
+  latitude: z.number().optional(),
+  longitude: z.number().optional(),
+}).strict();
+export const AgentProposalApplicabilitySchema = z.object({
+  dates: AgentProposalDateRangeSchema.optional(),
+  travelers: z.number().int().positive().optional(),
+}).strict();
+export const AgentProposalRecommendationSchema = z.object({
+  round: z.number().int().positive(),
+  reason: z.string().min(1),
+  preferenceRevisionIds: z.array(z.string()),
+  feedbackIds: z.array(z.string()),
+}).strict();
+export const AgentProposalEvidenceInputSchema = z.object({
+  sourceKind: EvidenceSourceKindSchema,
+  sourceName: z.string().min(1),
   sourceUrl: HttpsUrlSchema,
+  capturedAt: z.string().datetime(),
+  queryContext: AgentProposalQueryContextSchema,
+  captureMethod: z.enum(["detail_page", "search_result", "api_result", "manual"]),
+  facts: z.union([
+    AgentProposalHotelEvidenceFactsSchema,
+    AgentProposalAttractionEvidenceFactsSchema,
+    AgentProposalRestaurantEvidenceFactsSchema,
+  ]),
+  supersedesEvidenceId: z.string().min(1).optional(),
+  changeReason: z.string().optional(),
 }).strict();
 
-export const AgentProposalCandidateInputSchema = CandidateObjectSchema.omit({
-  id: true,
-  tripId: true,
-  revision: true,
-  updatedAt: true,
-  verificationState: true,
-  decisionState: true,
-  currentEvidenceId: true,
-  verificationBlockReason: true,
-}).extend({ evidence: z.array(AgentProposalEvidenceInputSchema).min(2) }).strict();
+export const AgentProposalCandidateInputSchema = z.object({
+  category: CandidateCategorySchema,
+  entity: AgentProposalEntitySchema,
+  applicability: AgentProposalApplicabilitySchema,
+  recommendation: AgentProposalRecommendationSchema,
+  evidence: z.array(AgentProposalEvidenceInputSchema).min(2),
+}).strict();
 
 const AgentEnvelope = {
   agentRunId: z.string().min(1),
@@ -395,8 +402,13 @@ const AgentEnvelope = {
   signature: z.string().min(1),
 };
 
+export const AgentProposalBatchPayloadSchema = z.object({
+  round: z.number().int().positive(),
+  candidates: z.array(AgentProposalCandidateInputSchema).min(2).max(4),
+}).strict();
+
 export const AgentCommandSchema = z.discriminatedUnion("action", [
-  z.object({ action: z.literal("submitProposalBatch"), ...AgentEnvelope, payload: z.object({ round: z.number().int().positive(), candidates: z.array(AgentProposalCandidateInputSchema).min(2).max(4) }) }),
+  z.object({ action: z.literal("submitProposalBatch"), ...AgentEnvelope, payload: AgentProposalBatchPayloadSchema }).strict(),
   z.object({ action: z.literal("appendEvidenceSnapshot"), ...AgentEnvelope, payload: z.object({ candidateId: z.string().min(1), expectedCandidateRevision: z.number().int().nonnegative(), evidence: AgentEvidenceInputSchema }) }),
   z.object({ action: z.literal("reportVerificationBlocked"), ...AgentEnvelope, payload: z.object({ candidateId: z.string().min(1), expectedCandidateRevision: z.number().int().nonnegative(), reason: VerificationBlockReasonSchema }) }),
   z.object({ action: z.literal("generatePreferenceSummary"), ...AgentEnvelope, payload: z.object({ sourcePreferenceRevisions: z.record(z.string(), z.number().int().nonnegative()) }) }),
@@ -464,7 +476,7 @@ export type DecisionCommandFailure = {
     | "AGENT_RUN_EXPIRED" | "AGENT_SCOPE_FORBIDDEN" | "INVALID_AGENT_CLAIM"
     | "INVALID_CONFIRMATION_STATE" | "INVALID_PLACEMENT" | "INVALID_PLACEMENT_STATE"
     | "VERIFICATION_INCOMPLETE" | "CURSOR_EXPIRED";
-  latest?: DecisionResource | AgentRun | { tripVersion: number; trip: DecisionConflictTrip };
+  latest?: DecisionResource | AgentRun | { tripVersion: number; trip: Trip };
 };
 
 export type DecisionCommandResult = DecisionCommandSuccess | DecisionCommandFailure;

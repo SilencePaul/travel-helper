@@ -13,10 +13,15 @@ import {
   canonicalJson,
   computeDisclosureFingerprint,
 } from "./decision-research.mjs";
+import type { AgentDecisionContext } from "./decision";
 import type { CryptoLike, DecisionResearchContext } from "./decision-research.mjs";
 
 const asBrowserCryptoProvider = (subtle: SubtleCrypto): CryptoLike => ({ subtle });
+const asAgentDecisionContext = (context: DecisionResearchContext): AgentDecisionContext => context;
+const asDecisionResearchContext = (context: AgentDecisionContext): DecisionResearchContext => context;
 void asBrowserCryptoProvider;
+void asAgentDecisionContext;
+void asDecisionResearchContext;
 
 const safeTrip = {
   version: 7,
@@ -30,25 +35,116 @@ const safeTrip = {
   travelerCount: 2,
 };
 
-const hotelEvidenceFacts = {
-  propertyName: "深圳湾酒店",
-  address: "深圳市南山区",
-  checkInDate: "2026-10-03",
-  checkOutDate: "2026-10-03",
-  travelers: 2,
-  roomTypeOrBed: "大床房",
-  availability: "available",
-  priceAmount: 900,
-  currency: "CNY",
-  priceDisplay: "total",
-  cancellationPolicy: "免费取消",
+type ContextCandidate = AgentDecisionContext["workspace"]["candidates"][number];
+type ContextEvidence = AgentDecisionContext["workspace"]["evidence"][number];
+type ContextFeedback = AgentDecisionContext["workspace"]["feedback"][number];
+
+const categoryNames = {
+  hotel: ["深圳湾酒店", "南山花园酒店"],
+  restaurant: ["海鲜餐厅", "深圳风味馆"],
+  attraction: ["深圳湾公园", "南山博物馆"],
 } as const;
+
+function candidateFixture(category: ContextCandidate["category"], index: number): ContextCandidate {
+  const suffix = `${category}-${index}`;
+  const id = category === "hotel" && index === 0 ? "candidate-business-id-secret" : `candidate-${suffix}-secret`;
+  return {
+    id,
+    tripId: "trip-business-id-secret",
+    category,
+    entity: { name: categoryNames[category][index]!, address: "深圳市南山区" },
+    applicability: { dates: { start: "2026-10-03", end: "2026-10-03" }, travelers: 2 },
+    recommendation: {
+      round: 1,
+      reason: `推荐理由 ${suffix}`,
+      preferenceRevisionIds: ["preference-business-id-secret:3"],
+      feedbackIds: [category === "hotel" && index === 0 ? "feedback-business-id-secret" : `feedback-${suffix}-secret`],
+    },
+    verificationState: "web_verified",
+    decisionState: "tentative",
+    currentEvidenceId: category === "hotel" && index === 0 ? "evidence-business-id-secret" : `evidence-${suffix}-0-secret`,
+    revision: index + 1,
+    updatedAt: "2026-08-28T00:00:00.000Z",
+  };
+}
+
+function evidenceFacts(category: ContextCandidate["category"], index: number) {
+  if (category === "hotel") {
+    return {
+      propertyName: categoryNames.hotel[index]!,
+      address: "深圳市南山区",
+      checkInDate: "2026-10-03",
+      checkOutDate: "2026-10-03",
+      travelers: 2,
+      roomTypeOrBed: "大床房",
+      availability: "available" as const,
+      priceAmount: 900 + index * 100,
+      currency: "CNY",
+      priceDisplay: "total" as const,
+      cancellationPolicy: "免费取消",
+    };
+  }
+  if (category === "restaurant") {
+    return {
+      name: categoryNames.restaurant[index]!,
+      address: "深圳市南山区",
+      openInformation: "11:00-22:00",
+      priceSnapshot: `CNY ${200 + index * 50}`,
+    };
+  }
+  return {
+    name: categoryNames.attraction[index]!,
+    address: "深圳市南山区",
+    openInformation: "09:00-18:00",
+    priceSnapshot: index === 0 ? "免费" : "CNY 80",
+    ticketType: "成人票",
+  };
+}
+
+function evidenceFixture(candidate: ContextCandidate, candidateIndex: number, sourceIndex: number): ContextEvidence {
+  const primaryHotel = candidate.category === "hotel" && candidateIndex === 0 && sourceIndex === 0;
+  return {
+    id: primaryHotel ? "evidence-business-id-secret" : `evidence-${candidate.category}-${candidateIndex}-${sourceIndex}-secret`,
+    tripId: "trip-business-id-secret",
+    candidateId: candidate.id,
+    sourceKind: sourceIndex === 0 ? "official" : "web",
+    sourceName: primaryHotel ? "酒店官网" : `${candidate.entity.name}来源 ${sourceIndex + 1}`,
+    sourceUrl: primaryHotel
+      ? "https://hotel.example/rooms"
+      : `https://${candidate.category}-${candidateIndex}-${sourceIndex}.example/details`,
+    capturedAt: "2026-08-28T00:00:00.000Z",
+    queryContext: { dates: { start: "2026-10-03", end: "2026-10-03" }, travelers: 2 },
+    captureMethod: sourceIndex === 0 ? "detail_page" : "search_result",
+    facts: evidenceFacts(candidate.category, candidateIndex),
+    fieldCompleteness: [],
+    verificationOutcome: "web_verified",
+    revision: sourceIndex + 1,
+    updatedAt: "2026-08-28T00:00:00.000Z",
+  };
+}
+
+function feedbackFixture(candidate: ContextCandidate, index: number): ContextFeedback {
+  const primaryHotel = candidate.category === "hotel" && index === 0;
+  return {
+    id: primaryHotel ? "feedback-business-id-secret" : `feedback-${candidate.category}-${index}-secret`,
+    tripId: "trip-business-id-secret",
+    candidateId: candidate.id,
+    actorUid: index === 0 ? "member-uid-secret" : "other-member-uid-secret",
+    kind: index === 0 ? "like" : "comment",
+    reason: index === 0 ? "离地铁近" : "备选方案",
+    createdAt: "2026-08-28T00:00:00.000Z",
+    revision: index + 1,
+    updatedAt: "2026-08-28T00:00:00.000Z",
+  };
+}
 
 function decisionContext(overrides: {
   tripVersion?: number;
   preferenceId?: string;
   preferenceRevision?: number;
 } = {}): DecisionResearchContext {
+  const candidates = (["hotel", "restaurant", "attraction"] as const)
+    .flatMap((category) => [candidateFixture(category, 0), candidateFixture(category, 1)]);
   return {
     trip: {
       ...safeTrip,
@@ -67,6 +163,16 @@ function decisionContext(overrides: {
         updatedAt: "2026-08-28T00:00:00.000Z",
         updatedBy: "member-uid-secret",
       }, {
+        id: "second-preference-business-id-secret",
+        tripId: "trip-business-id-secret",
+        ownerUid: "other-member-uid-secret",
+        answers: { pace: "balanced", interests: ["culture", "food"] },
+        freeText: { mustAvoid: "太远" },
+        status: "completed",
+        revision: 2,
+        updatedAt: "2026-08-28T00:00:00.000Z",
+        updatedBy: "other-member-uid-secret",
+      }, {
         id: "editing-preference-id-secret",
         tripId: "trip-business-id-secret",
         ownerUid: "other-member-uid-secret",
@@ -83,70 +189,17 @@ function decisionContext(overrides: {
         updatedAt: "2026-08-28T00:00:00.000Z",
         sourcePreferenceRevisions: { "member-uid-secret": 3 },
         common: ["看风景", "美食"],
-        disagreements: ["预算"],
-        tradeoffs: ["位置与价格"],
+        disagreements: ["位置", "预算"],
+        tradeoffs: ["位置与价格", "时间与体力"],
         status: "ready",
         generatedAt: "2026-08-28T00:00:00.000Z",
       },
-      candidates: [{
-        id: "candidate-business-id-secret",
-        tripId: "trip-business-id-secret",
-        category: "hotel",
-        entity: { name: "深圳湾酒店", address: "深圳市南山区" },
-        applicability: { dates: { start: "2026-10-03", end: "2026-10-03" }, travelers: 2 },
-        recommendation: {
-          round: 1,
-          reason: "交通方便",
-          preferenceRevisionIds: ["preference-business-id-secret:3"],
-          feedbackIds: ["feedback-business-id-secret"],
-        },
-        verificationState: "web_verified",
-        decisionState: "tentative",
-        currentEvidenceId: "evidence-business-id-secret",
-        revision: 2,
-        updatedAt: "2026-08-28T00:00:00.000Z",
-      }, {
-        id: "restaurant-candidate-id-secret",
-        tripId: "trip-business-id-secret",
-        category: "restaurant",
-        entity: { name: "海鲜餐厅", address: "深圳" },
-        applicability: {},
-        recommendation: { round: 1, reason: "本地风味", preferenceRevisionIds: [], feedbackIds: [] },
-        verificationState: "candidate",
-        decisionState: "none",
-        revision: 1,
-        updatedAt: "2026-08-28T00:00:00.000Z",
-      }],
-      evidence: [{
-        id: "evidence-business-id-secret",
-        tripId: "trip-business-id-secret",
-        candidateId: "candidate-business-id-secret",
-        sourceKind: "official",
-        sourceName: "酒店官网",
-        sourceUrl: "https://hotel.example/rooms",
-        capturedAt: "2026-08-28T00:00:00.000Z",
-        queryContext: {
-          dates: { start: "2026-10-03", end: "2026-10-03" },
-          travelers: 2,
-        },
-        captureMethod: "detail_page",
-        facts: hotelEvidenceFacts,
-        fieldCompleteness: [],
-        verificationOutcome: "web_verified",
-        revision: 5,
-        updatedAt: "2026-08-28T00:00:00.000Z",
-      }],
-      feedback: [{
-        id: "feedback-business-id-secret",
-        tripId: "trip-business-id-secret",
-        candidateId: "candidate-business-id-secret",
-        actorUid: "member-uid-secret",
-        kind: "like",
-        reason: "离地铁近",
-        createdAt: "2026-08-28T00:00:00.000Z",
-        revision: 2,
-        updatedAt: "2026-08-28T00:00:00.000Z",
-      }],
+      candidates,
+      evidence: candidates.flatMap((candidate, index) => [
+        evidenceFixture(candidate, index % 2, 0),
+        evidenceFixture(candidate, index % 2, 1),
+      ]),
+      feedback: candidates.map((candidate, index) => feedbackFixture(candidate, index % 2)),
       placements: [],
       confirmations: [],
       workspaceCursor: "cursor-secret",
@@ -196,6 +249,42 @@ describe("decision research projection", () => {
     expect(baseScopeId).not.toContain("day-sz-1");
     expect(versionScopeId).not.toBe(baseScopeId);
     expect(identityScopeId).not.toBe(baseScopeId);
+  });
+
+  it("matches Node SHA-256 around padding boundaries and for long Unicode scope identities", () => {
+    const encoder = new TextEncoder();
+    const vector = (dayId: string) => ({
+      trip: {
+        version: 1,
+        days: [{ id: dayId, date: "2026-10-03", city: "A" }],
+        travelerNames: ["A"],
+        travelerCount: 1,
+      },
+      identity: canonicalJson({
+        days: [{ city: "A", date: "2026-10-03", id: dayId }],
+        ordinal: 0,
+        travelerCount: 1,
+        tripVersion: 1,
+      }),
+    });
+    const boundaryVectors = [55, 56, 63, 0].map((remainder) => {
+      for (let length = 1; length < 256; length += 1) {
+        const candidate = vector("x".repeat(length));
+        if (encoder.encode(candidate.identity).length % 64 === remainder) return candidate;
+      }
+      throw new Error(`missing SHA boundary fixture ${remainder}`);
+    });
+    const cases = [
+      ...boundaryVectors,
+      vector("x".repeat(1024)),
+      vector("旅".repeat(160)),
+    ];
+
+    for (const { trip, identity } of cases) {
+      const expected = createHash("sha256").update(identity).digest("hex");
+      expect(buildResearchTargetScopes(trip)[0]?.targetScopeId).toBe(`scope_${expected}`);
+    }
+    expect(boundaryVectors.map(({ identity }) => encoder.encode(identity).length % 64)).toEqual([55, 56, 63, 0]);
   });
 
   it("keeps non-contiguous visits to the same city as separate targets", () => {
@@ -349,10 +438,104 @@ describe("decision research projection", () => {
     ]) {
       expect(serialized).not.toContain(secret);
     }
-    expect(disclosure.preferences).toHaveLength(1);
-    expect(disclosure.existingCandidates).toHaveLength(1);
-    expect(disclosure.feedback).toHaveLength(1);
+    expect(disclosure.preferences).toHaveLength(2);
+    expect(disclosure.existingCandidates).toHaveLength(2);
+    expect(disclosure.feedback).toHaveLength(2);
     expect(disclosure.resourceCommitments.length).toBeGreaterThan(0);
+  });
+
+  it("omits unsafe evidence URLs while preserving safe evidence summaries and commitments", async () => {
+    const unsafeUrls = [
+      "http://hotel.example/rooms",
+      "file:///Users/example/.codex/credentials.json",
+      "https://alice:password@hotel.example/rooms",
+      "https://hotel.example/rooms#secret-fragment",
+      "https://hotel.example/rooms#",
+      "https://hotel.example/rooms?access-token=secret-token",
+      "https://hotel.example/rooms?API_KEY=secret-key",
+      "https://hotel.example/rooms?session.id=secret-session",
+      "https://hotel.example/rooms?auth_signature=secret-signature",
+    ];
+
+    for (const sourceUrl of unsafeUrls) {
+      const context = decisionContext();
+      const evidence = context.workspace.evidence[0];
+      if (!evidence) throw new Error("missing evidence fixture");
+      evidence.sourceUrl = sourceUrl;
+      const scope = buildResearchTargetScopes(context.trip)[0];
+      if (!scope) throw new Error("missing scope fixture");
+      const disclosure = await buildResearchDisclosure(context, {
+        category: "hotel",
+        targetScopeId: scope.targetScopeId,
+      });
+      const disclosedEvidence = disclosure.existingCandidates
+        .flatMap((candidate) => candidate.evidence)
+        .find((evidence) => evidence.sourceName === "酒店官网");
+      expect(disclosedEvidence?.sourceName).toBe("酒店官网");
+      expect(disclosedEvidence).not.toHaveProperty("sourceUrl");
+      expect(disclosure.resourceCommitments.some(({ resourceType }) => resourceType === "evidence")).toBe(true);
+      const serialized = JSON.stringify(disclosure);
+      expect(serialized).not.toContain(sourceUrl);
+      expect(serialized).not.toContain("/Users/example/.codex");
+      expect(serialized).not.toContain("secret-");
+      expect(serialized).not.toContain("alice:password");
+    }
+
+    const safeContext = decisionContext();
+    const safeEvidence = safeContext.workspace.evidence[0];
+    if (!safeEvidence) throw new Error("missing evidence fixture");
+    safeEvidence.sourceUrl = "https://hotel.example/rooms?date=2026-10-03";
+    const safeScope = buildResearchTargetScopes(safeContext.trip)[0];
+    if (!safeScope) throw new Error("missing scope fixture");
+    const safeDisclosure = await buildResearchDisclosure(safeContext, {
+      category: "hotel",
+      targetScopeId: safeScope.targetScopeId,
+    });
+    const disclosedSafeEvidence = safeDisclosure.existingCandidates
+      .flatMap((candidate) => candidate.evidence)
+      .find((evidence) => evidence.sourceName === "酒店官网");
+    expect(disclosedSafeEvidence?.sourceUrl).toBe(safeEvidence.sourceUrl);
+  });
+
+  it("keeps disclosures and fingerprints stable under reversed source ordering for every populated category", async () => {
+    const original = decisionContext();
+    const reversed = structuredClone(original);
+    reversed.trip.days.reverse();
+    reversed.trip.travelerNames.reverse();
+    reversed.workspace.preferences.reverse();
+    reversed.workspace.candidates.reverse();
+    reversed.workspace.evidence.reverse();
+    reversed.workspace.feedback.reverse();
+    for (const preference of reversed.workspace.preferences) {
+      for (const [key, answer] of Object.entries(preference.answers)) {
+        if (Array.isArray(answer)) preference.answers[key] = [...answer].reverse();
+      }
+    }
+    reversed.workspace.summary?.common.reverse();
+    reversed.workspace.summary?.disagreements.reverse();
+    reversed.workspace.summary?.tradeoffs.reverse();
+
+    for (const category of ["hotel", "restaurant", "attraction"] as const) {
+      const originalScope = buildResearchTargetScopes(original.trip)[0];
+      const reversedScope = buildResearchTargetScopes(reversed.trip)[0];
+      if (!originalScope || !reversedScope) throw new Error("missing scope fixture");
+      expect(reversedScope.targetScopeId).toBe(originalScope.targetScopeId);
+      const first = await buildResearchDisclosure(original, {
+        category,
+        targetScopeId: originalScope.targetScopeId,
+      });
+      const second = await buildResearchDisclosure(reversed, {
+        category,
+        targetScopeId: reversedScope.targetScopeId,
+      });
+
+      expect(first.existingCandidates.length).toBeGreaterThanOrEqual(2);
+      expect(first.existingCandidates.every((candidate) => candidate.category === category)).toBe(true);
+      expect(first.existingCandidates.every((candidate) => candidate.evidence.length >= 2)).toBe(true);
+      expect(first.feedback.length).toBeGreaterThanOrEqual(2);
+      expect(first).toEqual(second);
+      expect(await computeDisclosureFingerprint(first)).toBe(await computeDisclosureFingerprint(second));
+    }
   });
 
   it("changes the fingerprint when a hidden resource identity or revision changes", async () => {

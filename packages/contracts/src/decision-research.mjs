@@ -14,6 +14,9 @@ const SHA256_ROUND_CONSTANTS = [
   0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
   0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
+const SENSITIVE_QUERY_NAME_PARTS = [
+  "token", "secret", "password", "passwd", "auth", "credential", "session", "signature", "apikey",
+];
 
 function assertJsonValue(value, seen) {
   if (value === null || typeof value === "string" || typeof value === "boolean") return;
@@ -205,8 +208,30 @@ function optionalObject(source, keys) {
   return result;
 }
 
+function sortedPreferenceAnswers(answers) {
+  return Object.fromEntries(Object.entries(answers).map(([key, answer]) => [
+    key,
+    Array.isArray(answer) ? [...answer].sort(compareText) : answer,
+  ]));
+}
+
 function sortByDigest(items) {
   return items.sort((left, right) => compareText(left.commitment.digest, right.commitment.digest));
+}
+
+function safePublicHttpsUrl(value) {
+  if (typeof value !== "string") return undefined;
+  try {
+    const parsed = new globalThis.URL(value);
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password || value.includes("#")) return undefined;
+    for (const name of parsed.searchParams.keys()) {
+      const normalized = name.toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (SENSITIVE_QUERY_NAME_PARTS.some((part) => normalized.includes(part))) return undefined;
+    }
+    return value;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function buildResearchDisclosure(context, options, cryptoProvider = globalThis.crypto) {
@@ -234,24 +259,27 @@ export async function buildResearchDisclosure(context, options, cryptoProvider =
   const preferencePairs = await Promise.all(completedPreferences.map(async (preference) => ({
     commitment: await resourceCommitment("preference", preference.id, preference.revision, cryptoProvider),
     display: {
-      answers: cloneJson(preference.answers),
+      answers: sortedPreferenceAnswers(preference.answers),
       ...(preference.freeText === undefined ? {} : { freeText: optionalObject(preference.freeText, ["mustHave", "mustAvoid", "note"]) }),
     },
   })));
 
   const candidatePairs = await Promise.all(relevantCandidates.map(async (candidate) => {
     const candidateCommitment = await resourceCommitment("candidate", candidate.id, candidate.revision, cryptoProvider);
-    const evidencePairs = await Promise.all((evidenceByCandidate.get(candidate.id) ?? []).map(async (evidence) => ({
-      commitment: await resourceCommitment("evidence", evidence.id, evidence.revision, cryptoProvider),
-      display: {
-        sourceKind: evidence.sourceKind,
-        sourceName: evidence.sourceName,
-        ...(evidence.sourceUrl === undefined ? {} : { sourceUrl: evidence.sourceUrl }),
-        queryContext: cloneJson(evidence.queryContext),
-        captureMethod: evidence.captureMethod,
-        facts: cloneJson(evidence.facts),
-      },
-    })));
+    const evidencePairs = await Promise.all((evidenceByCandidate.get(candidate.id) ?? []).map(async (evidence) => {
+      const sourceUrl = safePublicHttpsUrl(evidence.sourceUrl);
+      return {
+        commitment: await resourceCommitment("evidence", evidence.id, evidence.revision, cryptoProvider),
+        display: {
+          sourceKind: evidence.sourceKind,
+          sourceName: evidence.sourceName,
+          ...(sourceUrl === undefined ? {} : { sourceUrl }),
+          queryContext: cloneJson(evidence.queryContext),
+          captureMethod: evidence.captureMethod,
+          facts: cloneJson(evidence.facts),
+        },
+      };
+    }));
     return {
       commitment: candidateCommitment,
       evidenceCommitments: evidencePairs.map((entry) => entry.commitment),
