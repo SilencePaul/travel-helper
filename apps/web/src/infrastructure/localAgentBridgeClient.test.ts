@@ -93,7 +93,7 @@ describe("LocalAgentBridgeClient", () => {
     expect(JSON.parse(String(init.body))).toEqual({ agentRunId: "agent-run-1" });
   });
 
-  it("temporarily accepts the legacy prepare signature without sending scope and honors its second-argument signal", async () => {
+  it("sends no scope while honoring the prepare abort signal", async () => {
     let requestSignal: AbortSignal | undefined;
     const fetch = vi.fn((_url: string, init?: RequestInit) => {
       requestSignal = init?.signal ?? undefined;
@@ -105,8 +105,8 @@ describe("LocalAgentBridgeClient", () => {
       timeoutMs: 50,
     });
 
-    const request = client.prepare(["submitProposalBatch"], { signal: controller.signal });
-    controller.abort(new Error("legacy caller stopped"));
+    const request = client.prepare({ signal: controller.signal });
+    controller.abort(new Error("caller stopped"));
     const outcome = await Promise.race([
       request.then(() => "resolved", (error: LocalAgentBridgeError) => error.code),
       new Promise<string>((resolve) => globalThis.setTimeout(() => resolve("still-pending"), 20)),

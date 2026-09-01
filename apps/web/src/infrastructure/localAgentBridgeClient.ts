@@ -3,7 +3,6 @@ import {
   ResearchErrorCodeSchema,
   ResearchResumeActionSchema,
   ResearchStatusSchema,
-  type AgentScope,
   type CandidateCategory,
   type ResearchErrorCode,
   type ResearchResumeAction,
@@ -87,8 +86,6 @@ export class LocalAgentBridgeError extends Error {
 
 export interface LocalAgentBridge {
   prepare(options?: RequestOptions): Promise<PreparedAgentRun>;
-  /** @deprecated Temporary Task 10 migration overload. Scope is ignored and never sent; remove in Task 10. */
-  prepare(scope: AgentScope[], options?: RequestOptions): Promise<PreparedAgentRun>;
   claim(agentRunId: string, options?: RequestOptions): Promise<LocalAgentClaim>;
   executeTravelResearch(input: ExecuteTravelResearchInput, options?: RequestOptions): Promise<ResearchStatus>;
   getResearchStatus(options?: RequestOptions): Promise<ResearchStatus>;
@@ -350,14 +347,7 @@ export class LocalAgentBridgeClient implements LocalAgentBridge {
     return parsed;
   }
 
-  async prepare(options?: RequestOptions): Promise<PreparedAgentRun>;
-  /** @deprecated Temporary Task 10 migration overload. Scope is ignored and never sent; remove in Task 10. */
-  async prepare(scope: AgentScope[], options?: RequestOptions): Promise<PreparedAgentRun>;
-  async prepare(
-    optionsOrScope: RequestOptions | AgentScope[] = {},
-    legacyOptions: RequestOptions = {},
-  ): Promise<PreparedAgentRun> {
-    const options = Array.isArray(optionsOrScope) ? legacyOptions : optionsOrScope;
+  async prepare(options: RequestOptions = {}): Promise<PreparedAgentRun> {
     const response = await this.request("POST", "/v1/agent-runs/prepare", {}, options.signal);
     const parsed = PrepareResponseSchema.safeParse(response);
     if (!parsed.success) throw invalidBridgeResponse();

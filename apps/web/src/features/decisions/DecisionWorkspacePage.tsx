@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import type { DecisionCommand, DecisionWorkspace, DecisionWorkspaceRepository, Member, PreferenceProfile, Trip } from "@travel/contracts";
 import type { LocalAgentBridge } from "../../infrastructure/localAgentBridgeClient";
+import { DecisionAgentMemberNotice } from "./DecisionAgentMemberNotice";
 import { DecisionAgentPanel } from "./DecisionAgentPanel";
 import { DecisionWorkspaceShowcase } from "./DecisionWorkspaceShowcase";
 import { toDecisionWorkspaceViewModel } from "./decisionWorkspaceAdapter";
@@ -366,7 +367,16 @@ export function DecisionWorkspacePage({ repository, trip, member, agentBridge, o
       <span>{member.displayName} · 共同决定</span>
     </nav>
 
-    <DecisionAgentPanel repository={repository} bridge={agentBridge} tripId={trip.id} newIdempotencyKey={newIdempotencyKey} />
+    {member.role === "admin"
+      ? <DecisionAgentPanel
+          repository={repository}
+          bridge={agentBridge}
+          trip={trip}
+          workspace={workspace}
+          onResearchCompleted={retryRefresh}
+          newIdempotencyKey={newIdempotencyKey}
+        />
+      : <DecisionAgentMemberNotice />}
 
     <form ref={preferenceFormRef} className="decision-preference-form" aria-busy={interactionBusy} onSubmit={savePreference}>
       <div><p>MY PREFERENCE PASS</p><h2>我的五分钟偏好</h2></div>

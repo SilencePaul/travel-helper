@@ -25,7 +25,7 @@ describe("BrowserRoot Agent Bridge injection", () => {
   });
 
   it("passes the startup-discovered bridge into the development TripApp", () => {
-    const bridge = { prepare: vi.fn(), claim: vi.fn() };
+    const bridge = { prepare: vi.fn(), claim: vi.fn(), executeTravelResearch: vi.fn(), getResearchStatus: vi.fn(), resumeTravelResearch: vi.fn(), cancelResearch: vi.fn() };
 
     render(<BrowserRoot agentBridge={bridge} />);
 
@@ -34,7 +34,7 @@ describe("BrowserRoot Agent Bridge injection", () => {
   });
 
   it("passes the same startup bridge through the production authentication gate", async () => {
-    const bridge = { prepare: vi.fn(), claim: vi.fn() };
+    const bridge = { prepare: vi.fn(), claim: vi.fn(), executeTravelResearch: vi.fn(), getResearchStatus: vi.fn(), resumeTravelResearch: vi.fn(), cancelResearch: vi.fn() };
 
     render(<ProductionAuthGate agentBridge={bridge} />);
 
