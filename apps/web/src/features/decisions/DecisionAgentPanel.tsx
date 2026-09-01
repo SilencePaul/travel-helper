@@ -82,7 +82,7 @@ const categoryOptions: Array<{ value: CandidateCategory; label: string; descript
 ];
 const categoryCopy: Record<CandidateCategory, string> = { hotel: "酒店", restaurant: "餐厅", attraction: "景点" };
 const activePhases = new Set<ResearchStatus["phase"]>(["researching", "resuming", "validating", "writing", "cancelling"]);
-const bridgeRevokedPhases = new Set<ResearchStatus["phase"]>(["needs_owner_action", "completed", "failed", "superseded"]);
+const bridgeSelfRevokedPhases = new Set<ResearchStatus["phase"]>(["needs_owner_action", "completed", "cancelled", "superseded"]);
 const pollDelayMs = 2_000;
 const lifecycleStatusTimeoutMs = 2_000;
 
@@ -189,7 +189,11 @@ function syntheticSuperseded(status: Exclude<ResearchStatus, { phase: "idle" }>)
 
 export function DecisionAgentPanel({ repository, bridge, trip, workspace, onResearchCompleted, newIdempotencyKey }: Props) {
   const tripSafetyKey = JSON.stringify(tripProjection(trip));
-  const scopes = useMemo(() => buildResearchTargetScopes(tripProjection(trip)), [trip]);
+  const safeTripProjection = useMemo(
+    () => JSON.parse(tripSafetyKey) as ReturnType<typeof tripProjection>,
+    [tripSafetyKey],
+  );
+  const scopes = useMemo(() => buildResearchTargetScopes(safeTripProjection), [safeTripProjection]);
   const [targetScopeId, setTargetScopeId] = useState<string | undefined>(() => scopes.length === 1 ? scopes[0]?.targetScopeId : undefined);
   const [category, setCategory] = useState<CandidateCategory>();
   const [prepared, setPrepared] = useState<PreparedAgentRun>();
@@ -199,6 +203,9 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
   const [operation, setOperation] = useState<Operation>(bridge ? "restoring" : "idle");
   const [operationError, setOperationError] = useState<string>();
   const [researchStatus, setResearchStatusState] = useState<ResearchStatus>({ phase: "idle" });
+  const [bridgeStatusReady, setBridgeStatusReady] = useState(false);
+  const [cloudCleanupRequired, setCloudCleanupRequired] = useState(false);
+  const [blockedCleanupTaskId, setBlockedCleanupTaskId] = useState<string>();
   const lifecycleRef = useRef(0);
   const operationGenerationRef = useRef(0);
   const operationAbortRef = useRef<AbortController | undefined>(undefined);
@@ -213,6 +220,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
   const completedTaskRef = useRef<string | undefined>(undefined);
   const pendingCancellationRef = useRef<string | undefined>(undefined);
   const finalizingCancellationRef = useRef(false);
+  const externallyInvalidatedTaskRef = useRef<{ agentRunId: string; researchTaskId: string } | undefined>(undefined);
   const retryRef = useRef<HTMLButtonElement>(null);
   const researchTaskId = researchStatus.phase === "idle" ? undefined : researchStatus.researchTaskId;
 
@@ -227,7 +235,13 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
 
   function applyBridgeStatus(next: ResearchStatus) {
     observeBridgeStatus(next);
-    if (bridgeRevokedPhases.has(next.phase)) attachedCloudRunRef.current = undefined;
+    if (bridgeSelfRevokedPhases.has(next.phase)) {
+      attachedCloudRunRef.current = undefined;
+      externallyInvalidatedTaskRef.current = undefined;
+      setCloudCleanupRequired(false);
+    } else if (next.phase === "failed" && attachedCloudRunRef.current) {
+      setCloudCleanupRequired(true);
+    }
     setResearchStatus(next);
   }
 
@@ -257,6 +271,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       agentRunId: attempt.agentRunId,
       revokeIdempotencyKey: attempt.revokeIdempotencyKey,
     };
+    setCloudCleanupRequired(false);
     clearPendingAttempt(attempt);
   }, [clearPendingAttempt]);
 
@@ -380,7 +395,10 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
         });
         if (!result.ok || result.action !== "revokeAgentRun") throw new Error(result.ok ? "INVALID_RESPONSE" : result.error);
       }
-      if (attachedCloudRunRef.current === run) attachedCloudRunRef.current = undefined;
+      if (attachedCloudRunRef.current === run) {
+        attachedCloudRunRef.current = undefined;
+        setCloudCleanupRequired(false);
+      }
       return true;
     })();
     try {
@@ -393,11 +411,12 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
   const reconcileAfterBridgeFailure = useCallback(async (
     attempt: PendingCloudAttempt,
     stage: AttemptStage,
+    signal: AbortSignal,
     expectedResearchTaskId?: string,
   ): Promise<BridgeFailureReconciliation> => {
     let status: ResearchStatus | undefined;
     try {
-      status = await attempt.bridge.getResearchStatus();
+      status = await attempt.bridge.getResearchStatus({ signal });
     } catch {
       if (attempt.stage === "bridgeOperationStarted") return { kind: "uncertain" };
     }
@@ -418,7 +437,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
     setDisclosure(undefined);
     setDisclosureFingerprint(undefined);
     if (!category || !targetScopeId) return () => { active = false; };
-    void buildResearchDisclosure({ workspace, trip: tripProjection(trip) }, { category, targetScopeId })
+    void buildResearchDisclosure({ workspace, trip: safeTripProjection }, { category, targetScopeId })
       .then(async (next) => ({ next, fingerprint: await computeDisclosureFingerprint(next) }))
       .then(({ next, fingerprint }) => {
         if (!active || disclosureRequestRef.current !== request) return;
@@ -433,6 +452,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
           && taskFingerprintRef.current !== fingerprint) {
           operationAbortRef.current?.abort();
           operationGenerationRef.current += 1;
+          setBlockedCleanupTaskId(statusRef.current.researchTaskId);
           setResearchStatus(syntheticSuperseded(statusRef.current));
           setOperation("idle");
           setOperationError(undefined);
@@ -444,7 +464,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
         setOperationError("当前行程段无法生成安全披露，请刷新行程后重试。");
       });
     return () => { active = false; };
-  }, [category, targetScopeId, trip, workspace]);
+  }, [category, safeTripProjection, targetScopeId, workspace]);
 
   useEffect(() => {
     lifecycleRef.current += 1;
@@ -458,6 +478,10 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
     pendingCancellationRef.current = undefined;
     finalizingCancellationRef.current = false;
     lastBridgeObservedStatusRef.current = undefined;
+    setBlockedCleanupTaskId(undefined);
+    externallyInvalidatedTaskRef.current = undefined;
+    setBridgeStatusReady(false);
+    setCloudCleanupRequired(false);
     setTargetScopeId(scopes.length === 1 ? scopes[0]?.targetScopeId : undefined);
     setCategory(undefined);
     setPrepared(undefined);
@@ -471,9 +495,11 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       void bridge.getResearchStatus({ signal: controller.signal }).then((next) => {
         if (controller.signal.aborted || lifecycleRef.current !== lifecycle) return;
         applyBridgeStatus(next);
+        setBridgeStatusReady(true);
         setOperation("idle");
       }).catch(() => {
         if (controller.signal.aborted || lifecycleRef.current !== lifecycle) return;
+        setBridgeStatusReady(false);
         setOperation("error");
         setOperationError("本机 Bridge 状态暂时无法读取，共同决定仍可正常使用。");
       });
@@ -491,29 +517,70 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
   }, [bridge, repository, scopes, settlePendingAttempt, tripSafetyKey]);
 
   useEffect(() => {
-    if (!bridge || !activePhases.has(researchStatus.phase)) return;
+    if (!bridge || !bridgeStatusReady || !activePhases.has(researchStatus.phase)) return;
     const controller = new AbortController();
     const lifecycle = lifecycleRef.current;
     let timer: number | undefined;
+    const schedule = () => {
+      timer = globalThis.setTimeout(() => { void poll(); }, pollDelayMs);
+    };
     const poll = async () => {
       try {
+        const attached = attachedCloudRunRef.current;
+        if (attached) {
+          if (!attached.repository.getAgentRunStatus) throw new Error("AGENT_STATUS_UNAVAILABLE");
+          const parsed = AgentRunSchema.safeParse(await attached.repository.getAgentRunStatus(attached.tripId, attached.agentRunId));
+          if (!parsed.success || parsed.data.tripId !== attached.tripId || parsed.data.agentRunId !== attached.agentRunId) {
+            throw new Error("INVALID_AGENT_RUN_STATUS");
+          }
+          if (controller.signal.aborted || lifecycleRef.current !== lifecycle) return;
+          if (parsed.data.status === "revoked" || parsed.data.status === "expired") {
+            const current = statusRef.current;
+            if (current.phase === "idle") return;
+            if (attachedCloudRunRef.current === attached) attachedCloudRunRef.current = undefined;
+            setCloudCleanupRequired(false);
+            const existingInvalidation = externallyInvalidatedTaskRef.current;
+            if (!existingInvalidation || existingInvalidation.agentRunId !== attached.agentRunId) {
+              externallyInvalidatedTaskRef.current = { agentRunId: attached.agentRunId, researchTaskId: current.researchTaskId };
+              try {
+                const cancellation = await bridge.cancelResearch({ researchTaskId: current.researchTaskId }, { signal: controller.signal });
+                if (controller.signal.aborted || lifecycleRef.current !== lifecycle) return;
+                observeBridgeStatus(cancellation);
+              } catch {
+                if (controller.signal.aborted || lifecycleRef.current !== lifecycle) return;
+              }
+            }
+          }
+        }
         const next = await bridge.getResearchStatus({ signal: controller.signal });
         if (controller.signal.aborted || lifecycleRef.current !== lifecycle) return;
+        const externalInvalidation = externallyInvalidatedTaskRef.current;
         applyBridgeStatus(next);
-        if (activePhases.has(next.phase)) timer = globalThis.setTimeout(() => { void poll(); }, pollDelayMs);
+        if (externalInvalidation && next.phase !== "idle" && next.researchTaskId === externalInvalidation.researchTaskId
+          && activePhases.has(next.phase)) {
+          setOperation("error");
+          setOperationError(next.phase === "writing"
+            ? "云端授权已失效，但写入结果尚未确认；当前不宣称已停止。"
+            : "云端授权已失效，本机停止结果尚未确认，正在继续对账。");
+        } else if (externalInvalidation) {
+          externallyInvalidatedTaskRef.current = undefined;
+          setOperation("idle");
+          setOperationError(undefined);
+        }
+        if (activePhases.has(next.phase)) schedule();
       } catch {
         if (controller.signal.aborted || lifecycleRef.current !== lifecycle) return;
         setOperation("error");
-        setOperationError("本机研究状态暂时无法确认，请重试对账。");
-        timer = globalThis.setTimeout(() => { void poll(); }, pollDelayMs);
+        setOperationError("本机或云端研究状态暂时无法确认，正在继续轮询；不会贸然停止任务。");
+        schedule();
       }
     };
-    timer = globalThis.setTimeout(() => { void poll(); }, pollDelayMs);
+    schedule();
     return () => {
       if (timer !== undefined) globalThis.clearTimeout(timer);
       controller.abort();
     };
-  }, [bridge, researchStatus.phase, researchTaskId, tripSafetyKey]);
+  }, [bridge, bridgeStatusReady, researchStatus.phase, researchTaskId, tripSafetyKey]);
 
   useEffect(() => {
     if (researchStatus.phase !== "completed" || completedTaskRef.current === researchStatus.researchTaskId) return;
@@ -555,8 +622,95 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
     return () => cancelAnimationFrame(frame);
   }, [operation, researchStatus.phase]);
 
+  useEffect(() => {
+    if (researchStatus.phase !== "failed" || !cloudCleanupRequired || operation !== "idle" || inFlightRef.current) return;
+    const run = attachedCloudRunRef.current;
+    if (!run) {
+      setCloudCleanupRequired(false);
+      return;
+    }
+    inFlightRef.current = true;
+    const { generation, lifecycle } = beginOperation("cancelling");
+    void reconcileAttachedCloudRun(run).then(() => {
+      if (!isCurrent(generation, lifecycle)) return;
+      setCloudCleanupRequired(false);
+      setOperation("idle");
+    }).catch(() => {
+      if (!isCurrent(generation, lifecycle)) return;
+      setOperation("error");
+      setOperationError("云端授权撤销尚未确认；再次操作会先继续对账，不会创建新任务。");
+    }).finally(() => {
+      if (isCurrent(generation, lifecycle)) inFlightRef.current = false;
+    });
+  }, [cloudCleanupRequired, operation, reconcileAttachedCloudRun, researchStatus.phase]);
+
+  async function restoreBridgeStatus() {
+    if (!bridge || inFlightRef.current) return;
+    inFlightRef.current = true;
+    const { controller, generation, lifecycle } = beginOperation("restoring");
+    try {
+      const next = await bridge.getResearchStatus({ signal: controller.signal });
+      if (!isCurrent(generation, lifecycle)) return;
+      applyBridgeStatus(next);
+      setBridgeStatusReady(true);
+      setOperation("idle");
+    } catch {
+      if (!isCurrent(generation, lifecycle) || controller.signal.aborted) return;
+      setBridgeStatusReady(false);
+      setOperation("error");
+      setOperationError("本机 Bridge 状态暂时无法读取，共同决定仍可正常使用。");
+    } finally {
+      if (isCurrent(generation, lifecycle)) inFlightRef.current = false;
+    }
+  }
+
+  function resetResearchUi() {
+    taskFingerprintRef.current = undefined;
+    confirmedFingerprintRef.current = undefined;
+    setPrepared(undefined);
+    setConfirmed(false);
+    setResearchStatus({ phase: "idle" });
+    setOperation("idle");
+    setOperationError(undefined);
+  }
+
+  async function clearBlockedResearchBeforeReset() {
+    if (!bridge || !bridgeStatusReady || inFlightRef.current) return;
+    const taskId = blockedCleanupTaskId;
+    if (!taskId) {
+      resetResearchUi();
+      return;
+    }
+    inFlightRef.current = true;
+    const { controller, generation, lifecycle } = beginOperation("cancelling");
+    try {
+      try {
+        const cancellation = await bridge.cancelResearch({ researchTaskId: taskId }, { signal: controller.signal });
+        if (isCurrent(generation, lifecycle)) observeBridgeStatus(cancellation);
+      } catch {
+        // The authoritative status read below decides whether the persisted blocker was cleared.
+      }
+      if (!isCurrent(generation, lifecycle)) return;
+      const reconciled = await bridge.getResearchStatus({ signal: controller.signal });
+      if (!isCurrent(generation, lifecycle)) return;
+      observeBridgeStatus(reconciled);
+      if (reconciled.phase !== "cancelled" || reconciled.researchTaskId !== taskId) {
+        throw new Error("BLOCKED_TASK_CLEANUP_UNCERTAIN");
+      }
+      setBlockedCleanupTaskId(undefined);
+      resetResearchUi();
+    } catch {
+      if (!isCurrent(generation, lifecycle) || controller.signal.aborted) return;
+      setOperation("error");
+      setOperationError("旧任务清理结果尚未确认；请继续对账，确认后才能创建新任务。");
+    } finally {
+      if (isCurrent(generation, lifecycle)) inFlightRef.current = false;
+    }
+  }
+
   async function prepareLocal() {
-    if (!bridge || !category || !targetScopeId || !disclosure || !disclosureFingerprint || inFlightRef.current) return;
+    if (!bridge || !bridgeStatusReady || cloudCleanupRequired || blockedCleanupTaskId
+      || !category || !targetScopeId || !disclosure || !disclosureFingerprint || inFlightRef.current) return;
     inFlightRef.current = true;
     const { controller, generation, lifecycle } = beginOperation("preparing");
     try {
@@ -578,7 +732,8 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
   }
 
   async function startResearch() {
-    if (!bridge || !prepared || !confirmed || confirmedFingerprintRef.current !== disclosureFingerprint
+    if (!bridge || !bridgeStatusReady || cloudCleanupRequired || blockedCleanupTaskId
+      || !prepared || !confirmed || confirmedFingerprintRef.current !== disclosureFingerprint
       || !category || !targetScopeId || !disclosureFingerprint || inFlightRef.current) return;
     inFlightRef.current = true;
     const { controller, generation, lifecycle } = beginOperation("starting");
@@ -666,7 +821,15 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       applyBridgeStatus(next);
       setOperation("idle");
     } catch (error) {
-      if (!attempt) return;
+      if (!attempt) {
+        if (isCurrent(generation, lifecycle) && !controller.signal.aborted) {
+          setOperation("error");
+          setOperationError(error instanceof LocalAgentBridgeError && error.code === "CODEX_NOT_AUTHENTICATED"
+            ? "请在 ChatGPT/Codex 中恢复登录，然后重试继续研究。"
+            : "本机 Codex 暂未就绪，请处理后重试继续研究。");
+        }
+        return;
+      }
       if (!isCurrent(generation, lifecycle) || controller.signal.aborted) {
         await settlePendingAttempt(attempt).catch(() => undefined);
         return;
@@ -684,7 +847,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
         setOperation("error");
         setOperationError("云端授权创建响应尚未确认；重试会使用同一幂等请求。");
       } else {
-        const outcome = await reconcileAfterBridgeFailure(attempt, stage);
+        const outcome = await reconcileAfterBridgeFailure(attempt, stage, controller.signal);
         if (!isCurrent(generation, lifecycle)) return;
         if (outcome.kind === "restored") {
           confirmedFingerprintRef.current = undefined;
@@ -712,7 +875,8 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
   }
 
   async function resumeResearch(resumeAction: ResearchResumeAction) {
-    if (!bridge || researchStatus.phase !== "needs_owner_action" || inFlightRef.current) return;
+    if (!bridge || !bridgeStatusReady || cloudCleanupRequired
+      || researchStatus.phase !== "needs_owner_action" || inFlightRef.current) return;
     if (taskFingerprintRef.current && disclosureFingerprint && taskFingerprintRef.current !== disclosureFingerprint) {
       setResearchStatus(syntheticSuperseded(researchStatus));
       setConfirmed(false);
@@ -791,7 +955,15 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       applyBridgeStatus(next);
       setOperation("idle");
     } catch (error) {
-      if (!attempt) return;
+      if (!attempt) {
+        if (isCurrent(generation, lifecycle) && !controller.signal.aborted) {
+          setOperation("error");
+          setOperationError(error instanceof LocalAgentBridgeError && error.code === "CODEX_NOT_AUTHENTICATED"
+            ? "请在 ChatGPT/Codex 中恢复登录，然后重试继续研究。"
+            : "本机 Codex 暂未就绪，请处理后重试继续研究。");
+        }
+        return;
+      }
       if (!isCurrent(generation, lifecycle) || controller.signal.aborted) {
         await settlePendingAttempt(attempt).catch(() => undefined);
         return;
@@ -808,7 +980,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
         setOperation("error");
         setOperationError("恢复授权创建响应尚未确认；重试会使用同一幂等请求。");
       } else {
-        const outcome = await reconcileAfterBridgeFailure(attempt, stage, blocked.researchTaskId);
+        const outcome = await reconcileAfterBridgeFailure(attempt, stage, controller.signal, blocked.researchTaskId);
         if (!isCurrent(generation, lifecycle)) return;
         if (outcome.kind === "restored") {
           attachCloudRun(attempt);
@@ -883,7 +1055,8 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
   }
 
   const operationAllowsRetry = operation === "idle" || operation === "error";
-  const locked = !operationAllowsRetry || activePhases.has(researchStatus.phase) || researchStatus.phase === "needs_owner_action";
+  const locked = !bridgeStatusReady || cloudCleanupRequired || Boolean(blockedCleanupTaskId)
+    || !operationAllowsRetry || activePhases.has(researchStatus.phase) || researchStatus.phase === "needs_owner_action";
   const busy = operation !== "idle" || activePhases.has(researchStatus.phase);
   const presentation = statusPresentation(researchStatus);
   const message = operationError
@@ -939,29 +1112,29 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
 
     <div className="decision-agent-panel__actions">
       {!bridge ? <p>本机 Bridge 未连接，已有共同决定仍可正常使用。</p> : null}
+      {bridge && !bridgeStatusReady ? <button ref={retryRef} className="control-button control-button--secondary" type="button" disabled={operation === "restoring"} onClick={() => { void restoreBridgeStatus(); }}>重新读取本机状态</button> : null}
       {bridge && researchStatus.phase === "needs_owner_action" ? <>
-        <button ref={retryRef} className="control-button control-button--primary" type="button" disabled={!operationAllowsRetry} onClick={() => { void resumeResearch(researchStatus.blockedReason === "codex_auth_required" ? "retry_codex_auth" : "skip_blocked_source"); }}>
+        <button ref={retryRef} className="control-button control-button--primary" type="button" disabled={!bridgeStatusReady || !operationAllowsRetry} onClick={() => { void resumeResearch(researchStatus.blockedReason === "codex_auth_required" ? "retry_codex_auth" : "skip_blocked_source"); }}>
           {researchStatus.blockedReason === "codex_auth_required" ? "已恢复登录，继续研究" : "跳过该来源并继续"}
         </button>
         <button className="control-button control-button--danger" type="button" disabled={!operationAllowsRetry} onClick={() => { void stopResearch(); }}>停止任务</button>
       </> : null}
       {bridge && activePhases.has(researchStatus.phase) && researchStatus.phase !== "cancelling" ? <button className="control-button control-button--danger" type="button" disabled={!operationAllowsRetry} onClick={() => { void stopResearch(); }}>停止搜索</button> : null}
       {bridge && researchStatus.phase !== "needs_owner_action" && !activePhases.has(researchStatus.phase) ? <>
-        {!prepared ? <button className="control-button control-button--secondary" type="button" disabled={!category || !targetScopeId || !disclosure || !operationAllowsRetry} onClick={() => { void prepareLocal(); }}>准备本机 Codex</button> : null}
-        {prepared && category ? <button className="control-button control-button--primary" type="button" disabled={!confirmed || !disclosureFingerprint || !operationAllowsRetry} onClick={() => { void startResearch(); }}>开始研究{categoryCopy[category]}候选</button> : null}
+        {!prepared ? <button className="control-button control-button--secondary" type="button" disabled={locked || !category || !targetScopeId || !disclosure} onClick={() => { void prepareLocal(); }}>准备本机 Codex</button> : null}
+        {prepared && category ? <button className="control-button control-button--primary" type="button" disabled={locked || !confirmed || !disclosureFingerprint} onClick={() => { void startResearch(); }}>开始研究{categoryCopy[category]}候选</button> : null}
       </> : null}
-      {operation === "error" && researchStatus.phase !== "needs_owner_action" ? <button ref={retryRef} className="control-button control-button--secondary" type="button" onClick={() => {
+      {operation === "error" && bridgeStatusReady && blockedCleanupTaskId ? <button ref={retryRef} className="control-button control-button--secondary" type="button" onClick={() => { void clearBlockedResearchBeforeReset(); }}>继续清理旧任务</button> : null}
+      {operation === "error" && bridgeStatusReady && cloudCleanupRequired ? <button ref={retryRef} className="control-button control-button--secondary" type="button" onClick={() => {
+        setOperation("idle");
+        setOperationError(undefined);
+      }}>继续撤销云端授权</button> : null}
+      {operation === "error" && bridgeStatusReady && !blockedCleanupTaskId && !cloudCleanupRequired && researchStatus.phase !== "needs_owner_action" ? <button ref={retryRef} className="control-button control-button--secondary" type="button" onClick={() => {
         setOperation("idle");
         setOperationError(undefined);
       }}>{activePhases.has(researchStatus.phase) ? "继续查看状态" : "返回研究设置"}</button> : null}
       {operation !== "error" && (researchStatus.phase === "failed" || researchStatus.phase === "superseded") ? <button ref={retryRef} className="control-button control-button--secondary" type="button" onClick={() => {
-        taskFingerprintRef.current = undefined;
-        confirmedFingerprintRef.current = undefined;
-        setPrepared(undefined);
-        setConfirmed(false);
-        setResearchStatus({ phase: "idle" });
-        setOperation("idle");
-        setOperationError(undefined);
+        void clearBlockedResearchBeforeReset();
       }}>重新选择研究范围</button> : null}
     </div>
   </section>;
