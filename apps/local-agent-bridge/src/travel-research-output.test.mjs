@@ -326,6 +326,7 @@ test("DNS gate rejects failures, timeouts and any non-global current resolution"
     [{ address: "::127.0.0.1", family: 6 }],
     [{ address: "::192.168.1.1", family: 6 }],
     [{ address: "::8.8.8.8", family: 6 }],
+    [{ address: "5f00::1", family: 6 }],
     [{ address: "93.184.216.34", family: 4 }, { address: "192.168.1.1", family: 4 }],
   ]) {
     await assert.rejects(() => validateTravelResearchOutput(sourceOutput(), options({
