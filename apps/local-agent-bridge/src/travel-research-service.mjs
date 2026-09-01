@@ -641,14 +641,17 @@ export class TravelResearchService {
   }
 
   async #submitWithRetry(payload) {
-    this.#beginTerminalReconciliation();
+    this.#beginTerminalReconciliation("submitProposalBatch");
     const submit = typeof this.#transport.submitProposalBatch === "function"
       ? () => this.#transport.submitProposalBatch(payload)
       : () => this.#transport.command("submitProposalBatch", payload);
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        return await submit();
+        const result = await submit();
+        this.#task.terminalPendingAction = undefined;
+        return result;
       } catch (error) {
+        if (!error?.uncertain) this.#task.terminalPendingAction = undefined;
         if (!error?.uncertain || attempt === 1) throw error;
       }
     }
@@ -656,23 +659,31 @@ export class TravelResearchService {
   }
 
   async #revokeStrict() {
-    this.#beginTerminalReconciliation();
+    this.#beginTerminalReconciliation("revokeAgentRunSelf");
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        return await this.#transport.revokeSelf();
+        const result = await this.#transport.revokeSelf();
+        this.#task.terminalPendingAction = undefined;
+        return result;
       } catch (error) {
+        if (!error?.uncertain) this.#task.terminalPendingAction = undefined;
         if (!error?.uncertain || attempt === 1) throw error;
       }
     }
     throw codedError("AGENT_TRANSPORT_UNAVAILABLE", true);
   }
 
-  #beginTerminalReconciliation() {
-    if (this.#task.terminalStarted) return;
-    this.#assertClaimed(this.#task.agentRunId);
-    const deadline = this.#deadline(false);
-    if (deadline.delay <= 0) throw codedError(deadline.code);
-    this.#task.terminalStarted = true;
+  #beginTerminalReconciliation(action) {
+    if (this.#task.terminalPendingAction && this.#task.terminalPendingAction !== action) {
+      throw codedError("AGENT_TRANSPORT_UNAVAILABLE", true);
+    }
+    if (!this.#task.terminalStarted) {
+      this.#assertClaimed(this.#task.agentRunId);
+      const deadline = this.#deadline(false);
+      if (deadline.delay <= 0) throw codedError(deadline.code);
+      this.#task.terminalStarted = true;
+    }
+    this.#task.terminalPendingAction = action;
   }
 
   async #handleOperationFailure(error, evidenceContinuation = false) {
@@ -681,7 +692,7 @@ export class TravelResearchService {
       return this.#finishCancelled();
     }
     const code = stableFailureCode(error, evidenceContinuation);
-    return this.#finishFailure(code, code !== "AGENT_RUN_INACTIVE" && !this.#task.terminalStarted);
+    return this.#finishFailure(code, code !== "AGENT_RUN_INACTIVE" && !this.#task.terminalPendingAction);
   }
 
   async #finishFailure(code, revoke = true) {

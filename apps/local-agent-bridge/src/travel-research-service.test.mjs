@@ -484,6 +484,67 @@ test("a real runtime keeps a pending signed submit alive past the service deadli
   assert.equal(harness.events.includes("store.clear"), true);
 });
 
+test("a definite real-runtime submit failure revokes and releases the capability", async () => {
+  const actions = [];
+  const harness = createHarness({
+    scripts: [{
+      codexThreadId: "thread-real-runtime-definite",
+      output: completedOutput(),
+      activeDurationMs: 10_000,
+    }],
+    transportFactory(_events, runtimeClock) {
+      return new LocalAgentBridgeRuntime({
+        agentEndpoint: "https://api.public.org/api/agent",
+        now: runtimeClock,
+        fetch: async (_url, init) => {
+          const body = JSON.parse(init.body);
+          actions.push(body.action);
+          if (body.action === "claimAgentRun") {
+            return Response.json({
+              ok: true,
+              data: {
+                agentRunId: body.agentRunId,
+                claimedAt: "2026-09-01T00:00:00.000Z",
+                expiresAt: "2026-09-01T00:15:00.000Z",
+                nextSequence: 1,
+              },
+            });
+          }
+          if (body.action === "getDecisionContext") {
+            return Response.json({ ok: true, action: body.action, data: contextFixture() });
+          }
+          if (body.action === "submitProposalBatch") {
+            return Response.json({ ok: false, error: "INVALID_REQUEST" }, { status: 400 });
+          }
+          assert.equal(body.action, "revokeAgentRunSelf");
+          return Response.json({
+            ok: true,
+            action: body.action,
+            data: { agentRunId: body.agentRunId, revokedAt: "2026-09-01T00:01:00.000Z" },
+          });
+        },
+      });
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+
+  const status = await harness.service.executeTravelResearch(request);
+
+  assert.equal(status.phase, "failed");
+  assert.equal(status.errorCode, "CODEX_RESEARCH_FAILED");
+  assert.deepEqual(actions, [
+    "claimAgentRun",
+    "getDecisionContext",
+    "submitProposalBatch",
+    "revokeAgentRunSelf",
+  ]);
+  assert.equal(harness.transport.claimedRun, undefined);
+  assert.equal(harness.events.includes("store.clear"), true);
+  assert.doesNotThrow(() => harness.service.prepare());
+});
+
 test("two uncertain real-runtime submits fail safely and keep the pending capability unreusable", async () => {
   const actions = [];
   const submitBodies = [];
@@ -1192,7 +1253,11 @@ test("cancel during writing waits for terminal reconciliation and never reports 
     assert.equal(executeStatus.phase, expectedPhase);
     assert.equal(cancelStatus.phase, expectedPhase);
     assert.notEqual(executeStatus.phase, "cancelled");
-    if (submitError) assert.equal(executeStatus.errorCode, "AGENT_TRANSPORT_UNAVAILABLE");
+    if (submitError) {
+      assert.equal(executeStatus.errorCode, "AGENT_TRANSPORT_UNAVAILABLE");
+      assert.equal(harness.events.includes("transport.revokeSelf"), true);
+      assert.equal(harness.transport.claimedRun, undefined);
+    }
   }
 });
 
