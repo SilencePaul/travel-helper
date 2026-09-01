@@ -132,8 +132,9 @@ function createFakeSpawn(outcomes) {
     child.stderr = new EventEmitter();
     child.signals = [];
     child.pid = 10_000 + calls.length;
-    const call = { executable, args, options, stdin: "", child };
+    const call = { executable, args, options, stdin: "", child, groupAlive: true };
     call.groupSignals = [];
+    call.groupProbes = [];
     child.stdin = new EventEmitter();
     child.stdin.end = (value = "") => {
       if (outcome.stdinEndError) throw new Error("raw stdin end failure");
@@ -158,18 +159,31 @@ function createFakeSpawn(outcomes) {
       if (outcome.stdinError) child.stdin.emit("error", new Error("raw stdin failure"));
       if (outcome.stdoutError) child.stdout.emit("error", new Error("raw stdout failure"));
       if (outcome.stderrError) child.stderr.emit("error", new Error("raw stderr failure"));
-      if (!outcome.hang) child.emit("close", outcome.code ?? 0, null);
+      if (!outcome.hang) {
+        call.groupAlive = false;
+        child.emit("close", outcome.code ?? 0, null);
+      }
     });
     return child;
   };
   const processKillImpl = (groupPid, signal) => {
     const call = calls.find(({ child }) => -child.pid === groupPid);
     if (!call) throw new Error("unknown fake process group");
+    if (signal === 0) {
+      call.groupProbes.push(groupPid);
+      if (!call.groupAlive) throw Object.assign(new Error("no such process group"), { code: "ESRCH" });
+      return true;
+    }
     call.groupSignals.push({ groupPid, signal });
     call.child.signals.push(signal);
     const outcome = outcomes[calls.indexOf(call)] ?? {};
+    if (!call.groupAlive) throw Object.assign(new Error("no such process group"), { code: "ESRCH" });
     if (outcome.killThrows?.includes(signal)) throw new Error("raw group kill failure");
-    if (outcome.closeOnSignal === signal) queueMicrotask(() => call.child.emit("close", null, signal));
+    if (outcome.groupGoneOnSignal === signal) call.groupAlive = false;
+    if (outcome.closeOnSignal === signal) {
+      if (outcome.groupSurvivesLeaderClose !== true) call.groupAlive = false;
+      queueMicrotask(() => call.child.emit("close", null, signal));
+    }
     return outcome.killReturnsFalse !== true;
   };
   return { calls, processKillImpl, spawnImpl };
@@ -750,13 +764,23 @@ test("active timeout sends SIGTERM then SIGKILL only after the grace period", as
   assert.deepEqual(fake.calls[0].child.signals, ["SIGTERM", "SIGKILL"]);
 });
 
-test("a process that exits after SIGTERM is not sent SIGKILL", async () => {
-  const fake = createFakeSpawn([{ hang: true, closeOnSignal: "SIGTERM" }]);
-  const runner = makeRunner(fake, { activeTimeoutMs: 15, killGraceMs: 15 });
+test("leader close after SIGTERM still kills descendants and a confirmed cleanup does not poison the runner", async () => {
+  const fake = createFakeSpawn([
+    {
+      hang: true,
+      stdoutError: true,
+      closeOnSignal: "SIGTERM",
+      groupSurvivesLeaderClose: true,
+      groupGoneOnSignal: "SIGKILL",
+    },
+    { stdout: jsonl("thread-1") },
+  ]);
+  const runner = makeRunner(fake, { killGraceMs: 5, teardownTimeoutMs: 20 });
 
-  await assert.rejects(runner.runInitial({ prompt: "private" }), { code: "CODEX_RESEARCH_TIMEOUT" });
-  await new Promise((resolve) => setTimeout(resolve, 25));
-  assert.deepEqual(fake.calls[0].child.signals, ["SIGTERM"]);
+  await assert.rejects(runner.runInitial({ prompt: "private" }), { code: "CODEX_RESEARCH_FAILED" });
+  assert.deepEqual(fake.calls[0].child.signals, ["SIGTERM", "SIGKILL"]);
+  assert.ok(fake.calls[0].groupProbes.length >= 1);
+  assert.deepEqual((await runner.resume({ codexThreadId: "thread-1", prompt: "continue" })).output, VALID_OUTPUT);
 });
 
 test("output validation consumes the same active-time budget", async () => {
@@ -850,7 +874,7 @@ test("teardown remains bounded when kill throws or returns false", async () => {
 });
 
 test("an unconfirmed process-group teardown permanently poisons the runner", async () => {
-  const fake = createFakeSpawn([{ hang: true }]);
+  const fake = createFakeSpawn([{ hang: true, closeOnSignal: "SIGTERM", groupSurvivesLeaderClose: true }]);
   let probeCalls = 0;
   const runner = makeRunner(fake, {
     activeTimeoutMs: 10,
@@ -864,6 +888,7 @@ test("an unconfirmed process-group teardown permanently poisons the runner", asy
     { groupPid: -fake.calls[0].child.pid, signal: "SIGTERM" },
     { groupPid: -fake.calls[0].child.pid, signal: "SIGKILL" },
   ]);
+  assert.ok(fake.calls[0].groupProbes.length >= 1);
   await assert.rejects(
     runner.resume({ codexThreadId: "thread-1", prompt: "must not restart" }),
     { code: "CODEX_RESEARCH_FAILED" },

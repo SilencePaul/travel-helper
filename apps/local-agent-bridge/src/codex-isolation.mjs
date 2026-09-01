@@ -136,12 +136,22 @@ function parseProbeEvidence(response, check) {
   }
 }
 
-function safeKillProcessGroup(processKillImpl, child, signal) {
+function safeKillProcessGroup(processKillImpl, processGroupId, signal) {
   try {
-    if (!Number.isSafeInteger(child.pid) || child.pid <= 0) throw new Error("invalid child pid");
-    processKillImpl(-child.pid, signal);
+    if (!Number.isSafeInteger(processGroupId) || processGroupId >= 0) throw new Error("invalid process group");
+    processKillImpl(processGroupId, signal);
   } catch {
     // A failed signal is handled by the final teardown deadline.
+  }
+}
+
+function processGroupIsGone(processKillImpl, processGroupId) {
+  try {
+    if (!Number.isSafeInteger(processGroupId) || processGroupId >= 0) return false;
+    processKillImpl(processGroupId, 0);
+    return false;
+  } catch (error) {
+    return error?.code === "ESRCH";
   }
 }
 
@@ -159,6 +169,8 @@ function runProbeProcess({ executable, args, cwd, env, spawnImpl, processKillImp
     let stderrBytes = 0;
     let settled = false;
     let terminationError;
+    let processGroupId;
+    let leaderExited = false;
     let timeoutTimer;
     let killTimer;
     let finalTimer;
@@ -180,9 +192,26 @@ function runProbeProcess({ executable, args, cwd, env, spawnImpl, processKillImp
     const terminate = (error) => {
       if (terminationError) return;
       terminationError = error;
-      safeKillProcessGroup(processKillImpl, child, "SIGTERM");
-      killTimer = setTimeout(() => safeKillProcessGroup(processKillImpl, child, "SIGKILL"), killGraceMs);
-      finalTimer = setTimeout(() => finish(markProcessTreeUnconfirmed(error)), killGraceMs * 2 + 10);
+      safeKillProcessGroup(processKillImpl, processGroupId, "SIGTERM");
+      killTimer = setTimeout(() => {
+        safeKillProcessGroup(processKillImpl, processGroupId, "SIGKILL");
+        const teardownTimeoutMs = killGraceMs + 10;
+        const teardownDeadline = performance.now() + teardownTimeoutMs;
+        const confirmGroupGone = () => {
+          const groupGone = processGroupIsGone(processKillImpl, processGroupId);
+          if (leaderExited && groupGone) {
+            finish(error);
+            return;
+          }
+          const remainingMs = teardownDeadline - performance.now();
+          if (remainingMs <= 0) {
+            finish(markProcessTreeUnconfirmed(error));
+            return;
+          }
+          finalTimer = setTimeout(confirmGroupGone, Math.max(1, Math.min(10, Math.ceil(remainingMs))));
+        };
+        confirmGroupGone();
+      }, killGraceMs);
     };
     const collect = (streamName, chunk) => {
       if (terminationError) return;
@@ -199,6 +228,7 @@ function runProbeProcess({ executable, args, cwd, env, spawnImpl, processKillImp
 
     try {
       child = spawnImpl(executable, args, { shell: false, detached: true, cwd, env });
+      processGroupId = Number.isSafeInteger(child.pid) && child.pid > 0 ? -child.pid : undefined;
     } catch {
       finish(new Error("probe spawn failed"));
       return;
@@ -213,7 +243,7 @@ function runProbeProcess({ executable, args, cwd, env, spawnImpl, processKillImp
     });
     child.on("close", (exitCode, signal) => {
       if (terminationError) {
-        finish(terminationError);
+        leaderExited = true;
         return;
       }
       finish(undefined, { exitCode, signal, stdout, stderr });
@@ -278,17 +308,19 @@ function createDefaultProbeAdapter(options) {
   const spawnImpl = options.spawnImpl ?? spawn;
   const processKillImpl = options.processKillImpl ?? process.kill.bind(process);
   const timeoutMs = options.probeTimeoutMs ?? 5_000;
+  const doctorTimeoutMs = options.probeDoctorTimeoutMs ?? 15_000;
   const killGraceMs = options.probeKillGraceMs ?? 500;
   const totalTimeoutMs = options.probeTotalTimeoutMs ?? 30_000;
   if (typeof spawnImpl !== "function" || typeof processKillImpl !== "function"
     || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0
+    || !Number.isSafeInteger(doctorTimeoutMs) || doctorTimeoutMs <= 0
     || !Number.isSafeInteger(killGraceMs) || killGraceMs < 0
     || !Number.isSafeInteger(totalTimeoutMs) || totalTimeoutMs <= 0) {
     throw new Error("invalid probe process options");
   }
   const startedAt = performance.now();
   let doctorPromise;
-  const run = async (request, args) => {
+  const run = async (request, args, stepTimeoutMs = timeoutMs) => {
     const remainingMs = totalTimeoutMs - (performance.now() - startedAt);
     const teardownReserveMs = killGraceMs * 2 + 10;
     if (remainingMs <= teardownReserveMs) throw new Error("probe total timeout");
@@ -299,13 +331,17 @@ function createDefaultProbeAdapter(options) {
       env: request.env,
       spawnImpl,
       processKillImpl,
-      timeoutMs: Math.min(timeoutMs, remainingMs - teardownReserveMs),
+      timeoutMs: Math.min(stepTimeoutMs, remainingMs - teardownReserveMs),
       killGraceMs,
     });
   };
   const doctor = async (request) => {
     doctorPromise ??= (async () => {
-      const result = await run(request, ["doctor", ...request.permissionOverrides.flatMap((value) => ["-c", value]), "--json"]);
+      const result = await run(
+        request,
+        ["doctor", ...request.permissionOverrides.flatMap((value) => ["-c", value]), "--json"],
+        doctorTimeoutMs,
+      );
       if (result.exitCode !== 0 || result.signal !== null) throw new Error("doctor failed");
       parseDoctorOutput(result.stdout);
     })();

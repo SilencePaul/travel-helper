@@ -333,22 +333,38 @@ function createProbeSpawn(outcomes) {
       if (outcome.closeOnSignal === signal) queueMicrotask(() => child.emit("close", null, signal));
       return true;
     };
-    calls.push({ executable, args, options, child, groupSignals: [] });
-    queueMicrotask(() => {
+    const call = { executable, args, options, child, groupAlive: true, groupProbes: [], groupSignals: [] };
+    calls.push(call);
+    const complete = () => {
       if (outcome.stdout !== undefined) child.stdout.emit("data", Buffer.from(outcome.stdout));
       if (outcome.stderr !== undefined) child.stderr.emit("data", Buffer.from(outcome.stderr));
-      if (!outcome.hang) child.emit("close", outcome.code ?? 0, null);
-    });
+      if (!outcome.hang) {
+        call.groupAlive = false;
+        child.emit("close", outcome.code ?? 0, null);
+      }
+    };
+    if (outcome.delayMs === undefined) queueMicrotask(complete);
+    else setTimeout(complete, outcome.delayMs);
     return child;
   };
   const processKillImpl = (groupPid, signal) => {
     const call = calls.find(({ child }) => -child.pid === groupPid);
     if (!call) throw new Error("unknown fake process group");
+    if (signal === 0) {
+      call.groupProbes.push(groupPid);
+      if (!call.groupAlive) throw Object.assign(new Error("no such process group"), { code: "ESRCH" });
+      return true;
+    }
     call.groupSignals.push({ groupPid, signal });
     call.child.signals.push(signal);
     const outcome = outcomes[calls.indexOf(call)] ?? {};
+    if (!call.groupAlive) throw Object.assign(new Error("no such process group"), { code: "ESRCH" });
     if (outcome.killThrows?.includes(signal)) throw new Error("raw group kill failure");
-    if (outcome.closeOnSignal === signal) queueMicrotask(() => call.child.emit("close", null, signal));
+    if (outcome.groupGoneOnSignal === signal) call.groupAlive = false;
+    if (outcome.closeOnSignal === signal) {
+      if (outcome.groupSurvivesLeaderClose !== true) call.groupAlive = false;
+      queueMicrotask(() => call.child.emit("close", null, signal));
+    }
     return outcome.killReturnsFalse !== true;
   };
   return { calls, processKillImpl, spawnImpl };
@@ -502,6 +518,109 @@ test("the default probe adapter times out with TERM then KILL and fails closed",
     { groupPid: -fake.calls[0].child.pid, signal: "SIGTERM" },
     { groupPid: -fake.calls[0].child.pid, signal: "SIGKILL" },
   ]);
+});
+
+test("doctor has its own timeout while sandbox probes keep the shorter timeout", async (context) => {
+  const paths = await createDefaultProbeFixture(context, "codex-doctor-timeout-test-");
+  const fake = createProbeSpawn([
+    { code: 0 },
+    { code: 1 },
+    { code: 1 },
+    { code: 0, stdout: "200" },
+    { code: 0, stdout: doctorOutput(), delayMs: 10 },
+  ]);
+
+  assert.deepEqual(await isolation.probeCodexIsolation({
+    ...paths,
+    spawnImpl: fake.spawnImpl,
+    processKillImpl: fake.processKillImpl,
+    probeTimeoutMs: 5,
+    probeTotalTimeoutMs: 100,
+    probeKillGraceMs: 1,
+  }), COMPLETE_REPORT);
+  assert.deepEqual(fake.calls[4].groupSignals, []);
+});
+
+test("doctor timeout and total probe timeout both terminate the process group", async (context) => {
+  const paths = await createDefaultProbeFixture(context, "codex-doctor-deadline-test-");
+  for (const options of [
+    { probeDoctorTimeoutMs: 5, probeTotalTimeoutMs: 100 },
+    { probeDoctorTimeoutMs: 50, probeTotalTimeoutMs: 20 },
+  ]) {
+    const fake = createProbeSpawn([
+      { code: 0 },
+      { code: 1 },
+      { code: 1 },
+      { code: 0, stdout: "200" },
+      { code: 0, stdout: doctorOutput(), delayMs: 30, groupGoneOnSignal: "SIGKILL" },
+    ]);
+    await assert.rejects(isolation.probeCodexIsolation({
+      ...paths,
+      ...options,
+      spawnImpl: fake.spawnImpl,
+      processKillImpl: fake.processKillImpl,
+      probeTimeoutMs: 5,
+      probeKillGraceMs: 1,
+    }), { code: "CODEX_ISOLATION_UNAVAILABLE" });
+    assert.deepEqual(fake.calls[4].child.signals, ["SIGTERM", "SIGKILL"]);
+  }
+});
+
+test("doctor timeout option rejects non-positive, fractional and non-numeric values", async (context) => {
+  const paths = await createDefaultProbeFixture(context, "codex-doctor-option-test-");
+  for (const probeDoctorTimeoutMs of [0, -1, 1.5, "15", Number.NaN]) {
+    const fake = createProbeSpawn([]);
+    await assert.rejects(isolation.probeCodexIsolation({
+      ...paths,
+      spawnImpl: fake.spawnImpl,
+      processKillImpl: fake.processKillImpl,
+      probeDoctorTimeoutMs,
+    }), { code: "CODEX_ISOLATION_UNAVAILABLE" });
+    assert.equal(fake.calls.length, 0);
+  }
+});
+
+test("probe teardown kills descendants after leader close and confirms the process group is gone", async (context) => {
+  const paths = await createDefaultProbeFixture(context, "codex-probe-group-clean-test-");
+  const fake = createProbeSpawn([{
+    hang: true,
+    closeOnSignal: "SIGTERM",
+    groupSurvivesLeaderClose: true,
+    groupGoneOnSignal: "SIGKILL",
+  }]);
+
+  await assert.rejects(isolation.probeCodexIsolation({
+    ...paths,
+    spawnImpl: fake.spawnImpl,
+    processKillImpl: fake.processKillImpl,
+    probeTimeoutMs: 5,
+    probeKillGraceMs: 1,
+  }), (error) => {
+    assert.equal(error.code, "CODEX_ISOLATION_UNAVAILABLE");
+    assert.notEqual(error.processTreeUnconfirmed, true);
+    return true;
+  });
+  assert.deepEqual(fake.calls[0].child.signals, ["SIGTERM", "SIGKILL"]);
+  assert.ok(fake.calls[0].groupProbes.length >= 1);
+});
+
+test("probe teardown marks a process group that remains alive as unconfirmed", async (context) => {
+  const paths = await createDefaultProbeFixture(context, "codex-probe-group-live-test-");
+  const fake = createProbeSpawn([{ hang: true, closeOnSignal: "SIGTERM", groupSurvivesLeaderClose: true }]);
+
+  await assert.rejects(isolation.probeCodexIsolation({
+    ...paths,
+    spawnImpl: fake.spawnImpl,
+    processKillImpl: fake.processKillImpl,
+    probeTimeoutMs: 5,
+    probeKillGraceMs: 1,
+  }), (error) => {
+    assert.equal(error.code, "CODEX_ISOLATION_UNAVAILABLE");
+    assert.equal(error.processTreeUnconfirmed, true);
+    return true;
+  });
+  assert.deepEqual(fake.calls[0].child.signals, ["SIGTERM", "SIGKILL"]);
+  assert.ok(fake.calls[0].groupProbes.length >= 1);
 });
 
 test("the isolation probe rejects canonical probe paths that cross a boundary through symlinks", async (context) => {

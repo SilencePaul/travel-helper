@@ -578,6 +578,8 @@ export function createCodexRunner(options) {
       const stderrDecoder = new StringDecoder("utf8");
       let settled = false;
       let terminationError;
+      let processGroupId;
+      let leaderExited = false;
       let killTimer;
       let timeoutTimer;
       let teardownTimer;
@@ -595,21 +597,44 @@ export function createCodexRunner(options) {
       };
       const signal = (name) => {
         try {
-          if (!Number.isSafeInteger(child.pid) || child.pid <= 0) throw new Error("invalid child pid");
-          processKillImpl(-child.pid, name);
+          if (!Number.isSafeInteger(processGroupId) || processGroupId >= 0) throw new Error("invalid process group");
+          processKillImpl(processGroupId, name);
         } catch {
           // The final teardown deadline still bounds a child that rejects a signal.
+        }
+      };
+      const processGroupGone = () => {
+        try {
+          if (!Number.isSafeInteger(processGroupId) || processGroupId >= 0) return false;
+          processKillImpl(processGroupId, 0);
+          return false;
+        } catch (error) {
+          return error?.code === "ESRCH";
         }
       };
       const terminate = (error) => {
         if (terminationError || settled) return;
         terminationError = error;
         signal("SIGTERM");
-        killTimer = setTimeout(() => signal("SIGKILL"), killGraceMs);
-        teardownTimer = setTimeout(() => {
-          poisoned = true;
-          finish(error);
-        }, killGraceMs + teardownTimeoutMs);
+        killTimer = setTimeout(() => {
+          signal("SIGKILL");
+          const teardownDeadline = performance.now() + teardownTimeoutMs;
+          const confirmGroupGone = () => {
+            const groupGone = processGroupGone();
+            if (leaderExited && groupGone) {
+              finish(error);
+              return;
+            }
+            const remainingMs = teardownDeadline - performance.now();
+            if (remainingMs <= 0) {
+              poisoned = true;
+              finish(error);
+              return;
+            }
+            teardownTimer = setTimeout(confirmGroupGone, Math.max(1, Math.min(10, Math.ceil(remainingMs))));
+          };
+          confirmGroupGone();
+        }, killGraceMs);
       };
       const collectStdout = (chunk) => {
         if (terminationError) return;
@@ -642,6 +667,7 @@ export function createCodexRunner(options) {
 
       try {
         child = spawnImpl(codexPath, args, { shell: false, detached: true, cwd: isolatedDir, env: environment });
+        processGroupId = Number.isSafeInteger(child.pid) && child.pid > 0 ? -child.pid : undefined;
       } catch (error) {
         finish(codedError(error?.code === "ENOENT" ? "CODEX_NOT_AVAILABLE" : "CODEX_RESEARCH_FAILED"));
         return;
@@ -659,7 +685,7 @@ export function createCodexRunner(options) {
       });
       child.on("close", (code) => {
         if (terminationError) {
-          finish(terminationError);
+          leaderExited = true;
           return;
         }
         stdout += stdoutDecoder.end();
