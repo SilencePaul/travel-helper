@@ -16,8 +16,10 @@ import {
 } from "@travel/contracts";
 import {
   LocalAgentBridgeError,
+  type ExecuteTravelResearchInput,
   type LocalAgentBridge,
   type PreparedAgentRun,
+  type ResumeTravelResearchInput,
 } from "../../infrastructure/localAgentBridgeClient";
 import { DecisionResearchDisclosure } from "./DecisionResearchDisclosure";
 
@@ -34,7 +36,13 @@ type Operation = "idle" | "restoring" | "preparing" | "starting" | "resuming" | 
 type CreateAgentRunCommand = Extract<DecisionCommand, { action: "createAgentRun" }>;
 type AttemptStage = "create" | "claim" | "execute" | "resume";
 type PendingCloudStage = "create" | "claimed" | "bridgeOperationStarted";
-type PendingBridgeOperation = "execute" | "resume";
+type PendingBridgeRequest =
+  | { operation: "execute"; input: ExecuteTravelResearchInput }
+  | { operation: "resume"; input: ResumeTravelResearchInput };
+type PendingBridgeReplay =
+  | { kind: "attached"; status: ResearchStatus }
+  | { kind: "definitive" }
+  | { kind: "uncertain" };
 type PendingAttemptSettlement =
   | { kind: "attached"; status: ResearchStatus }
   | { kind: "cleaned"; status?: ResearchStatus }
@@ -62,8 +70,7 @@ type PendingCloudAttempt = {
   createPromise?: Promise<string>;
   reconcilePromise?: Promise<boolean>;
   settlementPromise?: Promise<PendingAttemptSettlement>;
-  bridgeOperation?: PendingBridgeOperation;
-  operationBaseline?: ResearchStatusBaseline;
+  bridgeRequest?: PendingBridgeRequest;
   createDefinitivelyFailed?: boolean;
 };
 type AttachedCloudRun = {
@@ -73,7 +80,6 @@ type AttachedCloudRun = {
   revokeIdempotencyKey: string;
   reconcilePromise?: Promise<boolean>;
 };
-type ResearchStatusBaseline = { status: ResearchStatus; snapshot: string };
 type LifecycleContext = { tripSafetyKey: string; bridge?: LocalAgentBridge };
 type TripCleanupTransition = {
   lifecycle: number;
@@ -139,35 +145,6 @@ function statusPhaseLabel(status: ResearchStatus): string {
     case "superseded": return "内容已更新";
     case "needs_owner_action": return "等待设备管理员处理";
   }
-}
-
-function researchStatusSnapshot(status: ResearchStatus): string {
-  return JSON.stringify(Object.entries(status).sort(([left], [right]) => left === right ? 0 : left < right ? -1 : 1));
-}
-
-function captureResearchStatus(status: ResearchStatus): ResearchStatusBaseline {
-  return { status: { ...status } as ResearchStatus, snapshot: researchStatusSnapshot(status) };
-}
-
-function hasVerifiedResearchProgress(
-  baseline: ResearchStatusBaseline | undefined,
-  next: ResearchStatus,
-  stage: AttemptStage,
-  expectedResearchTaskId?: string,
-): boolean {
-  if (!baseline || next.phase === "idle" || researchStatusSnapshot(next) === baseline.snapshot) return false;
-  if (stage === "resume" && next.researchTaskId !== expectedResearchTaskId) return false;
-  if (baseline.status.phase === "idle") return stage === "execute";
-  if (stage === "execute" && next.researchTaskId !== baseline.status.researchTaskId) return true;
-  if (next.researchTaskId !== baseline.status.researchTaskId) return false;
-  if (next.phase !== baseline.status.phase) return true;
-  if (next.phase === "needs_owner_action" && baseline.status.phase === "needs_owner_action") {
-    return next.blockedReason !== baseline.status.blockedReason
-      || ("blockedHostname" in next ? next.blockedHostname : undefined)
-        !== ("blockedHostname" in baseline.status ? baseline.status.blockedHostname : undefined);
-  }
-  if (next.phase === "failed" && baseline.status.phase === "failed") return next.errorCode !== baseline.status.errorCode;
-  return false;
 }
 
 async function runBoundedCleanupCall<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
@@ -361,33 +338,50 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
     }
   }, [clearPendingAttempt, ensureCloudRun]);
 
+  const replayPendingBridgeOperation = useCallback(async (
+    attempt: PendingCloudAttempt,
+    signal: AbortSignal,
+  ): Promise<PendingBridgeReplay> => {
+    const request = attempt.bridgeRequest;
+    if (!request) return { kind: "definitive" };
+    try {
+      const next = request.operation === "execute"
+        ? await attempt.bridge.executeTravelResearch(request.input, { signal })
+        : await attempt.bridge.resumeTravelResearch(request.input, { signal });
+      if (next.phase === "idle"
+        || (request.operation === "resume" && next.researchTaskId !== request.input.researchTaskId)) {
+        return { kind: "uncertain" };
+      }
+      return { kind: "attached", status: next };
+    } catch (error) {
+      return error instanceof LocalAgentBridgeError && error.code !== "BRIDGE_UNAVAILABLE"
+        ? { kind: "definitive" }
+        : { kind: "uncertain" };
+    }
+  }, []);
+
   const settlePendingAttempt = useCallback(async (attempt: PendingCloudAttempt): Promise<PendingAttemptSettlement> => {
     if (attempt.settlementPromise) return attempt.settlementPromise;
     attempt.settlementPromise = (async () => {
-      let observedStatus: ResearchStatus | undefined;
       if (attempt.stage === "bridgeOperationStarted") {
+        let replay: PendingBridgeReplay;
         try {
-          observedStatus = await readResearchStatusForCleanup(attempt.bridge);
+          replay = await runBoundedCleanupCall((signal) => replayPendingBridgeOperation(attempt, signal));
         } catch {
           return { kind: "uncertain" };
         }
-        const bridgeStage = attempt.bridgeOperation;
-        if (bridgeStage && hasVerifiedResearchProgress(
-          attempt.operationBaseline,
-          observedStatus,
-          bridgeStage,
-          bridgeStage === "resume" ? attempt.researchTaskId : undefined,
-        )) {
+        if (replay.kind === "attached") {
           clearPendingAttempt(attempt);
-          return { kind: "attached", status: observedStatus };
+          return replay;
         }
+        if (replay.kind === "uncertain") return replay;
       }
       try {
         return await reconcileCloudAttempt(attempt)
-          ? { kind: "cleaned", status: observedStatus }
-          : { kind: "uncertain", status: observedStatus };
+          ? { kind: "cleaned" }
+          : { kind: "uncertain" };
       } catch {
-        return { kind: "uncertain", status: observedStatus };
+        return { kind: "uncertain" };
       }
     })();
     try {
@@ -395,7 +389,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
     } finally {
       attempt.settlementPromise = undefined;
     }
-  }, [clearPendingAttempt, reconcileCloudAttempt]);
+  }, [clearPendingAttempt, reconcileCloudAttempt, replayPendingBridgeOperation]);
 
   const settlePendingAfterLifecycle = useCallback((attempt: PendingCloudAttempt) => {
     globalThis.queueMicrotask(() => {
@@ -511,25 +505,28 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
 
   const reconcileAfterBridgeFailure = useCallback(async (
     attempt: PendingCloudAttempt,
-    stage: AttemptStage,
     signal: AbortSignal,
-    expectedResearchTaskId?: string,
   ): Promise<BridgeFailureReconciliation> => {
+    if (attempt.stage === "bridgeOperationStarted") {
+      const replay = await replayPendingBridgeOperation(attempt, signal);
+      if (replay.kind === "attached") return { kind: "restored", status: replay.status };
+      if (replay.kind === "uncertain") return replay;
+      try {
+        return await reconcileCloudAttempt(attempt) ? { kind: "cleaned" } : { kind: "uncertain" };
+      } catch {
+        return { kind: "uncertain" };
+      }
+    }
     let status: ResearchStatus | undefined;
     try {
       status = await attempt.bridge.getResearchStatus({ signal });
-    } catch {
-      if (attempt.stage === "bridgeOperationStarted") return { kind: "uncertain" };
-    }
-    if (status && hasVerifiedResearchProgress(attempt.operationBaseline, status, stage, expectedResearchTaskId)) {
-      return { kind: "restored", status };
-    }
+    } catch { /* Claim reconciliation still proceeds through the public run. */ }
     try {
       return await reconcileCloudAttempt(attempt) ? { kind: "cleaned", status } : { kind: "uncertain", status };
     } catch {
       return { kind: "uncertain", status };
     }
-  }, [reconcileCloudAttempt]);
+  }, [reconcileCloudAttempt, replayPendingBridgeOperation]);
 
   const cleanupAfterDefinitiveBridgeFailure = useCallback(async (
     attempt: PendingCloudAttempt,
@@ -1032,26 +1029,25 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
         return;
       }
       stage = "execute";
-      attempt = {
-        ...attempt,
-        stage: "bridgeOperationStarted",
-        bridgeOperation: "execute",
-        operationBaseline: lastBridgeObservedStatusRef.current
-          ? captureResearchStatus(lastBridgeObservedStatusRef.current)
-          : undefined,
-      };
-      pendingAttemptRef.current = attempt;
-      taskFingerprintRef.current = disclosureFingerprint;
-      const next = await attempt.bridge.executeTravelResearch({
+      const executeInput: ExecuteTravelResearchInput = {
         agentRunId,
         targetCategory: category,
         targetScopeId,
         disclosureFingerprint,
-      }, { signal: controller.signal });
+      };
+      attempt = {
+        ...attempt,
+        stage: "bridgeOperationStarted",
+        bridgeRequest: { operation: "execute", input: executeInput },
+      };
+      pendingAttemptRef.current = attempt;
+      taskFingerprintRef.current = disclosureFingerprint;
+      const next = await attempt.bridge.executeTravelResearch(executeInput, { signal: controller.signal });
       if (!isCurrent(generation, lifecycle)) {
         clearPendingAttempt(attempt);
         return;
       }
+      if (next.phase === "idle") throw new LocalAgentBridgeError("INVALID_BRIDGE_RESPONSE");
       confirmedFingerprintRef.current = undefined;
       setPrepared(undefined);
       setConfirmed(false);
@@ -1087,7 +1083,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       } else {
         const responseUncertain = error instanceof LocalAgentBridgeError && error.code === "BRIDGE_UNAVAILABLE";
         const outcome = responseUncertain
-          ? await reconcileAfterBridgeFailure(attempt, stage, controller.signal)
+          ? await reconcileAfterBridgeFailure(attempt, controller.signal)
           : await cleanupAfterDefinitiveBridgeFailure(attempt);
         if (!isCurrent(generation, lifecycle)) return;
         if (outcome.kind === "restored") {
@@ -1182,16 +1178,18 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
         return;
       }
       stage = "resume";
+      const resumeInput: ResumeTravelResearchInput = {
+        agentRunId,
+        researchTaskId: blocked.researchTaskId,
+        resumeAction,
+      };
       attempt = {
         ...attempt,
         stage: "bridgeOperationStarted",
-        bridgeOperation: "resume",
-        operationBaseline: lastBridgeObservedStatusRef.current
-          ? captureResearchStatus(lastBridgeObservedStatusRef.current)
-          : undefined,
+        bridgeRequest: { operation: "resume", input: resumeInput },
       };
       pendingAttemptRef.current = attempt;
-      const next = await attempt.bridge.resumeTravelResearch({ agentRunId, researchTaskId: blocked.researchTaskId, resumeAction }, { signal: controller.signal });
+      const next = await attempt.bridge.resumeTravelResearch(resumeInput, { signal: controller.signal });
       if (!isCurrent(generation, lifecycle)) {
         clearPendingAttempt(attempt);
         return;
@@ -1230,7 +1228,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       } else {
         const responseUncertain = error instanceof LocalAgentBridgeError && error.code === "BRIDGE_UNAVAILABLE";
         const outcome = responseUncertain
-          ? await reconcileAfterBridgeFailure(attempt, stage, controller.signal, blocked.researchTaskId)
+          ? await reconcileAfterBridgeFailure(attempt, controller.signal)
           : await cleanupAfterDefinitiveBridgeFailure(attempt);
         if (!isCurrent(generation, lifecycle)) return;
         if (outcome.kind === "restored") {

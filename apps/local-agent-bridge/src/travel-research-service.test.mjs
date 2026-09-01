@@ -197,6 +197,7 @@ function fakeStore(events, initialState, options = {}) {
     async persistNeedsOwnerAction(value, notifier) {
       events.push("store.persistNeedsOwnerAction");
       state = structuredClone(value);
+      options.onPersistStarted?.();
       if (options.persistGate) await options.persistGate;
       await notifier?.notifyOwnerAction("transition-key");
       return structuredClone(state);
@@ -223,6 +224,11 @@ function fakeTransport(events, context, options = {}) {
       return { agentRunId, status: "claimed" };
     },
     get claimedRun() { return claimed && { ...claimed }; },
+    releaseUnboundClaim(agentRunId) {
+      if (claimed?.agentRunId !== agentRunId) return false;
+      claimed = undefined;
+      return true;
+    },
     async getDecisionContext() {
       events.push("transport.getDecisionContext");
       contextAttempts += 1;
@@ -463,13 +469,14 @@ test("an existing blocked recovery prevents execute from replacing it or creatin
   harness.service.prepare();
   await harness.service.claim(request.agentRunId);
 
-  const status = await harness.service.executeTravelResearch(request);
+  await assert.rejects(harness.service.executeTravelResearch(request), { code: "CODEX_RESEARCH_FAILED" });
 
-  assert.equal(status.phase, "needs_owner_action");
-  assert.equal(status.researchTaskId, initialState.researchTaskId);
+  assert.equal((await harness.service.getResearchStatus()).researchTaskId, initialState.researchTaskId);
   assert.equal(harness.runner.createCount, 0);
   assert.equal(harness.events.includes("transport.getDecisionContext"), false);
   assert.deepEqual(harness.store.state, initialState);
+  assert.equal(harness.transport.claimedRun, undefined);
+  assert.doesNotThrow(() => harness.service.prepare());
 });
 
 test("execute fails closed when recovery state cannot be loaded", async () => {
@@ -1013,6 +1020,24 @@ test("concurrent execute calls for the same AgentRun share one runner and one ta
   assert.equal(harness.transport.submittedPayloads.length, 1);
 });
 
+test("a settled execute replay returns the same task without another runner or submit", async () => {
+  const harness = createHarness({ scripts: [{
+    codexThreadId: "codex-thread-settled-execute",
+    output: completedOutput(),
+    activeDurationMs: 5_000,
+  }] });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+
+  const first = await harness.service.executeTravelResearch(request);
+  const replay = await harness.service.executeTravelResearch(structuredClone(request));
+
+  assert.deepEqual(replay, first);
+  assert.equal(harness.runner.createCount, 1);
+  assert.equal(harness.transport.submittedPayloads.length, 1);
+});
+
 test("a different execute operation is rejected while research is in flight", async () => {
   let release;
   const waiting = new Promise((resolve) => { release = resolve; });
@@ -1033,11 +1058,78 @@ test("a different execute operation is rejected while research is in flight", as
   await assert.rejects(harness.service.executeTravelResearch({
     ...request,
     targetCategory: "restaurant",
-  }), { code: "BRIDGE_BUSY" });
+  }), { code: "CODEX_RESEARCH_FAILED" });
+  assert.equal(harness.transport.claimedRun.agentRunId, request.agentRunId);
   release();
 
   assert.equal((await first).phase, "completed");
   assert.equal(harness.runner.createCount, 1);
+});
+
+test("a different execute operation releases its newly claimed unbound runtime capability", async () => {
+  let releasePersist;
+  let persistStarted;
+  const persistGate = new Promise((resolve) => { releasePersist = resolve; });
+  const observedPersist = new Promise((resolve) => { persistStarted = resolve; });
+  const actions = [];
+  const harness = createHarness({
+    scripts: [{
+      codexThreadId: "thread-old-execute",
+      output: ownerAction(),
+      activeDurationMs: 5_000,
+    }],
+    storeOptions: { persistGate, onPersistStarted: persistStarted },
+    transportFactory(_events, runtimeClock) {
+      return new LocalAgentBridgeRuntime({
+        agentEndpoint: "https://api.public.org/api/agent",
+        now: runtimeClock,
+        fetch: async (_url, init) => {
+          const body = JSON.parse(init.body);
+          actions.push(body.action);
+          if (body.action === "claimAgentRun") {
+            return Response.json({ ok: true, data: {
+              agentRunId: body.agentRunId,
+              claimedAt: "2026-09-01T00:00:00.000Z",
+              expiresAt: "2026-09-01T00:15:00.000Z",
+              nextSequence: 1,
+            } });
+          }
+          if (body.action === "getDecisionContext") {
+            return Response.json({ ok: true, action: body.action, data: contextFixture() });
+          }
+          assert.equal(body.action, "revokeAgentRunSelf");
+          return Response.json({ ok: true, action: body.action, data: {
+            agentRunId: body.agentRunId,
+            revokedAt: "2026-09-01T00:01:00.000Z",
+          } });
+        },
+      });
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+  const first = harness.service.executeTravelResearch(request);
+  await observedPersist;
+  harness.service.prepare();
+  await harness.service.claim("agent-run-new-execute");
+
+  await assert.rejects(harness.service.executeTravelResearch({
+    ...request,
+    agentRunId: "agent-run-new-execute",
+    targetCategory: "restaurant",
+  }), { code: "CODEX_RESEARCH_FAILED" });
+
+  assert.equal(harness.transport.claimedRun, undefined);
+  assert.doesNotThrow(() => harness.service.prepare());
+  releasePersist();
+  assert.equal((await first).phase, "needs_owner_action");
+  assert.deepEqual(actions, [
+    "claimAgentRun",
+    "getDecisionContext",
+    "revokeAgentRunSelf",
+    "claimAgentRun",
+  ]);
 });
 
 test("concurrent resume reuses only the identical operation and rejects a different task", async () => {
@@ -1084,11 +1176,134 @@ test("concurrent resume reuses only the identical operation and rejects a differ
   await assert.rejects(harness.service.resumeTravelResearch({
     ...input,
     researchTaskId: "different-task",
-  }), { code: "BRIDGE_BUSY" });
+  }), { code: "CODEX_RESEARCH_FAILED" });
+  assert.equal(harness.transport.claimedRun.agentRunId, input.agentRunId);
   release();
 
   assert.equal((await first).phase, "completed");
   assert.equal(harness.runner.createCount, 1);
+});
+
+test("a settled resume replay returns the same task without another runner", async () => {
+  const request = await targetRequest();
+  const recovered = {
+    researchTaskId: "research-task-settled-resume",
+    codexThreadId: "thread-settled-resume",
+    targetCategory: "hotel",
+    targetScopeId: request.targetScopeId,
+    disclosureFingerprint: request.disclosureFingerprint,
+    aliasSalt: "alias-salt-settled-resume",
+    blockedReason: "codex_auth_required",
+    blockedHostname: null,
+    activeRuntimeMs: 12_000,
+    phase: "needs_owner_action",
+    startedAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:01:00.000Z",
+  };
+  const harness = createHarness({
+    initialState: recovered,
+    scripts: [{ codexThreadId: recovered.codexThreadId, output: completedOutput(), activeDurationMs: 13_000 }],
+  });
+  harness.service.prepare();
+  await harness.service.claim("agent-run-settled-resume");
+  const input = {
+    agentRunId: "agent-run-settled-resume",
+    researchTaskId: recovered.researchTaskId,
+    resumeAction: "retry_codex_auth",
+  };
+
+  const first = await harness.service.resumeTravelResearch(input);
+  const replay = await harness.service.resumeTravelResearch(structuredClone(input));
+
+  assert.deepEqual(replay, first);
+  assert.equal(harness.runner.createCount, 1);
+  assert.equal(harness.runner.resumeInputs.length, 1);
+});
+
+test("a different resume operation releases its newly claimed unbound runtime capability", async () => {
+  const request = await targetRequest();
+  const recovered = {
+    researchTaskId: "research-task-old-resume",
+    codexThreadId: "thread-old-resume",
+    targetCategory: "hotel",
+    targetScopeId: request.targetScopeId,
+    disclosureFingerprint: request.disclosureFingerprint,
+    aliasSalt: "alias-salt-old-resume",
+    blockedReason: "codex_auth_required",
+    blockedHostname: null,
+    activeRuntimeMs: 12_000,
+    phase: "needs_owner_action",
+    startedAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:01:00.000Z",
+  };
+  let releasePersist;
+  let persistStarted;
+  const persistGate = new Promise((resolve) => { releasePersist = resolve; });
+  const observedPersist = new Promise((resolve) => { persistStarted = resolve; });
+  const actions = [];
+  const harness = createHarness({
+    initialState: recovered,
+    scripts: [{
+      codexThreadId: recovered.codexThreadId,
+      output: ownerAction(),
+      activeDurationMs: 13_000,
+    }],
+    storeOptions: { persistGate, onPersistStarted: persistStarted },
+    transportFactory(_events, runtimeClock) {
+      return new LocalAgentBridgeRuntime({
+        agentEndpoint: "https://api.public.org/api/agent",
+        now: runtimeClock,
+        fetch: async (_url, init) => {
+          const body = JSON.parse(init.body);
+          actions.push(body.action);
+          if (body.action === "claimAgentRun") {
+            return Response.json({ ok: true, data: {
+              agentRunId: body.agentRunId,
+              claimedAt: "2026-09-01T00:00:00.000Z",
+              expiresAt: "2026-09-01T00:15:00.000Z",
+              nextSequence: 1,
+            } });
+          }
+          if (body.action === "getDecisionContext") {
+            return Response.json({ ok: true, action: body.action, data: contextFixture() });
+          }
+          assert.equal(body.action, "revokeAgentRunSelf");
+          return Response.json({ ok: true, action: body.action, data: {
+            agentRunId: body.agentRunId,
+            revokedAt: "2026-09-01T00:01:00.000Z",
+          } });
+        },
+      });
+    },
+  });
+  assert.equal((await harness.service.getResearchStatus()).phase, "needs_owner_action");
+  harness.service.prepare();
+  await harness.service.claim("agent-run-old-resume");
+  const first = harness.service.resumeTravelResearch({
+    agentRunId: "agent-run-old-resume",
+    researchTaskId: recovered.researchTaskId,
+    resumeAction: "retry_codex_auth",
+  });
+  await observedPersist;
+  harness.service.prepare();
+  await harness.service.claim("agent-run-new-resume");
+
+  await assert.rejects(harness.service.resumeTravelResearch({
+    agentRunId: "agent-run-new-resume",
+    researchTaskId: "different-task",
+    resumeAction: "retry_codex_auth",
+  }), { code: "CODEX_RESEARCH_FAILED" });
+
+  assert.equal(harness.transport.claimedRun, undefined);
+  assert.doesNotThrow(() => harness.service.prepare());
+  releasePersist();
+  assert.equal((await first).phase, "needs_owner_action");
+  assert.deepEqual(actions, [
+    "claimAgentRun",
+    "getDecisionContext",
+    "revokeAgentRunSelf",
+    "claimAgentRun",
+  ]);
 });
 
 test("changed disclosure revokes the run and never creates a Codex task", async () => {

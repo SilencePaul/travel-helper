@@ -123,6 +123,53 @@ test("prepare always constrains caller input to submitProposalBatch", async () =
   assert.deepEqual(actions, ["claimAgentRun", "submitProposalBatch"]);
 });
 
+test("releaseUnboundClaim clears only the exactly matching idle local capability without a cloud command", async () => {
+  const actions = [];
+  const runtime = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.example.test/api/agent",
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      actions.push(body.action);
+      return Response.json({ ok: true, data: claimedData(body.agentRunId) });
+    },
+  });
+  runtime.prepare();
+  await runtime.claim("agent-run-unbound");
+
+  assert.equal(runtime.releaseUnboundClaim("agent-run-other"), false);
+  assert.equal(runtime.claimedRun?.agentRunId, "agent-run-unbound");
+  assert.throws(() => runtime.prepare(), /BRIDGE_BUSY/);
+  assert.equal(runtime.releaseUnboundClaim("agent-run-unbound"), true);
+
+  assert.equal(runtime.claimedRun, undefined);
+  assert.doesNotThrow(() => runtime.prepare());
+  assert.deepEqual(actions, ["claimAgentRun"]);
+});
+
+test("releaseUnboundClaim refuses to clear a matching capability while runtime is busy", async () => {
+  let releaseContext;
+  const contextGate = new Promise((resolve) => { releaseContext = resolve; });
+  const runtime = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.example.test/api/agent",
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.action === "claimAgentRun") {
+        return Response.json({ ok: true, data: claimedData(body.agentRunId) });
+      }
+      await contextGate;
+      return Response.json({ ok: true, action: body.action, data: { tripId: "trip-1" } });
+    },
+  });
+  runtime.prepare();
+  await runtime.claim("agent-run-busy-unbound");
+  const context = runtime.getDecisionContext();
+
+  assert.equal(runtime.releaseUnboundClaim("agent-run-busy-unbound"), false);
+  assert.equal(runtime.claimedRun?.agentRunId, "agent-run-busy-unbound");
+  releaseContext();
+  await context;
+});
+
 test("submitProposalBatch is a fixed runtime wrapper and uncertain retries reuse the pending envelope", async () => {
   const bodies = [];
   let attempt = 0;

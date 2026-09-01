@@ -268,6 +268,13 @@ export class LocalAgentBridgeRuntime {
     };
   }
 
+  releaseUnboundClaim(agentRunId) {
+    if (this.#busy || typeof agentRunId !== "string" || !agentRunId
+      || this.#claimed?.agentRunId !== agentRunId) return false;
+    this.#clearCapability();
+    return true;
+  }
+
   #clearCapability() {
     this.#prepared = undefined;
     this.#claimed = undefined;

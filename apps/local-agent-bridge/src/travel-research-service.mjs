@@ -16,6 +16,7 @@ const NON_PUBLIC_HOST_SUFFIXES = [
   "private", "test", "invalid", "example", "onion",
 ];
 const ACTIVE_PHASES = new Set(["researching", "resuming", "validating", "writing", "cancelling"]);
+const TERMINAL_PHASES = new Set(["completed", "failed", "cancelled", "superseded"]);
 const FAILURE_CODES = new Set([
   "CODEX_NOT_AVAILABLE",
   "CODEX_ISOLATION_UNAVAILABLE",
@@ -160,6 +161,7 @@ export class TravelResearchService {
   #session;
   #inflight;
   #operationKey;
+  #operationAgentRunId;
   #restored = false;
   #cancelRequested = false;
   #lastSeenTime;
@@ -170,6 +172,7 @@ export class TravelResearchService {
     const { transport, runner, store, notifier, clock, idGenerator } = dependencies;
     if (!transport || typeof transport.prepare !== "function" || typeof transport.claim !== "function"
       || typeof transport.getDecisionContext !== "function" || typeof transport.revokeSelf !== "function"
+      || typeof transport.releaseUnboundClaim !== "function"
       || (typeof transport.submitProposalBatch !== "function" && typeof transport.command !== "function")
       || !runner || typeof runner.create !== "function"
       || !store || typeof store.load !== "function" || typeof store.clear !== "function"
@@ -346,6 +349,11 @@ export class TravelResearchService {
     return this.#transport.claim(agentRunId);
   }
 
+  #releaseRejectedOperation(agentRunId) {
+    if (agentRunId === this.#operationAgentRunId || agentRunId === this.#task?.agentRunId) return false;
+    return this.#transport.releaseUnboundClaim(agentRunId);
+  }
+
   executeTravelResearch(input) {
     if (!exactKeys(input, ["agentRunId", "targetCategory", "targetScopeId", "disclosureFingerprint"])
       || typeof input.agentRunId !== "string" || input.agentRunId.length === 0
@@ -357,25 +365,39 @@ export class TravelResearchService {
     const key = `execute:${JSON.stringify(input)}`;
     if (this.#inflight) {
       if (this.#operationKey === key) return this.#inflight;
-      return Promise.reject(codedError("BRIDGE_BUSY"));
+      this.#releaseRejectedOperation(input.agentRunId);
+      return Promise.reject(codedError("CODEX_RESEARCH_FAILED"));
+    }
+    if (this.#task?.operationKey === key && this.#task.agentRunId === input.agentRunId
+      && this.#status.phase !== "idle") {
+      return Promise.resolve(safeResearchStatus(this.#status));
+    }
+    if (this.#status.phase !== "idle" && !TERMINAL_PHASES.has(this.#status.phase)) {
+      this.#releaseRejectedOperation(input.agentRunId);
+      return Promise.reject(codedError("CODEX_RESEARCH_FAILED"));
     }
     let operation;
-    operation = this.#execute(input).finally(() => {
+    operation = this.#execute(input, key).finally(() => {
       if (this.#inflight === operation) {
         this.#inflight = undefined;
         this.#operationKey = undefined;
+        this.#operationAgentRunId = undefined;
       }
     });
     this.#inflight = operation;
     this.#operationKey = key;
+    this.#operationAgentRunId = input.agentRunId;
     return operation;
   }
 
-  async #execute(input) {
+  async #execute(input, operationKey) {
     let created = false;
     try {
       const existing = await this.getResearchStatus();
-      if (existing.phase === "needs_owner_action") return existing;
+      if (existing.phase !== "idle" && !TERMINAL_PHASES.has(existing.phase)) {
+        this.#transport.releaseUnboundClaim(input.agentRunId);
+        throw codedError("CODEX_RESEARCH_FAILED");
+      }
       const startedAt = this.#now();
       this.#task = {
         researchTaskId: this.#newIdentifier(),
@@ -384,6 +406,7 @@ export class TravelResearchService {
         targetScopeId: input.targetScopeId,
         disclosureFingerprint: input.disclosureFingerprint,
         agentRunId: input.agentRunId,
+        operationKey,
         startedAt,
         activeRuntimeMs: 0,
         runnerRuntimeMs: 0,
@@ -463,21 +486,35 @@ export class TravelResearchService {
     const operationKey = `resume:${JSON.stringify(input)}`;
     if (this.#inflight) {
       if (this.#operationKey === operationKey) return this.#inflight;
-      return Promise.reject(codedError("BRIDGE_BUSY"));
+      this.#releaseRejectedOperation(input.agentRunId);
+      return Promise.reject(codedError("CODEX_RESEARCH_FAILED"));
+    }
+    if (this.#task?.operationKey === operationKey && this.#task.agentRunId === input.agentRunId
+      && this.#status.phase !== "idle") {
+      return Promise.resolve(safeResearchStatus(this.#status));
+    }
+    if (this.#status.phase !== "idle"
+      && (this.#status.phase !== "needs_owner_action"
+        || this.#task?.researchTaskId !== input.researchTaskId
+        || (input.resumeAction === "retry_codex_auth") !== (this.#status.blockedReason === "codex_auth_required"))) {
+      this.#releaseRejectedOperation(input.agentRunId);
+      return Promise.reject(codedError("CODEX_RESEARCH_FAILED"));
     }
     let operation;
-    operation = this.#resume(input).finally(() => {
+    operation = this.#resume(input, operationKey).finally(() => {
       if (this.#inflight === operation) {
         this.#inflight = undefined;
         this.#operationKey = undefined;
+        this.#operationAgentRunId = undefined;
       }
     });
     this.#inflight = operation;
     this.#operationKey = operationKey;
+    this.#operationAgentRunId = input.agentRunId;
     return operation;
   }
 
-  async #resume(input) {
+  async #resume(input, operationKey) {
     let recovered;
     const previousTask = this.#task;
     const previousStatus = this.#status;
@@ -489,6 +526,7 @@ export class TravelResearchService {
       this.#task = {
         researchTaskId: input.researchTaskId,
         agentRunId: input.agentRunId,
+        operationKey,
         agentExpiresAt,
         activeRuntimeMs: 0,
         runnerRuntimeMs: 0,
@@ -514,6 +552,7 @@ export class TravelResearchService {
         runnerRuntimeMs: recovered.activeRuntimeMs,
         serviceRuntimeMs: 0,
         agentRunId: input.agentRunId,
+        operationKey,
         agentExpiresAt,
         startedAt: recovered.startedAt,
       };
