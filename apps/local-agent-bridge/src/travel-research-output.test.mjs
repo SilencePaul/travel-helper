@@ -232,6 +232,32 @@ test("recursively rejects secret keys, token values, HTML, local paths, and over
   assert.throws(() => validateTravelResearchOutput(huge, options()), { message: "CODEX_OUTPUT_INVALID" });
 });
 
+test("rejects generic HTML, XML, SVG, comments, processing instructions, and basic encoded tags", () => {
+  for (const markup of [
+    "<p>paragraph</p>",
+    "<custom-tag data-x=\"1\">value</custom-tag>",
+    "<_private>xml</_private>",
+    "<旅行>不可信</旅行>",
+    "<svg onload=alert(1)>",
+    "</x>",
+    "<!DOCTYPE html>",
+    "<!-- hidden -->",
+    "<?xml version=\"1.0\"?>",
+    "&lt;custom-tag&gt;encoded&lt;/custom-tag&gt;",
+    "&#60;svg onload=alert(1)&#62;",
+    "&#60svg onload=alert(1)&#62",
+    "&#x3c;/x&#x3e;",
+  ]) {
+    const output = completedOutput();
+    output.candidates[0].evidence[0].sourceName = markup;
+    assert.throws(() => validateTravelResearchOutput(output, options()), { message: "CODEX_OUTPUT_INVALID" }, markup);
+  }
+
+  const mathematics = completedOutput();
+  mathematics.candidates[0].recommendation.reason = "价格条件 1 < 2，且 3 > 2";
+  assert.doesNotThrow(() => validateTravelResearchOutput(mathematics, options()));
+});
+
 test("returns only exact safe needs_owner_action branches", () => {
   assert.deepEqual(validateTravelResearchOutput({
     status: "needs_owner_action",

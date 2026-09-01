@@ -9,8 +9,29 @@ import {
 const CATEGORY_SET = new Set(["hotel", "restaurant", "attraction"]);
 const ALIAS_PREFIX = Object.freeze({ preference: "pref_", feedback: "feed_" });
 const MAX_INPUT_BYTES = 256 * 1_024;
+const NON_PUBLIC_HOST_SUFFIXES = [
+  "localhost", "local", "internal", "lan", "home", "home.arpa", "localdomain", "corp", "intranet",
+  "private", "test", "invalid", "example", "onion",
+];
+const SAFE_STRUCTURAL_KEYS = new Set([
+  "category", "segment", "city", "startDate", "endDate", "travelerCount", "travelerNames",
+  "preferences", "answers", "freeText", "mustHave", "mustAvoid", "note", "preferenceRevisionAlias",
+  "summary", "common", "disagreements", "tradeoffs", "status", "feedback", "candidateName", "kind",
+  "reason", "feedbackAlias", "existingCandidates", "entity", "name", "address", "applicability", "dates",
+  "start", "end", "travelers", "recommendation", "evidence", "sourceKind", "sourceName", "sourceUrl",
+  "queryContext", "roomOrTicket", "captureMethod", "facts", "propertyName", "checkInDate", "checkOutDate",
+  "roomTypeOrBed", "availability", "priceAmount", "currency", "priceDisplay", "cancellationPolicy",
+  "openInformation", "priceSnapshot", "ticketType",
+]);
 const LOCAL_PATH_PATTERN = /(?:file:\/\/[^\s"']+|\/(?:Users|home|etc|private|var|tmp)\/[^\s"']+|[A-Za-z]:\\(?:Users|Documents|Windows)\\[^\s"']+)/giu;
-const CREDENTIAL_PATTERN = /(?:\bBearer\s+[A-Za-z0-9._~+\/-]{8,}|\b(?:authorization|cookie|password|passwd|api[_ -]?key|access[_ -]?token|refresh[_ -]?token)\s*[:=]\s*[^\s,;]{4,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:sk|ghp|xox[baprs])[-_][A-Za-z0-9_-]{8,})/giu;
+const URL_PATTERN = /\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'<>\u3001\uff0c\u3002\uff1b]+/gu;
+const NON_HIERARCHICAL_URL_PATTERN = /\b(?:data|javascript|mailto):[^\s"'<>\u3001\uff0c\u3002\uff1b]+/giu;
+const PROTOCOL_RELATIVE_URL_PATTERN = /(?<!:)\/\/[^\s"'<>\u3001\uff0c\u3002\uff1b]+/gu;
+const BARE_IP_PATTERN = /(?:\b\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?(?:\/[^\s"'<>]*)?|\[[0-9A-Fa-f:.]+\](?::\d{1,5})?(?:\/[^\s"'<>]*)?)/gu;
+const BARE_IPV6_PATTERN = /(?<![A-Za-z0-9])(?:[A-Fa-f0-9]{0,4}:){2,7}[A-Fa-f0-9]{0,4}(?![A-Za-z0-9])/gu;
+const BARE_LOCAL_HOST_PATTERN = /\b(?:(?:[a-z0-9-]+\.)*localhost|[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:local|internal|lan|home|home\.arpa|localdomain|corp|intranet|private|test|invalid|example|onion))\.?(?::\d{1,5})?(?:\/[^\s"'<>]*)?(?=$|[\s"'<>\u3001\uff0c\u3002\uff1b;,])/giu;
+const CREDENTIAL_PATTERN = /(?:\bBearer\s+[A-Za-z0-9._~+\/-]{8,}|\b(?:authorization|cookie|password|passwd|api[_ -]?key|access[_ -]?key(?:\s*id)?|secret[_ -]?(?:key|id)|access[_ -]?token|refresh[_ -]?token)\s*[:=]\s*[^\s,;]{4,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:AKID|AKIA|ASIA)[A-Za-z0-9]{12,}|\b(?:sk|ghp|xox[baprs])[-_][A-Za-z0-9_-]{8,})/giu;
+const SENSITIVE_KEY_PATTERN = /(?:credential|password|passwd|authorization|cookie|apikey|accesskey|secretkey|secretid|accesstoken|refreshtoken|privatekey|localpath|filepath|projectpath)/u;
 
 function codedError(code) {
   return Object.assign(new Error(code), { code });
@@ -101,8 +122,43 @@ function sensitiveValues(context) {
   return [...values].sort((left, right) => right.length - left.length);
 }
 
+function normalizedPublicHostname(hostname) {
+  const normalized = hostname.toLowerCase().replace(/\.$/u, "");
+  if (!normalized || normalized.length > 253 || !normalized.includes(".")
+    || normalized.includes(":") || normalized.startsWith("[")
+    || /^\d+(?:\.\d+){3}$/u.test(normalized)
+    || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))+$/u.test(normalized)) {
+    return undefined;
+  }
+  if (NON_PUBLIC_HOST_SUFFIXES.some((suffix) => normalized === suffix || normalized.endsWith(`.${suffix}`))) {
+    return undefined;
+  }
+  return normalized;
+}
+
+function sanitizeUrl(value) {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "https:" || parsed.username !== "" || parsed.password !== "" || value.includes("#")) {
+      return "[REDACTED_URL]";
+    }
+    const hostname = normalizedPublicHostname(parsed.hostname);
+    if (!hostname) return "[REDACTED_URL]";
+    const port = parsed.port === "443" || parsed.port === "" ? "" : `:${parsed.port}`;
+    return `https://${hostname}${port}${parsed.pathname}`;
+  } catch {
+    return "[REDACTED_URL]";
+  }
+}
+
 function sanitizeString(value, privateValues) {
   let sanitized = value
+    .replace(URL_PATTERN, (url) => sanitizeUrl(url))
+    .replace(NON_HIERARCHICAL_URL_PATTERN, "[REDACTED_URL]")
+    .replace(PROTOCOL_RELATIVE_URL_PATTERN, "[REDACTED_URL]")
+    .replace(BARE_IP_PATTERN, "[REDACTED_URL]")
+    .replace(BARE_IPV6_PATTERN, "[REDACTED_URL]")
+    .replace(BARE_LOCAL_HOST_PATTERN, "[REDACTED_URL]")
     .replace(LOCAL_PATH_PATTERN, "[REDACTED_LOCAL_PATH]")
     .replace(CREDENTIAL_PATTERN, "[REDACTED_CREDENTIAL]");
   for (const privateValue of privateValues) {
@@ -111,12 +167,33 @@ function sanitizeString(value, privateValues) {
   return sanitized;
 }
 
+function sanitizeKey(key, privateValues) {
+  const sanitized = sanitizeString(key, privateValues);
+  if (sanitized !== key) {
+    if (SAFE_STRUCTURAL_KEYS.has(key)) throw codedError("CODEX_OUTPUT_INVALID");
+    return sanitized;
+  }
+  if (SAFE_STRUCTURAL_KEYS.has(key)) return key;
+  const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/gu, "");
+  if (SENSITIVE_KEY_PATTERN.test(normalizedKey)) return "[REDACTED_SENSITIVE_KEY]";
+  return key;
+}
+
 function sanitizeUntrusted(value, privateValues) {
   if (typeof value === "string") return sanitizeString(value, privateValues);
   if (value === null || typeof value === "number" || typeof value === "boolean") return value;
   if (Array.isArray(value)) return value.map((entry) => sanitizeUntrusted(entry, privateValues));
   if (!plainObject(value)) throw codedError("CODEX_OUTPUT_INVALID");
-  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, sanitizeUntrusted(entry, privateValues)]));
+  const result = {};
+  for (const [key, entry] of Object.entries(value)) {
+    const sanitizedKey = sanitizeKey(key, privateValues);
+    if (!sanitizedKey || Object.hasOwn(result, sanitizedKey)) throw codedError("CODEX_OUTPUT_INVALID");
+    result[sanitizedKey] = sanitizedKey === "[REDACTED_SENSITIVE_KEY]"
+      || sanitizedKey.includes("[REDACTED_CREDENTIAL]")
+      ? "[REDACTED_CREDENTIAL]"
+      : sanitizeUntrusted(entry, privateValues);
+  }
+  return result;
 }
 
 async function identityDigest(resourceType, id, revision, cryptoProvider) {
@@ -147,10 +224,9 @@ async function aliasPairs(context, targetCategory, aliasSalt, cryptoProvider) {
   return { preferences, feedback };
 }
 
-function nextRound(context, targetCategory) {
+function nextRound(context) {
   let current = 0;
   for (const candidate of context.workspace.candidates) {
-    if (candidate.category !== targetCategory) continue;
     const round = candidate.recommendation?.round;
     if (!Number.isSafeInteger(round) || round < 1) throw codedError("CODEX_OUTPUT_INVALID");
     current = Math.max(current, round);
@@ -217,7 +293,7 @@ export async function buildTravelResearchInput(context, options, cryptoProvider 
     }, privateValues);
     const serialized = canonicalJson(codexInput);
     if (Buffer.byteLength(serialized, "utf8") > MAX_INPUT_BYTES) throw codedError("CODEX_OUTPUT_INVALID");
-    const round = nextRound(context, options.targetCategory);
+    const round = nextRound(context);
     const disclosureFingerprint = await computeDisclosureFingerprint(disclosure, cryptoProvider);
     return Object.freeze({
       codexInput,

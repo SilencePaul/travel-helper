@@ -13,7 +13,7 @@ const NON_PUBLIC_HOST_SUFFIXES = [
 const SENSITIVE_KEY_PATTERN = /(?:credential|password|passwd|token|authorization|cookie|privatekey|agentrun|signature|sequence|idempotency|pairingcode|codexthread|cloudbase|tencent)/u;
 const SENSITIVE_VALUE_PATTERN = /(?:\bBearer\s+[A-Za-z0-9._~+\/-]{4,}|\b(?:authorization|cookie|password|passwd|api[_ -]?key|access[_ -]?token|refresh[_ -]?token)\b|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:sk|ghp|xox[baprs])[-_][A-Za-z0-9_-]{8,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|\b(?:agent\s*run|idempotency|signature|sequence)\b)/iu;
 const LOCAL_PATH_PATTERN = /(?:file:\/\/|\/(?:Users|home|etc|private|var|tmp)\/|[A-Za-z]:\\(?:Users|Documents|Windows)\\)/iu;
-const HTML_PATTERN = /<(?:!doctype|\/?(?:html|body|script|iframe|form|input|a|div|span|img|style))\b[^>]*>/iu;
+const HTML_PATTERN = /<(?:!--[\s\S]*?--|!doctype(?:\s[^<>]*)?|!\[cdata\[[\s\S]*?\]\]|\?[\p{L}_:][^<>]*\?|\/?[\p{L}_:][\p{L}\p{N}:._-]*(?:\s[^<>]*?)?\/?)>/iu;
 
 function codedError(code) {
   return Object.assign(new Error(code), { code });
@@ -195,12 +195,25 @@ function validOwnerActionShape(value) {
     && normalizedPublicHostname(value.sourceHostname) === value.sourceHostname;
 }
 
+function decodeBasicTagEntities(value) {
+  let decoded = value;
+  for (let pass = 0; pass < 2; pass += 1) {
+    decoded = decoded
+      .replace(/&amp;/giu, "&")
+      .replace(/&(?:lt;|#0*60;?|#x0*3c;?)/giu, "<")
+      .replace(/&(?:gt;|#0*62;?|#x0*3e;?)/giu, ">");
+  }
+  return decoded;
+}
+
 function scanForUnsafeContent(value, privateValues = []) {
   let keyCount = 0;
   const seen = new Set();
   function visit(entry) {
     if (typeof entry === "string") {
-      if (SENSITIVE_VALUE_PATTERN.test(entry) || LOCAL_PATH_PATTERN.test(entry) || HTML_PATTERN.test(entry)) {
+      if (SENSITIVE_VALUE_PATTERN.test(entry)
+        || LOCAL_PATH_PATTERN.test(entry)
+        || HTML_PATTERN.test(decodeBasicTagEntities(entry))) {
         throw codedError("CODEX_OUTPUT_INVALID");
       }
       if (privateValues.some((privateValue) => (
