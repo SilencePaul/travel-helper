@@ -1,5 +1,32 @@
 import { z } from "zod";
-import type { Trip } from "./trip";
+
+type DecisionConflictTrip = {
+  id: string;
+  title: string;
+  startDate: string;
+  endDate: string;
+  travelers: Array<{ id: string; name: string }>;
+  days: Array<{
+    id: string;
+    date: string;
+    city: string;
+    itemIds: string[];
+    hotelId?: string | null;
+  }>;
+  unscheduledItemIds: string[];
+  orders: Array<{
+    id: string;
+    name: string;
+    category: "flight" | "hotel" | "transport" | "ticket" | "food";
+    estimated: number;
+    paid: number;
+    currency: string;
+    status: "unpaid" | "partial" | "paid";
+    dayId?: string;
+  }>;
+  memberUids?: string[];
+  version: number;
+};
 
 export const CandidateCategorySchema = z.enum(["hotel", "restaurant", "attraction"]);
 export const SummaryStatusSchema = z.enum(["ready", "outdated"]);
@@ -43,6 +70,11 @@ export const ResearchErrorCodeSchema = z.enum([
   "AGENT_RUN_INACTIVE",
   "AGENT_TRANSPORT_UNAVAILABLE",
   "CODEX_RESEARCH_FAILED",
+]);
+export const ResearchFailureErrorCodeSchema = ResearchErrorCodeSchema.exclude([
+  "CODEX_NOT_AUTHENTICATED",
+  "DISCLOSURE_CONTEXT_CHANGED",
+  "CODEX_RESEARCH_CANCELLED",
 ]);
 
 export const RevisionSchema = z.object({
@@ -260,12 +292,19 @@ const activeResearchStatus = <Phase extends "researching" | "resuming" | "valida
 export const ResearchStatusSchema = z.discriminatedUnion("phase", [
   z.object({ phase: z.literal("idle") }).strict(),
   activeResearchStatus("researching"),
-  z.object({
-    phase: z.literal("needs_owner_action"),
-    ...ResearchTaskStatusBase,
-    blockedReason: ResearchBlockReasonSchema,
-    blockedHostname: z.hostname().optional(),
-  }).strict(),
+  z.discriminatedUnion("blockedReason", [
+    z.object({
+      phase: z.literal("needs_owner_action"),
+      ...ResearchTaskStatusBase,
+      blockedReason: z.literal("codex_auth_required"),
+    }).strict(),
+    z.object({
+      phase: z.literal("needs_owner_action"),
+      ...ResearchTaskStatusBase,
+      blockedReason: z.enum(["source_login_required", "source_captcha", "source_risk_control"]),
+      blockedHostname: z.hostname(),
+    }).strict(),
+  ]),
   activeResearchStatus("resuming"),
   z.object({
     phase: z.literal("superseded"),
@@ -278,7 +317,7 @@ export const ResearchStatusSchema = z.discriminatedUnion("phase", [
   z.object({
     phase: z.literal("failed"),
     ...ResearchTaskStatusBase,
-    errorCode: ResearchErrorCodeSchema,
+    errorCode: ResearchFailureErrorCodeSchema,
   }).strict(),
   activeResearchStatus("cancelling"),
   z.object({
@@ -385,6 +424,7 @@ export type ResearchPhase = z.infer<typeof ResearchPhaseSchema>;
 export type ResearchBlockReason = z.infer<typeof ResearchBlockReasonSchema>;
 export type ResearchResumeAction = z.infer<typeof ResearchResumeActionSchema>;
 export type ResearchErrorCode = z.infer<typeof ResearchErrorCodeSchema>;
+export type ResearchFailureErrorCode = z.infer<typeof ResearchFailureErrorCodeSchema>;
 export type ResearchStatus = z.infer<typeof ResearchStatusSchema>;
 export type PreferenceProfile = z.infer<typeof PreferenceProfileSchema>;
 export type SharedPreferenceSummary = z.infer<typeof SharedPreferenceSummarySchema>;
@@ -424,7 +464,7 @@ export type DecisionCommandFailure = {
     | "AGENT_RUN_EXPIRED" | "AGENT_SCOPE_FORBIDDEN" | "INVALID_AGENT_CLAIM"
     | "INVALID_CONFIRMATION_STATE" | "INVALID_PLACEMENT" | "INVALID_PLACEMENT_STATE"
     | "VERIFICATION_INCOMPLETE" | "CURSOR_EXPIRED";
-  latest?: DecisionResource | AgentRun | { tripVersion: number; trip: Trip };
+  latest?: DecisionResource | AgentRun | { tripVersion: number; trip: DecisionConflictTrip };
 };
 
 export type DecisionCommandResult = DecisionCommandSuccess | DecisionCommandFailure;

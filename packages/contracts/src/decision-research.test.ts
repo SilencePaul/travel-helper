@@ -1,3 +1,11 @@
+/// <reference types="node" />
+
+import { spawnSync } from "node:child_process";
+import { createHash, webcrypto } from "node:crypto";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   buildResearchDisclosure,
@@ -154,20 +162,37 @@ describe("decision research projection", () => {
   it("merges date-contiguous same-city days after deterministic sorting", () => {
     expect(buildResearchTargetScopes(safeTrip)).toEqual([
       {
-        targetScopeId: expect.stringMatching(/^scope_[0-9a-f]{16}$/),
+        targetScopeId: "scope_b64667f2ad33dd723ef9947c9a3531f105ecd42f01d42c7b559e9712e2764e57",
         city: "深圳",
         startDate: "2026-10-03",
         endDate: "2026-10-03",
         travelerCount: 2,
       },
       {
-        targetScopeId: expect.stringMatching(/^scope_[0-9a-f]{16}$/),
+        targetScopeId: expect.stringMatching(/^scope_[0-9a-f]{64}$/),
         city: "香港",
         startDate: "2026-10-04",
         endDate: "2026-10-06",
         travelerCount: 2,
       },
     ]);
+  });
+
+  it("cross-checks the hard-coded scope vector with Node SHA-256 and invalidates changed identities", () => {
+    const canonicalScopeIdentity = '{"days":[{"city":"深圳","date":"2026-10-03","id":"day-sz-1"}],"ordinal":0,"travelerCount":2,"tripVersion":7}';
+    const expected = "b64667f2ad33dd723ef9947c9a3531f105ecd42f01d42c7b559e9712e2764e57";
+    const baseScopeId = buildResearchTargetScopes(safeTrip)[0]?.targetScopeId;
+    const versionScopeId = buildResearchTargetScopes({ ...safeTrip, version: 8 })[0]?.targetScopeId;
+    const identityScopeId = buildResearchTargetScopes({
+      ...safeTrip,
+      days: safeTrip.days.map((day) => day.id === "day-sz-1" ? { ...day, id: "day-sz-replacement" } : day),
+    })[0]?.targetScopeId;
+
+    expect(createHash("sha256").update(canonicalScopeIdentity).digest("hex")).toBe(expected);
+    expect(baseScopeId).toBe(`scope_${expected}`);
+    expect(baseScopeId).not.toContain("day-sz-1");
+    expect(versionScopeId).not.toBe(baseScopeId);
+    expect(identityScopeId).not.toBe(baseScopeId);
   });
 
   it("keeps non-contiguous visits to the same city as separate targets", () => {
@@ -188,7 +213,7 @@ describe("decision research projection", () => {
     expect(new Set(scopes.map((scope) => scope.targetScopeId)).size).toBe(3);
   });
 
-  it("matches the hard-coded SHA-256 vector in both Web Crypto and Node", async () => {
+  it("matches the hard-coded SHA-256 vector through separate Node and browser-shaped providers", async () => {
     const fixedDisclosure = {
       category: "hotel",
       segment: { city: "深圳", startDate: "2026-10-03", endDate: "2026-10-03", travelerCount: 2 },
@@ -200,8 +225,74 @@ describe("decision research projection", () => {
     expect(canonical).toBe(
       '{"category":"hotel","segment":{"city":"深圳","endDate":"2026-10-03","startDate":"2026-10-03","travelerCount":2},"travelerNames":["一鸣","美垚"]}',
     );
-    expect(await computeDisclosureFingerprint(fixedDisclosure)).toBe(expected);
-    expect(await computeDisclosureFingerprint(fixedDisclosure, globalThis.crypto)).toBe(expected);
+    const browserCalls: Array<{ algorithm: string; input: string }> = [];
+    const browserCrypto = {
+      subtle: {
+        async digest(algorithm: AlgorithmIdentifier, data: BufferSource) {
+          const algorithmName = typeof algorithm === "string" ? algorithm : algorithm.name;
+          const bytes = data instanceof ArrayBuffer
+            ? new Uint8Array(data)
+            : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+          browserCalls.push({ algorithm: algorithmName, input: new TextDecoder().decode(bytes) });
+          return Uint8Array.from(createHash("sha256").update(bytes).digest()).buffer;
+        },
+      },
+    };
+
+    expect(await computeDisclosureFingerprint(fixedDisclosure, webcrypto)).toBe(expected);
+    expect(await computeDisclosureFingerprint(fixedDisclosure, browserCrypto)).toBe(expected);
+    expect(browserCalls).toEqual([{ algorithm: "SHA-256", input: canonical }]);
+  });
+
+  it("resolves the declaration subpath for a strict NodeNext consumer without any leakage", () => {
+    const temporary = mkdtempSync(join(tmpdir(), "travel-contracts-nodenext-"));
+    const packageRoot = fileURLToPath(new URL("../", import.meta.url));
+    const packageLink = join(temporary, "node_modules", "@travel", "contracts");
+    mkdirSync(dirname(packageLink), { recursive: true });
+    symlinkSync(packageRoot, packageLink, "dir");
+    writeFileSync(join(temporary, "package.json"), JSON.stringify({ type: "module" }));
+    writeFileSync(join(temporary, "tsconfig.json"), JSON.stringify({
+      compilerOptions: {
+        lib: ["ES2022", "DOM"],
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+        noEmit: true,
+        skipLibCheck: false,
+        strict: true,
+        types: [],
+      },
+      files: ["consumer.ts"],
+    }));
+    writeFileSync(join(temporary, "consumer.ts"), `
+      import { buildResearchTargetScopes, type DecisionResearchContext } from "@travel/contracts/decision-research";
+      type IsAny<Value> = 0 extends (1 & Value) ? true : false;
+      const scopes = buildResearchTargetScopes({
+        version: 1,
+        days: [{ id: "day-1", date: "2026-10-03", city: "深圳" }],
+        travelerNames: ["一鸣"],
+        travelerCount: 1,
+      });
+      const noAny: IsAny<typeof scopes> extends false ? true : never = true;
+      const contextNoAny: IsAny<DecisionResearchContext> extends false ? true : never = true;
+      const context: DecisionResearchContext | undefined = undefined;
+      void noAny;
+      void contextNoAny;
+      void context;
+    `);
+
+    try {
+      const compilation = spawnSync(process.execPath, [
+        join(packageRoot, "node_modules", "typescript", "bin", "tsc"),
+        "-p",
+        temporary,
+      ], {
+        cwd: temporary,
+        encoding: "utf8",
+      });
+      expect(compilation.status, compilation.stderr || compilation.stdout).toBe(0);
+    } finally {
+      rmSync(temporary, { recursive: true, force: true });
+    }
   });
 
   it.each(["hotel", "restaurant", "attraction"] as const)(

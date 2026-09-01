@@ -205,6 +205,74 @@ describe("decision contracts", () => {
     }
   });
 
+  it("requires source hostnames while forbidding them for Codex authentication blockers", () => {
+    const base = {
+      phase: "needs_owner_action",
+      researchTaskId: "research-1",
+      startedAt: "2026-08-28T00:00:00.000Z",
+      updatedAt: "2026-08-28T00:01:00.000Z",
+    };
+
+    expect(ResearchStatusSchema.safeParse({
+      ...base,
+      blockedReason: "codex_auth_required",
+    }).success).toBe(true);
+    expect(ResearchStatusSchema.safeParse({
+      ...base,
+      blockedReason: "codex_auth_required",
+      blockedHostname: "chatgpt.com",
+    }).success).toBe(false);
+    for (const blockedReason of ["source_login_required", "source_captcha", "source_risk_control"] as const) {
+      expect(ResearchStatusSchema.safeParse({ ...base, blockedReason }).success).toBe(false);
+      expect(ResearchStatusSchema.safeParse({
+        ...base,
+        blockedReason,
+        blockedHostname: "tickets.example",
+      }).success).toBe(true);
+      expect(ResearchStatusSchema.safeParse({
+        ...base,
+        blockedReason,
+        blockedHostname: "https://tickets.example/path",
+      }).success).toBe(false);
+    }
+  });
+
+  it("keeps authentication, disclosure changes, and cancellation out of failed status", () => {
+    const failed = {
+      phase: "failed",
+      researchTaskId: "research-1",
+      startedAt: "2026-08-28T00:00:00.000Z",
+      updatedAt: "2026-08-28T00:01:00.000Z",
+    };
+
+    for (const errorCode of [
+      "CODEX_NOT_AUTHENTICATED",
+      "DISCLOSURE_CONTEXT_CHANGED",
+      "CODEX_RESEARCH_CANCELLED",
+    ] as const) {
+      expect(ResearchStatusSchema.safeParse({ ...failed, errorCode }).success).toBe(false);
+    }
+    expect(ResearchStatusSchema.safeParse({
+      ...failed,
+      errorCode: "CODEX_RESEARCH_FAILED",
+    }).success).toBe(true);
+    expect(ResearchStatusSchema.safeParse({
+      ...failed,
+      phase: "needs_owner_action",
+      blockedReason: "codex_auth_required",
+    }).success).toBe(true);
+    expect(ResearchStatusSchema.safeParse({
+      ...failed,
+      phase: "superseded",
+      errorCode: "DISCLOSURE_CONTEXT_CHANGED",
+    }).success).toBe(true);
+    expect(ResearchStatusSchema.safeParse({
+      ...failed,
+      phase: "cancelled",
+      errorCode: "CODEX_RESEARCH_CANCELLED",
+    }).success).toBe(true);
+  });
+
   it("fixes the research error, blockage, and resume vocabularies", () => {
     expect(ResearchPhaseSchema.options).toEqual([
       "idle",

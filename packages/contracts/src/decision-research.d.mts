@@ -1,11 +1,13 @@
-import type { AgentDecisionContext } from "./decision";
+import type { AgentDecisionContext } from "./decision.js";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
 export type ResearchCategory = "hotel" | "restaurant" | "attraction";
 
-export type CryptoLike = Pick<Crypto, "subtle">;
+export interface CryptoLike {
+  readonly subtle: Pick<SubtleCrypto, "digest">;
+}
 
 export interface ResearchTripProjection {
   version: number;
