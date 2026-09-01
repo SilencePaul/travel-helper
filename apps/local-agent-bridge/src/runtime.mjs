@@ -113,6 +113,12 @@ function safeRemoteError(value) {
   return PUBLIC_AGENT_ERRORS.has(value) ? value : "INVALID_AGENT_RESPONSE";
 }
 
+function hasExactOwnKeys(value, keys) {
+  if (!value || typeof value !== "object") return false;
+  const actual = Reflect.ownKeys(value);
+  return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
 export class LocalAgentBridgeRuntime {
   #agentEndpoint;
   #fetch;
@@ -148,8 +154,21 @@ export class LocalAgentBridgeRuntime {
     };
   }
 
+  #clearCapability() {
+    this.#prepared = undefined;
+    this.#claimed = undefined;
+    this.#pendingClaim = undefined;
+    this.#pendingCommand = undefined;
+  }
+
   prepare() {
-    if (this.#busy || this.#pendingClaim || this.#pendingCommand || this.#claimed) throw codedError("BRIDGE_BUSY");
+    if (this.#busy || this.#pendingClaim || this.#pendingCommand) throw codedError("BRIDGE_BUSY");
+    if (this.#claimed) {
+      const expiry = utcDateTimeMilliseconds(this.#claimed.expiresAt);
+      if (!Number.isFinite(expiry)) throw codedError("INVALID_AGENT_RESPONSE");
+      if (expiry > currentTime(this.#now)) throw codedError("BRIDGE_BUSY");
+      this.#clearCapability();
+    }
     if (this.#prepared) return publicMaterial(this.#prepared);
     const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
     const pairingCode = randomBytes(32).toString("base64url");
@@ -237,7 +256,7 @@ export class LocalAgentBridgeRuntime {
     try {
       const pending = this.#pendingClaim;
       const response = await this.#post(pending.body);
-      const responseAt = currentTime(this.#now, true);
+      currentTime(this.#now, true);
       const data = response.data;
       const claimedAt = utcDateTimeMilliseconds(data?.claimedAt);
       const expiresAt = utcDateTimeMilliseconds(data?.expiresAt);
@@ -249,7 +268,6 @@ export class LocalAgentBridgeRuntime {
         || !Number.isFinite(expiresAt)
         || expiresAt <= pending.firstSentAt
         || claimedAt >= expiresAt
-        || claimedAt > responseAt
         || !Number.isSafeInteger(data.nextSequence)
         || data.nextSequence < 1
       ) {
@@ -305,23 +323,29 @@ export class LocalAgentBridgeRuntime {
       ) {
         throw codedError("INVALID_AGENT_RESPONSE", true);
       }
+      let safeResponse = response;
       if (action === "revokeAgentRunSelf") {
         const data = response.data;
-        if (!data
-          || typeof data !== "object"
+        const hasReplayed = Object.hasOwn(response, "replayed");
+        if (!hasExactOwnKeys(response, hasReplayed ? ["ok", "action", "data", "replayed"] : ["ok", "action", "data"])
+          || !hasExactOwnKeys(data, ["agentRunId", "revokedAt"])
           || data.agentRunId !== this.#claimed.agentRunId
           || !Number.isFinite(utcDateTimeMilliseconds(data.revokedAt))) {
           throw codedError("INVALID_AGENT_RESPONSE", true);
         }
+        safeResponse = {
+          ok: true,
+          action: "revokeAgentRunSelf",
+          data: { agentRunId: data.agentRunId, revokedAt: data.revokedAt },
+          ...(hasReplayed ? { replayed: response.replayed } : {}),
+        };
       }
       this.#claimed.nextSequence += 1;
       this.#pendingCommand = undefined;
       if (action === "revokeAgentRunSelf") {
-        this.#prepared = undefined;
-        this.#claimed = undefined;
-        this.#pendingClaim = undefined;
+        this.#clearCapability();
       }
-      return response;
+      return safeResponse;
     } catch (error) {
       if (!error?.uncertain) this.#pendingCommand = undefined;
       throw error;
