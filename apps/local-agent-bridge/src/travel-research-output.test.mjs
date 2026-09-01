@@ -308,6 +308,9 @@ test("DNS gate rejects failures, timeouts and any non-global current resolution"
     [{ address: "::1", family: 6 }],
     [{ address: "fc00::1", family: 6 }],
     [{ address: "::ffff:127.0.0.1", family: 6 }],
+    [{ address: "::127.0.0.1", family: 6 }],
+    [{ address: "::192.168.1.1", family: 6 }],
+    [{ address: "::8.8.8.8", family: 6 }],
     [{ address: "93.184.216.34", family: 4 }, { address: "192.168.1.1", family: 4 }],
   ]) {
     await assert.rejects(() => validateTravelResearchOutput(sourceOutput(), options({
@@ -326,6 +329,9 @@ test("DNS gate rejects failures, timeouts and any non-global current resolution"
       { address: "93.184.216.34", family: 4 },
       { address: "2606:4700:4700::1111", family: 6 },
     ],
+  })));
+  await assert.doesNotReject(() => validateTravelResearchOutput(completedOutput(), options({
+    resolveHostname: async () => [{ address: "2606:4700:4700::1111", family: 6 }],
   })));
 });
 
@@ -354,6 +360,8 @@ test("recursively rejects secret keys, token values, HTML, local paths, and over
     (value) => { value.candidates[0].idempotencyKey = "idem-secret"; },
     (value) => { value.candidates[0].recommendation.reason = "leaked preference-raw-1"; },
     (value) => { value.candidates[0].recommendation.reason = layeredCredential; },
+    (value) => { value.candidates[0].recommendation.reason = "access%5Ftoken%3Dopaque-secret%E0%A4%A"; },
+    (value) => { value.candidates[0].evidence[0].facts["%70reference-raw-1%E0%A4%A"] = "opaque"; },
   ];
   for (const mutate of mutations) {
     const output = completedOutput();

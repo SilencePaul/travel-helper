@@ -44,7 +44,7 @@ for (const [network, prefix] of [
   ["203.0.113.0", 24], ["224.0.0.0", 4], ["240.0.0.0", 4],
 ]) NON_GLOBAL_IPV4.addSubnet(network, prefix, "ipv4");
 for (const [network, prefix] of [
-  ["::", 128], ["::1", 128], ["::ffff:0:0", 96], ["64:ff9b::", 96], ["64:ff9b:1::", 48],
+  ["::", 96], ["::ffff:0:0", 96], ["64:ff9b::", 96], ["64:ff9b:1::", 48],
   ["100::", 64], ["2001::", 23], ["2001:db8::", 32], ["2002::", 16], ["3fff::", 20],
   ["fc00::", 7], ["fe80::", 10], ["fec0::", 10], ["ff00::", 8],
 ]) NON_GLOBAL_IPV6.addSubnet(network, prefix, "ipv6");
@@ -292,7 +292,7 @@ function decodeBasicTagEntities(value) {
 
 function unsafeGeneralString(value, aliasMap) {
   const inspection = researchInspectionViews(value);
-  if (inspection.truncated) return true;
+  if (inspection.malformed || inspection.truncated) return true;
   return inspection.views.some((view) => (
     SENSITIVE_VALUE_PATTERN.test(view)
     || LOCAL_PATH_PATTERN.test(view)
@@ -303,7 +303,7 @@ function unsafeGeneralString(value, aliasMap) {
 
 function unsafeGeneralKey(value, aliasMap) {
   const inspection = researchInspectionViews(value);
-  if (inspection.truncated) return true;
+  if (inspection.malformed || inspection.truncated) return true;
   return inspection.views.some((view) => {
     const normalizedKey = view.toLowerCase().replace(/[^a-z0-9]/gu, "");
     return SENSITIVE_KEY_PATTERN.test(normalizedKey)
