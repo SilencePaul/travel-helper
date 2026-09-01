@@ -10,10 +10,10 @@ const NON_PUBLIC_HOST_SUFFIXES = [
   "localhost", "local", "internal", "lan", "home", "home.arpa", "localdomain", "corp", "intranet",
   "private", "test", "invalid", "example", "onion",
 ];
-const SENSITIVE_KEY_PATTERN = /(?:credential|password|passwd|token|authorization|cookie|privatekey|agentrun|signature|sequence|idempotency|pairingcode|codexthread|cloudbase|tencent)/u;
-const SENSITIVE_VALUE_PATTERN = /(?:\bBearer\s+[A-Za-z0-9._~+\/-]{4,}|\b(?:authorization|cookie|password|passwd|api[_ -]?key|access[_ -]?token|refresh[_ -]?token)\b|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:sk|ghp|xox[baprs])[-_][A-Za-z0-9_-]{8,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|\b(?:agent\s*run|idempotency|signature|sequence)\b)/iu;
+const SENSITIVE_KEY_PATTERN = /(?:credential|password|passwd|token|authorization|cookie|privatekey|agentrun|signature|sequence|idempotency|pairingcode|codexthread|cloudbase|tencent|accesskey|secretid|secretkey)/u;
+const SENSITIVE_VALUE_PATTERN = /(?:\bBearer\s+[A-Za-z0-9._~+\/-]{4,}|\b(?:authorization|cookie|password|passwd|api[_ -]?key|access[_ -]?token|refresh[_ -]?token)\b|\b(?:access[\s_-]*key(?:[\s_-]*id)?|secret[\s_-]*(?:id|key)|tencent[\s_-]*cloud[\s_-]*secret[\s_-]*(?:id|key))\s*[:=]\s*[^\s,;]{4,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:AKID|AKIA|ASIA)[A-Za-z0-9]{12,}|\b(?:sk|ghp|xox[baprs])[-_][A-Za-z0-9_-]{8,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|\b(?:agent\s*run|idempotency|signature|sequence)\b)/iu;
 const LOCAL_PATH_PATTERN = /(?:file:\/\/|\/(?:Users|home|etc|private|var|tmp)\/|[A-Za-z]:\\(?:Users|Documents|Windows)\\)/iu;
-const HTML_PATTERN = /<(?:!--[\s\S]*?--|!doctype(?:\s[^<>]*)?|!\[cdata\[[\s\S]*?\]\]|\?[\p{L}_:][^<>]*\?|\/?[\p{L}_:][\p{L}\p{N}:._-]*(?:\s[^<>]*?)?\/?)>/iu;
+const HTML_PATTERN = /<(?:!--[\s\S]*?--|!doctype(?:\s[^<>]*)?|!\[cdata\[[\s\S]*?\]\]|\?[\p{L}_:][^<>]*\?|\/?[\p{L}_:][\p{L}\p{N}:._-]*(?:(?:\s+|\/)[^<>]*)?)>/iu;
 
 function codedError(code) {
   return Object.assign(new Error(code), { code });

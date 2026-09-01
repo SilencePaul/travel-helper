@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import { isIP } from "node:net";
 
 import {
   buildResearchDisclosure,
@@ -27,8 +28,7 @@ const LOCAL_PATH_PATTERN = /(?:file:\/\/[^\s"']+|\/(?:Users|home|etc|private|var
 const URL_PATTERN = /\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'<>\u3001\uff0c\u3002\uff1b]+/gu;
 const NON_HIERARCHICAL_URL_PATTERN = /\b(?:data|javascript|mailto):[^\s"'<>\u3001\uff0c\u3002\uff1b]+/giu;
 const PROTOCOL_RELATIVE_URL_PATTERN = /(?<!:)\/\/[^\s"'<>\u3001\uff0c\u3002\uff1b]+/gu;
-const BARE_IP_PATTERN = /(?:\b\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?(?:\/[^\s"'<>]*)?|\[[0-9A-Fa-f:.]+\](?::\d{1,5})?(?:\/[^\s"'<>]*)?)/gu;
-const BARE_IPV6_PATTERN = /(?<![A-Za-z0-9])(?:[A-Fa-f0-9]{0,4}:){2,7}[A-Fa-f0-9]{0,4}(?![A-Za-z0-9])/gu;
+const IP_TOKEN_PATTERN = /(?<![A-Za-z0-9])(?:\[[0-9A-Fa-f:.%]+\]|(?:\d{1,3}\.){3}\d{1,3}|[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]+)(?::\d{1,5})?(?:\/[^\s"'<>]*)?(?![A-Za-z0-9])/gu;
 const BARE_LOCAL_HOST_PATTERN = /\b(?:(?:[a-z0-9-]+\.)*localhost|[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:local|internal|lan|home|home\.arpa|localdomain|corp|intranet|private|test|invalid|example|onion))\.?(?::\d{1,5})?(?:\/[^\s"'<>]*)?(?=$|[\s"'<>\u3001\uff0c\u3002\uff1b;,])/giu;
 const CREDENTIAL_PATTERN = /(?:\bBearer\s+[A-Za-z0-9._~+\/-]{8,}|\b(?:authorization|cookie|password|passwd|api[_ -]?key|access[_ -]?key(?:\s*id)?|secret[_ -]?(?:key|id)|access[_ -]?token|refresh[_ -]?token)\s*[:=]\s*[^\s,;]{4,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:AKID|AKIA|ASIA)[A-Za-z0-9]{12,}|\b(?:sk|ghp|xox[baprs])[-_][A-Za-z0-9_-]{8,})/giu;
 const SENSITIVE_KEY_PATTERN = /(?:credential|password|passwd|authorization|cookie|apikey|accesskey|secretkey|secretid|accesstoken|refreshtoken|privatekey|localpath|filepath|projectpath)/u;
@@ -124,9 +124,11 @@ function sensitiveValues(context) {
 
 function normalizedPublicHostname(hostname) {
   const normalized = hostname.toLowerCase().replace(/\.$/u, "");
+  const ipCandidate = normalized.startsWith("[") && normalized.endsWith("]")
+    ? normalized.slice(1, -1)
+    : normalized;
   if (!normalized || normalized.length > 253 || !normalized.includes(".")
-    || normalized.includes(":") || normalized.startsWith("[")
-    || /^\d+(?:\.\d+){3}$/u.test(normalized)
+    || isIP(ipCandidate) !== 0
     || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))+$/u.test(normalized)) {
     return undefined;
   }
@@ -136,7 +138,59 @@ function normalizedPublicHostname(hostname) {
   return normalized;
 }
 
-function sanitizeUrl(value) {
+function patternMatches(pattern, value) {
+  pattern.lastIndex = 0;
+  return pattern.test(value);
+}
+
+function ipTokenHost(value) {
+  let token = value;
+  const slash = token.indexOf("/");
+  if (slash >= 0) token = token.slice(0, slash);
+  if (token.startsWith("[")) {
+    const closingBracket = token.indexOf("]");
+    return closingBracket > 0 ? token.slice(1, closingBracket) : "";
+  }
+  if (isIP(token) !== 0) return token;
+  const ipv4WithPort = /^((?:\d{1,3}\.){3}\d{1,3}):\d{1,5}$/u.exec(token);
+  return ipv4WithPort?.[1] ?? "";
+}
+
+function redactIpTokens(value) {
+  return value.replace(IP_TOKEN_PATTERN, (token) => (
+    isIP(ipTokenHost(token)) !== 0 ? "[REDACTED_URL]" : token
+  ));
+}
+
+function decodedPathForInspection(pathname) {
+  let decoded = pathname;
+  for (let pass = 0; pass < 3; pass += 1) {
+    let next;
+    try {
+      next = decodeURIComponent(decoded);
+    } catch {
+      return undefined;
+    }
+    if (next === decoded) return decoded;
+    decoded = next;
+  }
+  return /%[0-9A-Fa-f]{2}/u.test(decoded) ? undefined : decoded;
+}
+
+function unsafeDecodedPath(pathname, privateValues) {
+  if (privateValues.some((privateValue) => privateValue.length > 0 && pathname.includes(privateValue))) return true;
+  if (patternMatches(CREDENTIAL_PATTERN, pathname)
+    || patternMatches(LOCAL_PATH_PATTERN, pathname)
+    || patternMatches(URL_PATTERN, pathname)
+    || patternMatches(NON_HIERARCHICAL_URL_PATTERN, pathname)
+    || patternMatches(PROTOCOL_RELATIVE_URL_PATTERN, pathname)
+    || patternMatches(BARE_LOCAL_HOST_PATTERN, pathname)) {
+    return true;
+  }
+  return redactIpTokens(pathname) !== pathname;
+}
+
+function sanitizeUrl(value, privateValues) {
   try {
     const parsed = new URL(value);
     if (parsed.protocol !== "https:" || parsed.username !== "" || parsed.password !== "" || value.includes("#")) {
@@ -144,6 +198,8 @@ function sanitizeUrl(value) {
     }
     const hostname = normalizedPublicHostname(parsed.hostname);
     if (!hostname) return "[REDACTED_URL]";
+    const decodedPath = decodedPathForInspection(parsed.pathname);
+    if (decodedPath === undefined || unsafeDecodedPath(decodedPath, privateValues)) return "[REDACTED_URL]";
     const port = parsed.port === "443" || parsed.port === "" ? "" : `:${parsed.port}`;
     return `https://${hostname}${port}${parsed.pathname}`;
   } catch {
@@ -153,14 +209,13 @@ function sanitizeUrl(value) {
 
 function sanitizeString(value, privateValues) {
   let sanitized = value
-    .replace(URL_PATTERN, (url) => sanitizeUrl(url))
+    .replace(URL_PATTERN, (url) => sanitizeUrl(url, privateValues))
     .replace(NON_HIERARCHICAL_URL_PATTERN, "[REDACTED_URL]")
     .replace(PROTOCOL_RELATIVE_URL_PATTERN, "[REDACTED_URL]")
-    .replace(BARE_IP_PATTERN, "[REDACTED_URL]")
-    .replace(BARE_IPV6_PATTERN, "[REDACTED_URL]")
     .replace(BARE_LOCAL_HOST_PATTERN, "[REDACTED_URL]")
     .replace(LOCAL_PATH_PATTERN, "[REDACTED_LOCAL_PATH]")
     .replace(CREDENTIAL_PATTERN, "[REDACTED_CREDENTIAL]");
+  sanitized = redactIpTokens(sanitized);
   for (const privateValue of privateValues) {
     if (privateValue.length > 0) sanitized = sanitized.split(privateValue).join("[REDACTED_ID]");
   }

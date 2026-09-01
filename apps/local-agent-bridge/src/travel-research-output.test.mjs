@@ -232,6 +232,42 @@ test("recursively rejects secret keys, token values, HTML, local paths, and over
   assert.throws(() => validateTravelResearchOutput(huge, options()), { message: "CODEX_OUTPUT_INVALID" });
 });
 
+test("rejects Tencent, AWS, access-key and secret-key variants before producing a payload", () => {
+  const credentialValues = [
+    "AKIDabcdefghijklmnop",
+    "AKIAABCDEFGHIJKLMNOP",
+    "ASIAABCDEFGHIJKLMNOP",
+    "accessKey=opaque-access-value",
+    "Access Key Id: opaque-access-id",
+    "access_key_id = opaque-access-id",
+    "SecretId=opaque-secret-id",
+    "secret-key: opaque-secret-key",
+    "TENCENTCLOUD_SECRET_ID=opaque-tencent-id",
+    "tencent-cloud-secret-key: opaque-tencent-key",
+  ];
+  for (const credential of credentialValues) {
+    const output = completedOutput();
+    output.candidates[0].recommendation.reason = credential;
+    let result;
+    assert.throws(() => {
+      result = validateTravelResearchOutput(output, options());
+    }, { message: "CODEX_OUTPUT_INVALID" }, credential);
+    assert.equal(result, undefined);
+  }
+
+  for (const key of ["accessKey", "access_key_id", "Secret-Id", "secret key", "tencentCloudSecretKey"]) {
+    const output = completedOutput();
+    output.candidates[0].evidence[0].facts[key] = "opaque-value";
+    assert.throws(() => validateTravelResearchOutput(output, options()), { message: "CODEX_OUTPUT_INVALID" }, key);
+  }
+
+  const result = validateTravelResearchOutput(completedOutput(), options());
+  const payload = JSON.stringify(result.payload);
+  for (const marker of ["AKID", "AKIA", "ASIA", "accessKey", "SecretId", "SecretKey", "TENCENTCLOUD"]) {
+    assert.equal(payload.includes(marker), false);
+  }
+});
+
 test("rejects generic HTML, XML, SVG, comments, processing instructions, and basic encoded tags", () => {
   for (const markup of [
     "<p>paragraph</p>",
@@ -239,6 +275,8 @@ test("rejects generic HTML, XML, SVG, comments, processing instructions, and bas
     "<_private>xml</_private>",
     "<旅行>不可信</旅行>",
     "<svg onload=alert(1)>",
+    "<svg/onload=alert(1)>",
+    "<img/src=x onerror=alert(1)>",
     "</x>",
     "<!DOCTYPE html>",
     "<!-- hidden -->",
@@ -254,7 +292,7 @@ test("rejects generic HTML, XML, SVG, comments, processing instructions, and bas
   }
 
   const mathematics = completedOutput();
-  mathematics.candidates[0].recommendation.reason = "价格条件 1 < 2，且 3 > 2";
+  mathematics.candidates[0].recommendation.reason = "价格条件 1 < 2，且 3 > 2；符号 A <> B";
   assert.doesNotThrow(() => validateTravelResearchOutput(mathematics, options()));
 });
 

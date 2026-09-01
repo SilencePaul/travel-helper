@@ -72,6 +72,7 @@ function contextFixture() {
             "https://Docs.TravelBook.com:443/help?secret=query-key": "safe URL in an object key",
             credential: "opaqueCredentialValue123",
             "公开网页": "可查看 https://WWW.ExampleTravel.com:443/hotels/detail?token=query-secret",
+            "编码路径": "https://publicsite.com/%E6%B7%B1%E5%9C%B3/hotel",
           },
           freeText: {
             note: [
@@ -79,9 +80,14 @@ function contextFixture() {
               "unsafe http://localhost:4182/admin https://agent.localhost/path https://127.0.0.1:4182/a",
               "https://10.0.0.8/a https://192.168.1.8/a https://8.8.8.8/a https://[::1]/a https://[2606:4700:4700::1111]/a",
               "bare IPv6 ::1 and 2001:db8::1 must not pass",
+              "private IPv6 fc00::1 must not pass; time 10:30:00 集合 and tuple 1:2:3 stay",
               "https://host.local/a https://host.internal/a https://host.lan/a https://intranet/a file:///Users/example/secret.txt",
               "https://alice:password@publicsite.com/a https://publicsite.com/a#fragment",
               "ftp://files.publicsite.com/a data:text/html,unsafe javascript:alert(1) //localhost/relative",
+              "https://publicsite.com/%70reference-secret https://publicsite.com/%2570reference-secret",
+              "https://publicsite.com/%2FUsers%2Fexample%2Fcredential https://publicsite.com/%252FUsers%252Fexample%252Fcredential",
+              "https://publicsite.com/%68%74%74%70%73%3A%2F%2Falice%3Apassword%40publicsite.com%2Fa",
+              "https://publicsite.com/%E0%A4%A",
               "Tencent AKIDabcdefghijklmnop accessKey=ACCESSSECRET123 secretKey=SECRETKEY123 SecretId=SIDSECRET123",
             ].join("; "),
           },
@@ -211,6 +217,12 @@ test("buildTravelResearchInput keeps names and selected public data while exclud
     built.codexInput.preferences[0].answers["https://docs.travelbook.com/help"],
     "safe URL in an object key",
   );
+  assert.equal(
+    built.codexInput.preferences[0].answers["编码路径"],
+    "https://publicsite.com/%E6%B7%B1%E5%9C%B3/hotel",
+  );
+  assert.equal(built.codexInput.preferences[0].freeText.note.includes("10:30:00 集合"), true);
+  assert.equal(built.codexInput.preferences[0].freeText.note.includes("1:2:3 stay"), true);
   assert.equal(built.codexInput.feedback.length, 1);
   assert.match(built.codexInput.feedback[0].feedbackAlias, /^feed_[A-Za-z0-9_-]{32}$/u);
   assert.equal(built.codexInput.existingCandidates.length, 1);
@@ -228,7 +240,9 @@ test("buildTravelResearchInput keeps names and selected public data while exclud
     "192.168.1.8", "8.8.8.8", "[::1]", "::1", "2001:db8::1", "2606:4700:4700::1111", "host.local",
     "host.internal", "host.lan", "https://intranet", "alice:password", "#fragment", "query-secret",
     "query-key", "SIDSECRET123", "opaqueCredentialValue123", "ftp://", "data:text/html",
-    "javascript:alert", "//localhost",
+    "javascript:alert", "//localhost", "fc00::1", "%70reference-secret", "%2570reference-secret",
+    "%2FUsers%2Fexample%2Fcredential", "%252FUsers%252Fexample%252Fcredential", "%E0%A4%A",
+    "%68%74%74%70%73%3A%2F%2Falice%3Apassword%40publicsite.com%2Fa",
   ]) {
     assert.equal(serialized.includes(forbidden), false, forbidden);
     assert.equal(built.prompt.includes(forbidden), false, forbidden);
