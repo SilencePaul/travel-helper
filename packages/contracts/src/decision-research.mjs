@@ -14,8 +14,9 @@ const SHA256_ROUND_CONSTANTS = [
   0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
   0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
-const SENSITIVE_QUERY_NAME_PARTS = [
-  "token", "secret", "password", "passwd", "auth", "credential", "session", "signature", "apikey",
+const NON_PUBLIC_HOST_SUFFIXES = [
+  "localhost", "local", "internal", "lan", "home", "home.arpa", "localdomain", "corp", "intranet",
+  "private", "test", "invalid", "example", "onion",
 ];
 
 function assertJsonValue(value, seen) {
@@ -224,11 +225,12 @@ function safePublicHttpsUrl(value) {
   try {
     const parsed = new globalThis.URL(value);
     if (parsed.protocol !== "https:" || parsed.username || parsed.password || value.includes("#")) return undefined;
-    for (const name of parsed.searchParams.keys()) {
-      const normalized = name.toLowerCase().replace(/[^a-z0-9]/g, "");
-      if (SENSITIVE_QUERY_NAME_PARTS.some((part) => normalized.includes(part))) return undefined;
+    const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
+    if (hostname.startsWith("[") || /^\d+(?:\.\d+){3}$/.test(hostname) || !hostname.includes(".")) return undefined;
+    if (NON_PUBLIC_HOST_SUFFIXES.some((suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`))) {
+      return undefined;
     }
-    return value;
+    return `${parsed.origin}${parsed.pathname}`;
   } catch {
     return undefined;
   }

@@ -451,10 +451,19 @@ describe("decision research projection", () => {
       "https://alice:password@hotel.example/rooms",
       "https://hotel.example/rooms#secret-fragment",
       "https://hotel.example/rooms#",
-      "https://hotel.example/rooms?access-token=secret-token",
-      "https://hotel.example/rooms?API_KEY=secret-key",
-      "https://hotel.example/rooms?session.id=secret-session",
-      "https://hotel.example/rooms?auth_signature=secret-signature",
+      "https://127.0.0.1:4182/port-path-secret?code=query-secret",
+      "https://localhost/rooms",
+      "https://agent.localhost/rooms",
+      "https://10.0.0.8/rooms",
+      "https://192.168.1.8/rooms",
+      "https://8.8.8.8/rooms",
+      "https://[::1]/rooms",
+      "https://[fc00::1]/rooms",
+      "https://[2606:4700:4700::1111]/rooms",
+      "https://hotel.local/rooms",
+      "https://hotel.internal/rooms",
+      "https://hotel.lan/rooms",
+      "https://intranet/rooms",
     ];
 
     for (const sourceUrl of unsafeUrls) {
@@ -479,12 +488,15 @@ describe("decision research projection", () => {
       expect(serialized).not.toContain("/Users/example/.codex");
       expect(serialized).not.toContain("secret-");
       expect(serialized).not.toContain("alice:password");
+      expect(serialized).not.toContain("4182");
+      expect(serialized).not.toContain("port-path-secret");
+      expect(serialized).not.toContain("query-secret");
     }
 
     const safeContext = decisionContext();
     const safeEvidence = safeContext.workspace.evidence[0];
     if (!safeEvidence) throw new Error("missing evidence fixture");
-    safeEvidence.sourceUrl = "https://hotel.example/rooms?date=2026-10-03";
+    safeEvidence.sourceUrl = "https://www.booking.com/rooms?code=query-secret&date=2026-10-03";
     const safeScope = buildResearchTargetScopes(safeContext.trip)[0];
     if (!safeScope) throw new Error("missing scope fixture");
     const safeDisclosure = await buildResearchDisclosure(safeContext, {
@@ -494,7 +506,18 @@ describe("decision research projection", () => {
     const disclosedSafeEvidence = safeDisclosure.existingCandidates
       .flatMap((candidate) => candidate.evidence)
       .find((evidence) => evidence.sourceName === "酒店官网");
-    expect(disclosedSafeEvidence?.sourceUrl).toBe(safeEvidence.sourceUrl);
+    expect(disclosedSafeEvidence?.sourceUrl).toBe("https://www.booking.com/rooms");
+    expect(JSON.stringify(safeDisclosure)).not.toContain("query-secret");
+
+    safeEvidence.sourceUrl = "https://www.booking.com/hotels/rooms";
+    const normalDisclosure = await buildResearchDisclosure(safeContext, {
+      category: "hotel",
+      targetScopeId: safeScope.targetScopeId,
+    });
+    const disclosedNormalEvidence = normalDisclosure.existingCandidates
+      .flatMap((candidate) => candidate.evidence)
+      .find((evidence) => evidence.sourceName === "酒店官网");
+    expect(disclosedNormalEvidence?.sourceUrl).toBe("https://www.booking.com/hotels/rooms");
   });
 
   it("keeps disclosures and fingerprints stable under reversed source ordering for every populated category", async () => {
