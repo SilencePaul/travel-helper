@@ -21,11 +21,11 @@ export default defineConfig({
       },
       workbox: {
         navigateFallback: '/index.html',
-        navigateFallbackDenylist: [/^\/(?:auth|api|oauth)(?:\/|$)/],
+        navigateFallbackDenylist: [/^\/(?:auth|api|oauth|briefings)(?:\/|$)/],
         runtimeCaching: [
           {
             urlPattern: ({ request, url }) => request.mode === 'navigate'
-              && !/^\/(?:auth|api|oauth)(?:\/|$)/.test(url.pathname),
+              && !/^\/(?:auth|api|oauth|briefings)(?:\/|$)/.test(url.pathname),
             handler: 'NetworkFirst',
             options: { cacheName: 'travel-app-shell-v1', networkTimeoutSeconds: 3 },
           },
