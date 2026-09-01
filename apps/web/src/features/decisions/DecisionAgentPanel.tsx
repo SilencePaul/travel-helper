@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AgentRunSchema,
   buildResearchDisclosure,
@@ -32,6 +32,27 @@ type Props = {
 
 type Operation = "idle" | "restoring" | "preparing" | "starting" | "resuming" | "cancelling" | "error";
 type CreateAgentRunCommand = Extract<DecisionCommand, { action: "createAgentRun" }>;
+type AttemptStage = "create" | "claim" | "execute" | "resume";
+type PendingCloudAttempt = {
+  kind: "start" | "resume";
+  repository: DecisionWorkspaceRepository;
+  bridge: LocalAgentBridge;
+  tripId: string;
+  material: PreparedAgentRun;
+  createIdempotencyKey: string;
+  newIdempotencyKey: () => string;
+  targetCategory?: CandidateCategory;
+  targetScopeId?: string;
+  disclosureFingerprint?: string;
+  researchTaskId?: string;
+  resumeAction?: ResearchResumeAction;
+  agentRunId?: string;
+  revokeIdempotencyKey?: string;
+  createPromise?: Promise<string>;
+  reconcilePromise?: Promise<boolean>;
+  bridgeOperationStarted?: boolean;
+  createDefinitivelyFailed?: boolean;
+};
 
 const categoryOptions: Array<{ value: CandidateCategory; label: string; description: string }> = [
   { value: "hotel", label: "酒店", description: "住宿与房型" },
@@ -52,50 +73,6 @@ function tripProjection(trip: Trip) {
   };
 }
 
-function safeContextKey(trip: Trip, workspace: DecisionWorkspace, category?: CandidateCategory, targetScopeId?: string) {
-  const candidateIds = new Set(workspace.candidates.filter((candidate) => candidate.category === category).map(({ id }) => id));
-  return JSON.stringify({
-    category,
-    targetScopeId,
-    trip: tripProjection(trip),
-    preferences: workspace.preferences.filter(({ status }) => status === "completed").map(({ id, revision, answers, freeText, status }) => ({ id, revision, answers, freeText, status })),
-    summary: workspace.summary && {
-      id: workspace.summary.id,
-      revision: workspace.summary.revision,
-      common: workspace.summary.common,
-      disagreements: workspace.summary.disagreements,
-      tradeoffs: workspace.summary.tradeoffs,
-      status: workspace.summary.status,
-    },
-    candidates: workspace.candidates.filter(({ id }) => candidateIds.has(id)).map((candidate) => ({
-      id: candidate.id,
-      revision: candidate.revision,
-      category: candidate.category,
-      entity: { name: candidate.entity.name, address: candidate.entity.address },
-      applicability: candidate.applicability,
-      recommendation: { reason: candidate.recommendation.reason },
-    })),
-    evidence: workspace.evidence.filter(({ candidateId }) => candidateIds.has(candidateId)).map((evidence) => ({
-      id: evidence.id,
-      revision: evidence.revision,
-      candidateId: evidence.candidateId,
-      sourceKind: evidence.sourceKind,
-      sourceName: evidence.sourceName,
-      sourceUrl: evidence.sourceUrl,
-      queryContext: evidence.queryContext,
-      captureMethod: evidence.captureMethod,
-      facts: evidence.facts,
-    })),
-    feedback: workspace.feedback.filter(({ candidateId }) => candidateIds.has(candidateId)).map((feedback) => ({
-      id: feedback.id,
-      revision: feedback.revision,
-      candidateId: feedback.candidateId,
-      kind: feedback.kind,
-      reason: feedback.reason,
-    })),
-  });
-}
-
 function statusPresentation(status: ResearchStatus): { text?: string; role: "status" | "alert" } {
   switch (status.phase) {
     case "idle": return { role: "status" };
@@ -112,6 +89,22 @@ function statusPresentation(status: ResearchStatus): { text?: string; role: "sta
       return status.blockedReason === "codex_auth_required"
         ? { text: "研究已安全暂停。请在 ChatGPT/Codex 中恢复登录，项目不会索要账号或凭据。", role: "alert" }
         : { text: `研究已安全暂停：${status.blockedHostname} 需要额外访问验证。`, role: "alert" };
+  }
+}
+
+function statusPhaseLabel(status: ResearchStatus): string {
+  switch (status.phase) {
+    case "idle": return "等待启动";
+    case "researching": return "搜索中";
+    case "resuming": return "恢复中";
+    case "validating": return "校验中";
+    case "writing": return "写入中";
+    case "completed": return "已完成";
+    case "failed": return "未完成";
+    case "cancelling": return "停止并对账中";
+    case "cancelled": return "已停止";
+    case "superseded": return "内容已更新";
+    case "needs_owner_action": return "等待设备管理员处理";
   }
 }
 
@@ -137,25 +130,25 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
   const [operation, setOperation] = useState<Operation>(bridge ? "restoring" : "idle");
   const [operationError, setOperationError] = useState<string>();
   const [researchStatus, setResearchStatusState] = useState<ResearchStatus>({ phase: "idle" });
-  const [cloudRunId, setCloudRunId] = useState<string>();
   const lifecycleRef = useRef(0);
   const operationGenerationRef = useRef(0);
   const operationAbortRef = useRef<AbortController | undefined>(undefined);
   const inFlightRef = useRef(false);
   const statusRef = useRef<ResearchStatus>({ phase: "idle" });
   const taskFingerprintRef = useRef<string | undefined>(undefined);
-  const lastContextKeyRef = useRef<string | undefined>(undefined);
-  const contextKeyRef = useRef("");
+  const confirmedFingerprintRef = useRef<string | undefined>(undefined);
+  const disclosureRequestRef = useRef(0);
+  const pendingAttemptRef = useRef<PendingCloudAttempt | undefined>(undefined);
   const completedTaskRef = useRef<string | undefined>(undefined);
   const pendingCancellationRef = useRef<string | undefined>(undefined);
   const finalizingCancellationRef = useRef(false);
   const retryRef = useRef<HTMLButtonElement>(null);
-  const contextKey = safeContextKey(trip, workspace, category, targetScopeId);
   const researchTaskId = researchStatus.phase === "idle" ? undefined : researchStatus.researchTaskId;
 
   function setResearchStatus(next: ResearchStatus) {
     statusRef.current = next;
-    if (bridgeRevokedPhases.has(next.phase)) setCloudRunId(undefined);
+    const attempt = pendingAttemptRef.current;
+    if (bridgeRevokedPhases.has(next.phase) && attempt?.bridgeOperationStarted) pendingAttemptRef.current = undefined;
     setResearchStatusState(next);
   }
 
@@ -173,57 +166,133 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
     return operationGenerationRef.current === generation && lifecycleRef.current === lifecycle;
   }
 
-  const revokeCloudRun = useCallback(async (agentRunId: string) => {
-    if (!repository.getAgentRunStatus) throw new Error("AGENT_STATUS_UNAVAILABLE");
-    const parsed = AgentRunSchema.safeParse(await repository.getAgentRunStatus(trip.id, agentRunId));
-    if (!parsed.success || parsed.data.tripId !== trip.id || parsed.data.agentRunId !== agentRunId) throw new Error("INVALID_AGENT_RUN_STATUS");
-    const latest: AgentRun = parsed.data;
-    if (latest.status === "revoked" || latest.status === "expired") return;
-    const result = await repository.command({
-      action: "revokeAgentRun",
-      tripId: trip.id,
-      agentRunId,
-      expectedRevision: latest.revision,
-      idempotencyKey: newIdempotencyKey(),
-    });
-    if (!result.ok || result.action !== "revokeAgentRun") throw new Error(result.ok ? "INVALID_RESPONSE" : result.error);
-  }, [newIdempotencyKey, repository, trip.id]);
+  const clearPendingAttempt = useCallback((attempt: PendingCloudAttempt) => {
+    if (pendingAttemptRef.current === attempt) pendingAttemptRef.current = undefined;
+  }, []);
 
-  useLayoutEffect(() => {
-    contextKeyRef.current = contextKey;
-    const previous = lastContextKeyRef.current;
-    lastContextKeyRef.current = contextKey;
-    if (previous === undefined || previous === contextKey) return;
-    setConfirmed(false);
-    setPrepared(undefined);
-    if (statusRef.current.phase === "needs_owner_action" && taskFingerprintRef.current) {
-      operationAbortRef.current?.abort();
-      operationGenerationRef.current += 1;
-      setResearchStatus(syntheticSuperseded(statusRef.current));
-      setOperation("idle");
-      setOperationError(undefined);
+  const ensureCloudRun = useCallback(async (attempt: PendingCloudAttempt): Promise<string> => {
+    if (attempt.agentRunId) return attempt.agentRunId;
+    if (!attempt.createPromise) {
+      attempt.createPromise = (async () => {
+        const input: CreateAgentRunCommand = {
+          action: "createAgentRun",
+          tripId: attempt.tripId,
+          publicKeyJwk: attempt.material.publicKeyJwk,
+          pairingCodeHash: attempt.material.pairingCodeHash,
+          scope: ["submitProposalBatch"],
+          idempotencyKey: attempt.createIdempotencyKey,
+        };
+        const result = await attempt.repository.command(input);
+        if (!result.ok) {
+          attempt.createDefinitivelyFailed = true;
+          throw new Error(result.error);
+        }
+        if (result.action !== "createAgentRun") throw new Error("INVALID_RESPONSE");
+        attempt.agentRunId = result.data.agentRunId;
+        attempt.revokeIdempotencyKey ??= attempt.newIdempotencyKey();
+        return result.data.agentRunId;
+      })();
     }
-  }, [contextKey]);
+    try {
+      return await attempt.createPromise;
+    } finally {
+      attempt.createPromise = undefined;
+    }
+  }, []);
+
+  const reconcileCloudAttempt = useCallback(async (attempt: PendingCloudAttempt): Promise<boolean> => {
+    if (attempt.reconcilePromise) return attempt.reconcilePromise;
+    attempt.reconcilePromise = (async () => {
+      let agentRunId = attempt.agentRunId;
+      if (!agentRunId && attempt.createPromise) agentRunId = await attempt.createPromise;
+      if (!agentRunId && attempt.createDefinitivelyFailed) {
+        clearPendingAttempt(attempt);
+        return true;
+      }
+      if (!agentRunId) agentRunId = await ensureCloudRun(attempt);
+      if (!attempt.repository.getAgentRunStatus) throw new Error("AGENT_STATUS_UNAVAILABLE");
+      const parsed = AgentRunSchema.safeParse(await attempt.repository.getAgentRunStatus(attempt.tripId, agentRunId));
+      if (!parsed.success || parsed.data.tripId !== attempt.tripId || parsed.data.agentRunId !== agentRunId) throw new Error("INVALID_AGENT_RUN_STATUS");
+      const latest: AgentRun = parsed.data;
+      if (latest.status === "revoked" || latest.status === "expired") {
+        clearPendingAttempt(attempt);
+        return true;
+      }
+      attempt.revokeIdempotencyKey ??= attempt.newIdempotencyKey();
+      const result = await attempt.repository.command({
+        action: "revokeAgentRun",
+        tripId: attempt.tripId,
+        agentRunId,
+        expectedRevision: latest.revision,
+        idempotencyKey: attempt.revokeIdempotencyKey,
+      });
+      if (!result.ok || result.action !== "revokeAgentRun") throw new Error(result.ok ? "INVALID_RESPONSE" : result.error);
+      clearPendingAttempt(attempt);
+      return true;
+    })();
+    try {
+      return await attempt.reconcilePromise;
+    } finally {
+      attempt.reconcilePromise = undefined;
+    }
+  }, [clearPendingAttempt, ensureCloudRun]);
+
+  const reconcileAfterBridgeFailure = useCallback(async (
+    attempt: PendingCloudAttempt,
+    stage: AttemptStage,
+    expectedResearchTaskId?: string,
+  ): Promise<{ kind: "restored"; status: ResearchStatus } | { kind: "cleaned" } | { kind: "uncertain" }> => {
+    let status: ResearchStatus | undefined;
+    try {
+      status = await attempt.bridge.getResearchStatus();
+    } catch {
+      // Cloud cleanup below is still required when local status cannot be read.
+    }
+    if (status && status.phase !== "idle" && (
+      stage === "execute"
+      || (stage === "resume" && status.researchTaskId === expectedResearchTaskId)
+    )) return { kind: "restored", status };
+    try {
+      return await reconcileCloudAttempt(attempt) ? { kind: "cleaned" } : { kind: "uncertain" };
+    } catch {
+      return { kind: "uncertain" };
+    }
+  }, [reconcileCloudAttempt]);
 
   useEffect(() => {
     let active = true;
+    const request = disclosureRequestRef.current + 1;
+    disclosureRequestRef.current = request;
     setDisclosure(undefined);
     setDisclosureFingerprint(undefined);
     if (!category || !targetScopeId) return () => { active = false; };
     void buildResearchDisclosure({ workspace, trip: tripProjection(trip) }, { category, targetScopeId })
       .then(async (next) => ({ next, fingerprint: await computeDisclosureFingerprint(next) }))
       .then(({ next, fingerprint }) => {
-        if (!active) return;
+        if (!active || disclosureRequestRef.current !== request) return;
         setDisclosure(next);
         setDisclosureFingerprint(fingerprint);
+        if (confirmedFingerprintRef.current && confirmedFingerprintRef.current !== fingerprint) {
+          confirmedFingerprintRef.current = undefined;
+          setConfirmed(false);
+          setPrepared(undefined);
+        }
+        if (statusRef.current.phase === "needs_owner_action" && taskFingerprintRef.current
+          && taskFingerprintRef.current !== fingerprint) {
+          operationAbortRef.current?.abort();
+          operationGenerationRef.current += 1;
+          setResearchStatus(syntheticSuperseded(statusRef.current));
+          setOperation("idle");
+          setOperationError(undefined);
+        }
       })
       .catch(() => {
-        if (!active) return;
+        if (!active || disclosureRequestRef.current !== request) return;
         setOperation("error");
         setOperationError("当前行程段无法生成安全披露，请刷新行程后重试。");
       });
     return () => { active = false; };
-  }, [category, contextKey, targetScopeId, trip, workspace]);
+  }, [category, targetScopeId, trip, workspace]);
 
   useEffect(() => {
     lifecycleRef.current += 1;
@@ -232,32 +301,40 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
     operationGenerationRef.current += 1;
     inFlightRef.current = false;
     taskFingerprintRef.current = undefined;
+    confirmedFingerprintRef.current = undefined;
     completedTaskRef.current = undefined;
     pendingCancellationRef.current = undefined;
     finalizingCancellationRef.current = false;
-    const nextScopes = buildResearchTargetScopes(tripProjection(trip));
-    setTargetScopeId(nextScopes.length === 1 ? nextScopes[0]?.targetScopeId : undefined);
+    setTargetScopeId(scopes.length === 1 ? scopes[0]?.targetScopeId : undefined);
     setCategory(undefined);
     setPrepared(undefined);
     setConfirmed(false);
-    setCloudRunId(undefined);
     setResearchStatus({ phase: "idle" });
     setOperation(bridge ? "restoring" : "idle");
     setOperationError(undefined);
-    if (!bridge) return;
     const controller = new AbortController();
     operationAbortRef.current = controller;
-    void bridge.getResearchStatus({ signal: controller.signal }).then((next) => {
-      if (controller.signal.aborted || lifecycleRef.current !== lifecycle) return;
-      setResearchStatus(next);
-      setOperation("idle");
-    }).catch(() => {
-      if (controller.signal.aborted || lifecycleRef.current !== lifecycle) return;
-      setOperation("error");
-      setOperationError("本机 Bridge 状态暂时无法读取，共同决定仍可正常使用。");
-    });
-    return () => controller.abort();
-  }, [bridge, repository, trip, tripSafetyKey]);
+    if (bridge) {
+      void bridge.getResearchStatus({ signal: controller.signal }).then((next) => {
+        if (controller.signal.aborted || lifecycleRef.current !== lifecycle) return;
+        setResearchStatus(next);
+        setOperation("idle");
+      }).catch(() => {
+        if (controller.signal.aborted || lifecycleRef.current !== lifecycle) return;
+        setOperation("error");
+        setOperationError("本机 Bridge 状态暂时无法读取，共同决定仍可正常使用。");
+      });
+    }
+    return () => {
+      controller.abort();
+      operationAbortRef.current?.abort();
+      lifecycleRef.current += 1;
+      operationGenerationRef.current += 1;
+      inFlightRef.current = false;
+      const pending = pendingAttemptRef.current;
+      if (pending) void reconcileCloudAttempt(pending).catch(() => undefined);
+    };
+  }, [bridge, reconcileCloudAttempt, repository, scopes, tripSafetyKey]);
 
   useEffect(() => {
     if (!bridge || !activePhases.has(researchStatus.phase)) return;
@@ -297,14 +374,13 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       || finalizingCancellationRef.current) return;
     finalizingCancellationRef.current = true;
     const terminalStatus = researchStatus;
-    const runId = cloudRunId;
+    const attempt = pendingAttemptRef.current;
     const { generation, lifecycle } = beginOperation("cancelling");
     void (async () => {
       try {
-        if (runId) await revokeCloudRun(runId);
+        if (attempt && !await reconcileCloudAttempt(attempt)) throw new Error("RUN_RECONCILIATION_UNCERTAIN");
         if (!isCurrent(generation, lifecycle)) return;
         pendingCancellationRef.current = undefined;
-        setCloudRunId(undefined);
         setResearchStatus(terminalStatus);
         setOperation("idle");
       } catch {
@@ -315,7 +391,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
         finalizingCancellationRef.current = false;
       }
     })();
-  }, [cloudRunId, researchStatus, revokeCloudRun]);
+  }, [reconcileCloudAttempt, researchStatus]);
 
   useEffect(() => {
     if (operation !== "error" && researchStatus.phase !== "failed" && researchStatus.phase !== "superseded") return;
@@ -331,6 +407,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       const next = await bridge.prepare({ signal: controller.signal });
       if (!isCurrent(generation, lifecycle)) return;
       setPrepared(next);
+      confirmedFingerprintRef.current = undefined;
       setConfirmed(false);
       setOperation("idle");
     } catch (error) {
@@ -340,68 +417,117 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
         ? "请在 ChatGPT/Codex 中恢复登录，然后重试准备。"
         : "本机 Codex 暂未就绪，已保存的共同决定不受影响。");
     } finally {
-      inFlightRef.current = false;
+      if (isCurrent(generation, lifecycle)) inFlightRef.current = false;
     }
   }
 
-  async function createCloudRun(material: PreparedAgentRun): Promise<string> {
-    const input: CreateAgentRunCommand = {
-      action: "createAgentRun",
-      tripId: trip.id,
-      publicKeyJwk: material.publicKeyJwk,
-      pairingCodeHash: material.pairingCodeHash,
-      scope: ["submitProposalBatch"],
-      idempotencyKey: newIdempotencyKey(),
-    };
-    const result = await repository.command(input);
-    if (!result.ok || result.action !== "createAgentRun") throw new Error(result.ok ? "INVALID_RESPONSE" : result.error);
-    return result.data.agentRunId;
-  }
-
   async function startResearch() {
-    if (!bridge || !prepared || !confirmed || !category || !targetScopeId || !disclosureFingerprint || inFlightRef.current) return;
+    if (!bridge || !prepared || !confirmed || confirmedFingerprintRef.current !== disclosureFingerprint
+      || !category || !targetScopeId || !disclosureFingerprint || inFlightRef.current) return;
     inFlightRef.current = true;
     const { controller, generation, lifecycle } = beginOperation("starting");
-    const startingContextKey = contextKeyRef.current;
-    let agentRunId: string | undefined;
+    let attempt = pendingAttemptRef.current;
+    let stage: AttemptStage = "create";
     try {
-      agentRunId = await createCloudRun(prepared);
-      if (!isCurrent(generation, lifecycle) || startingContextKey !== contextKeyRef.current) {
-        await revokeCloudRun(agentRunId);
+      if (attempt && (attempt.kind !== "start" || attempt.agentRunId
+        || attempt.repository !== repository || attempt.bridge !== bridge || attempt.tripId !== trip.id
+        || attempt.disclosureFingerprint !== disclosureFingerprint
+        || attempt.targetCategory !== category || attempt.targetScopeId !== targetScopeId)) {
+        const cleaned = await reconcileCloudAttempt(attempt);
+        if (!isCurrent(generation, lifecycle)) return;
+        if (!cleaned) throw new Error("PENDING_RUN_UNCERTAIN");
+        confirmedFingerprintRef.current = undefined;
+        setPrepared(undefined);
+        setConfirmed(false);
+        setOperation("idle");
         return;
       }
-      setCloudRunId(agentRunId);
-      await bridge.claim(agentRunId, { signal: controller.signal });
-      if (!isCurrent(generation, lifecycle) || startingContextKey !== contextKeyRef.current) {
-        await revokeCloudRun(agentRunId);
+      if (!attempt) {
+        attempt = {
+          kind: "start",
+          repository,
+          bridge,
+          tripId: trip.id,
+          material: prepared,
+          createIdempotencyKey: newIdempotencyKey(),
+          newIdempotencyKey,
+          targetCategory: category,
+          targetScopeId,
+          disclosureFingerprint,
+        };
+        pendingAttemptRef.current = attempt;
+      }
+      const agentRunId = await ensureCloudRun(attempt);
+      if (!isCurrent(generation, lifecycle)) {
+        await reconcileCloudAttempt(attempt).catch(() => undefined);
         return;
       }
+      stage = "claim";
+      await attempt.bridge.claim(agentRunId, { signal: controller.signal });
+      if (!isCurrent(generation, lifecycle)) {
+        await reconcileCloudAttempt(attempt).catch(() => undefined);
+        return;
+      }
+      stage = "execute";
+      attempt = { ...attempt, bridgeOperationStarted: true };
+      pendingAttemptRef.current = attempt;
       taskFingerprintRef.current = disclosureFingerprint;
-      setPrepared(undefined);
-      setConfirmed(false);
-      const next = await bridge.executeTravelResearch({
+      const next = await attempt.bridge.executeTravelResearch({
         agentRunId,
         targetCategory: category,
         targetScopeId,
         disclosureFingerprint,
       }, { signal: controller.signal });
-      if (!isCurrent(generation, lifecycle)) return;
+      if (!isCurrent(generation, lifecycle)) {
+        await reconcileCloudAttempt(attempt).catch(() => undefined);
+        return;
+      }
+      confirmedFingerprintRef.current = undefined;
+      setPrepared(undefined);
+      setConfirmed(false);
       setResearchStatus(next);
       setOperation("idle");
     } catch (error) {
-      if (!isCurrent(generation, lifecycle) || controller.signal.aborted) return;
+      if (!attempt) return;
+      if (!isCurrent(generation, lifecycle) || controller.signal.aborted) {
+        await reconcileCloudAttempt(attempt).catch(() => undefined);
+        return;
+      }
       if (error instanceof LocalAgentBridgeError && error.code === "DISCLOSURE_CONTEXT_CHANGED") {
+        clearPendingAttempt(attempt);
         const current = statusRef.current;
         if (current.phase !== "idle") setResearchStatus(syntheticSuperseded(current));
+        confirmedFingerprintRef.current = undefined;
         setConfirmed(false);
         setPrepared(undefined);
         setOperation("idle");
-      } else {
+      } else if (stage === "create") {
+        if (attempt.createDefinitivelyFailed) clearPendingAttempt(attempt);
         setOperation("error");
-        setOperationError("研究未能安全启动，请重新准备后再试。");
+        setOperationError("云端授权创建响应尚未确认；重试会使用同一幂等请求。");
+      } else {
+        const outcome = await reconcileAfterBridgeFailure(attempt, stage);
+        if (!isCurrent(generation, lifecycle)) return;
+        if (outcome.kind === "restored") {
+          confirmedFingerprintRef.current = undefined;
+          setPrepared(undefined);
+          setConfirmed(false);
+          setResearchStatus(outcome.status);
+          setOperation("idle");
+        } else {
+          if (outcome.kind === "cleaned") {
+            confirmedFingerprintRef.current = undefined;
+            setPrepared(undefined);
+            setConfirmed(false);
+          }
+          setOperation("error");
+          setOperationError(outcome.kind === "cleaned"
+            ? "启动响应未确认，旧云端授权已安全清理；请重新准备。"
+            : "启动与撤销结果尚未确认，重试前会先继续对账。");
+        }
       }
     } finally {
-      inFlightRef.current = false;
+      if (isCurrent(generation, lifecycle)) inFlightRef.current = false;
     }
   }
 
@@ -416,36 +542,95 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
     inFlightRef.current = true;
     const blocked = researchStatus;
     const { controller, generation, lifecycle } = beginOperation("resuming");
+    let attempt = pendingAttemptRef.current;
+    let stage: AttemptStage = "create";
     try {
-      const material = await bridge.prepare({ signal: controller.signal });
-      if (!isCurrent(generation, lifecycle)) return;
-      const agentRunId = await createCloudRun(material);
-      setCloudRunId(agentRunId);
-      await bridge.claim(agentRunId, { signal: controller.signal });
-      if (!isCurrent(generation, lifecycle)) return;
-      const next = await bridge.resumeTravelResearch({ agentRunId, researchTaskId: blocked.researchTaskId, resumeAction }, { signal: controller.signal });
-      if (!isCurrent(generation, lifecycle)) return;
+      if (attempt && (attempt.kind !== "resume" || attempt.agentRunId
+        || attempt.repository !== repository || attempt.bridge !== bridge || attempt.tripId !== trip.id
+        || attempt.researchTaskId !== blocked.researchTaskId || attempt.resumeAction !== resumeAction)) {
+        const cleaned = await reconcileCloudAttempt(attempt);
+        if (!isCurrent(generation, lifecycle)) return;
+        if (!cleaned) throw new Error("PENDING_RUN_UNCERTAIN");
+        setOperation("error");
+        setOperationError("上一个云端授权已安全清理，请再次继续原任务。");
+        return;
+      }
+      if (!attempt) {
+        const material = await bridge.prepare({ signal: controller.signal });
+        if (!isCurrent(generation, lifecycle)) return;
+        attempt = {
+          kind: "resume",
+          repository,
+          bridge,
+          tripId: trip.id,
+          material,
+          createIdempotencyKey: newIdempotencyKey(),
+          newIdempotencyKey,
+          researchTaskId: blocked.researchTaskId,
+          resumeAction,
+        };
+        pendingAttemptRef.current = attempt;
+      }
+      const agentRunId = await ensureCloudRun(attempt);
+      if (!isCurrent(generation, lifecycle)) {
+        await reconcileCloudAttempt(attempt).catch(() => undefined);
+        return;
+      }
+      stage = "claim";
+      await attempt.bridge.claim(agentRunId, { signal: controller.signal });
+      if (!isCurrent(generation, lifecycle)) {
+        await reconcileCloudAttempt(attempt).catch(() => undefined);
+        return;
+      }
+      stage = "resume";
+      attempt = { ...attempt, bridgeOperationStarted: true };
+      pendingAttemptRef.current = attempt;
+      const next = await attempt.bridge.resumeTravelResearch({ agentRunId, researchTaskId: blocked.researchTaskId, resumeAction }, { signal: controller.signal });
+      if (!isCurrent(generation, lifecycle)) {
+        await reconcileCloudAttempt(attempt).catch(() => undefined);
+        return;
+      }
       setResearchStatus(next);
       setOperation("idle");
     } catch (error) {
-      if (!isCurrent(generation, lifecycle) || controller.signal.aborted) return;
+      if (!attempt) return;
+      if (!isCurrent(generation, lifecycle) || controller.signal.aborted) {
+        await reconcileCloudAttempt(attempt).catch(() => undefined);
+        return;
+      }
       if (error instanceof LocalAgentBridgeError && error.code === "DISCLOSURE_CONTEXT_CHANGED") {
+        clearPendingAttempt(attempt);
         setResearchStatus(syntheticSuperseded(blocked));
+        confirmedFingerprintRef.current = undefined;
         setConfirmed(false);
         setPrepared(undefined);
         setOperation("idle");
-      } else {
+      } else if (stage === "create") {
+        if (attempt.createDefinitivelyFailed) clearPendingAttempt(attempt);
         setOperation("error");
-        setOperationError("暂时无法继续原 Codex 任务，未创建新研究内容。");
+        setOperationError("恢复授权创建响应尚未确认；重试会使用同一幂等请求。");
+      } else {
+        const outcome = await reconcileAfterBridgeFailure(attempt, stage, blocked.researchTaskId);
+        if (!isCurrent(generation, lifecycle)) return;
+        if (outcome.kind === "restored") {
+          setResearchStatus(outcome.status);
+          setOperation("idle");
+        } else {
+          setOperation("error");
+          setOperationError(outcome.kind === "cleaned"
+            ? "恢复响应未确认，新授权已安全清理；可再次继续原任务。"
+            : "恢复与撤销结果尚未确认，再次继续前会先对账。");
+        }
       }
     } finally {
-      inFlightRef.current = false;
+      if (isCurrent(generation, lifecycle)) inFlightRef.current = false;
     }
   }
 
   async function stopResearch() {
     if (!bridge || researchStatus.phase === "idle" || inFlightRef.current) return;
     const taskId = researchStatus.researchTaskId;
+    const attempt = pendingAttemptRef.current;
     pendingCancellationRef.current = taskId;
     inFlightRef.current = true;
     const { controller, generation, lifecycle } = beginOperation("cancelling");
@@ -455,8 +640,15 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       } catch {
         // A lost cancellation response is reconciled by the required status read below.
       }
+      if (!isCurrent(generation, lifecycle)) {
+        if (attempt) await reconcileCloudAttempt(attempt).catch(() => undefined);
+        return;
+      }
       const reconciled = await bridge.getResearchStatus({ signal: controller.signal });
-      if (!isCurrent(generation, lifecycle)) return;
+      if (!isCurrent(generation, lifecycle)) {
+        if (attempt) await reconcileCloudAttempt(attempt).catch(() => undefined);
+        return;
+      }
       if (reconciled.phase === "idle" || reconciled.researchTaskId !== taskId) throw new Error("INVALID_RESEARCH_STATUS");
       if (reconciled.phase !== "cancelled") {
         setResearchStatus(reconciled);
@@ -466,17 +658,20 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
           : "本机停止结果尚未确认，请继续对账。");
         return;
       }
-      if (cloudRunId) await revokeCloudRun(cloudRunId);
+      if (attempt && !await reconcileCloudAttempt(attempt)) throw new Error("RUN_RECONCILIATION_UNCERTAIN");
+      if (!isCurrent(generation, lifecycle)) return;
       pendingCancellationRef.current = undefined;
-      setCloudRunId(undefined);
       setResearchStatus(reconciled);
       setOperation("idle");
     } catch {
-      if (!isCurrent(generation, lifecycle) || controller.signal.aborted) return;
+      if (!isCurrent(generation, lifecycle) || controller.signal.aborted) {
+        if (attempt) await reconcileCloudAttempt(attempt).catch(() => undefined);
+        return;
+      }
       setOperation("error");
       setOperationError("停止结果尚未确认，不会将本次操作标记为成功。");
     } finally {
-      inFlightRef.current = false;
+      if (isCurrent(generation, lifecycle)) inFlightRef.current = false;
     }
   }
 
@@ -522,13 +717,15 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       disclosure={disclosure}
       confirmed={confirmed}
       disabled={!prepared || locked}
-      onConfirmedChange={setConfirmed}
+      onConfirmedChange={(next) => {
+        confirmedFingerprintRef.current = next ? disclosureFingerprint : undefined;
+        setConfirmed(next);
+      }}
     /> : null}
 
-    {cloudRunId || researchStatus.phase !== "idle" ? <dl className="decision-agent-panel__status-card">
-      {cloudRunId ? <div><dt>云端授权</dt><dd>{cloudRunId}</dd></div> : null}
-      {researchStatus.phase !== "idle" ? <div><dt>本机任务</dt><dd>{researchStatus.researchTaskId}</dd></div> : null}
-      <div><dt>当前阶段</dt><dd>{researchStatus.phase}</dd></div>
+    {researchStatus.phase !== "idle" ? <dl className="decision-agent-panel__status-card">
+      <div><dt>本机任务</dt><dd>{researchStatus.researchTaskId}</dd></div>
+      <div><dt>当前阶段</dt><dd>{statusPhaseLabel(researchStatus)}</dd></div>
     </dl> : null}
 
     {message.text ? <p className="decision-agent-panel__message" role={message.role}>{message.text}</p> : null}
@@ -543,13 +740,22 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       </> : null}
       {bridge && activePhases.has(researchStatus.phase) && researchStatus.phase !== "cancelling" ? <button className="control-button control-button--danger" type="button" disabled={!operationAllowsRetry} onClick={() => { void stopResearch(); }}>停止搜索</button> : null}
       {bridge && researchStatus.phase !== "needs_owner_action" && !activePhases.has(researchStatus.phase) ? <>
-        {!prepared ? <button ref={operation === "error" ? retryRef : undefined} className="control-button control-button--secondary" type="button" disabled={!category || !targetScopeId || !disclosure || !operationAllowsRetry} onClick={() => { void prepareLocal(); }}>准备本机 Codex</button> : null}
-        {prepared && category ? <button ref={operation === "error" ? retryRef : undefined} className="control-button control-button--primary" type="button" disabled={!confirmed || !disclosureFingerprint || !operationAllowsRetry} onClick={() => { void startResearch(); }}>开始研究{categoryCopy[category]}候选</button> : null}
+        {!prepared ? <button className="control-button control-button--secondary" type="button" disabled={!category || !targetScopeId || !disclosure || !operationAllowsRetry} onClick={() => { void prepareLocal(); }}>准备本机 Codex</button> : null}
+        {prepared && category ? <button className="control-button control-button--primary" type="button" disabled={!confirmed || !disclosureFingerprint || !operationAllowsRetry} onClick={() => { void startResearch(); }}>开始研究{categoryCopy[category]}候选</button> : null}
       </> : null}
-      {operation === "error" && researchStatus.phase !== "needs_owner_action" && activePhases.has(researchStatus.phase) ? <button ref={retryRef} className="control-button control-button--secondary" type="button" onClick={() => {
+      {operation === "error" && researchStatus.phase !== "needs_owner_action" ? <button ref={retryRef} className="control-button control-button--secondary" type="button" onClick={() => {
         setOperation("idle");
         setOperationError(undefined);
-      }}>继续查看状态</button> : null}
+      }}>{activePhases.has(researchStatus.phase) ? "继续查看状态" : "返回研究设置"}</button> : null}
+      {operation !== "error" && (researchStatus.phase === "failed" || researchStatus.phase === "superseded") ? <button ref={retryRef} className="control-button control-button--secondary" type="button" onClick={() => {
+        taskFingerprintRef.current = undefined;
+        confirmedFingerprintRef.current = undefined;
+        setPrepared(undefined);
+        setConfirmed(false);
+        setResearchStatus({ phase: "idle" });
+        setOperation("idle");
+        setOperationError(undefined);
+      }}>重新选择研究范围</button> : null}
     </div>
   </section>;
 }
