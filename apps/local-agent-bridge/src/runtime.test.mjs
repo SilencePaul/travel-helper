@@ -95,6 +95,37 @@ test("prepare always constrains caller input to submitProposalBatch", async () =
   assert.deepEqual(actions, ["claimAgentRun", "submitProposalBatch"]);
 });
 
+test("submitProposalBatch is a fixed runtime wrapper and uncertain retries reuse the pending envelope", async () => {
+  const bodies = [];
+  let attempt = 0;
+  const runtime = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.example.test/api/agent",
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.action === "claimAgentRun") {
+        return Response.json({ ok: true, data: claimedData(body.agentRunId) });
+      }
+      bodies.push(init.body);
+      attempt += 1;
+      if (attempt === 1) throw new TypeError("response lost");
+      return Response.json({ ok: true, action: "submitProposalBatch", data: { count: 2 } });
+    },
+  });
+  runtime.prepare();
+  await runtime.claim("agent-run-submit-wrapper");
+  const payload = { round: 1, candidates: [{ id: "safe" }] };
+
+  await assert.rejects(runtime.submitProposalBatch(payload), {
+    code: "AGENT_TRANSPORT_UNAVAILABLE",
+  });
+  payload.round = 999;
+  await runtime.submitProposalBatch({ round: 1, candidates: [{ id: "safe" }] });
+
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[0], bodies[1]);
+  assert.equal(JSON.parse(bodies[1]).payload.round, 1);
+});
+
 test("prepare is idempotent only before claim work starts and never rotates active capability state", async () => {
   let claimAttempts = 0;
   const runtime = new LocalAgentBridgeRuntime({

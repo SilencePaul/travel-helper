@@ -359,6 +359,10 @@ export class LocalAgentBridgeRuntime {
     return response.data;
   }
 
+  async submitProposalBatch(payload) {
+    return this.#executeCommand("submitProposalBatch", payload);
+  }
+
   async revokeSelf() {
     return this.#executeCommand("revokeAgentRunSelf", {});
   }
