@@ -1,3 +1,5 @@
+// @ts-expect-error Vitest executes this loopback transport test in Node; the Web build intentionally omits Node globals.
+import { createServer } from "node:http";
 import { ResearchErrorCodeSchema, type ResearchStatus } from "@travel/contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -165,7 +167,7 @@ describe("LocalAgentBridgeClient", () => {
     await expect(operation).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
   });
 
-  it.each(["resume", "cancel"])("allows an idle %s response without a research task id", async (method) => {
+  it.each(["resume", "cancel"])("rejects an idle %s response because it cannot identify the requested task", async (method) => {
     const fetch = vi.fn().mockResolvedValue(jsonResponse({ ok: true, data: { phase: "idle" } }));
     const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch });
 
@@ -173,7 +175,7 @@ describe("LocalAgentBridgeClient", () => {
       ? client.resumeTravelResearch(resumeInput)
       : client.cancelResearch({ researchTaskId: "research-task-1" });
 
-    await expect(operation).resolves.toEqual({ phase: "idle" });
+    await expect(operation).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
   });
 
   it.each([
@@ -257,6 +259,7 @@ describe("LocalAgentBridgeClient", () => {
 
   it("rejects a declared oversized response before acquiring its body reader", async () => {
     let readerAcquired = false;
+    let cancelCount = 0;
     const response = {
       status: 200,
       headers: new Headers({
@@ -264,6 +267,7 @@ describe("LocalAgentBridgeClient", () => {
         "content-length": String(64 * 1_024 + 1),
       }),
       body: {
+        cancel: async () => { cancelCount += 1; },
         getReader() {
           readerAcquired = true;
           throw new Error("body must not be read");
@@ -276,6 +280,35 @@ describe("LocalAgentBridgeClient", () => {
 
     await expect(client.getResearchStatus()).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
     expect(readerAcquired).toBe(false);
+    expect(cancelCount).toBe(1);
+  });
+
+  it.each(["mime", "reader"])("awaits body cancellation on an early %s rejection", async (failure) => {
+    const events: string[] = [];
+    const body = {
+      cancel: async () => {
+        events.push("cancel-start");
+        await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 10));
+        events.push("cancel-end");
+      },
+      getReader() {
+        events.push("reader");
+        throw new Error("reader unavailable");
+      },
+    };
+    const response = {
+      status: 200,
+      headers: new Headers({ "content-type": failure === "mime" ? "text/plain" : "application/json" }),
+      body,
+      json: async () => ({ ok: true, data: researchStatus }),
+    } as unknown as Response;
+    const fetch = vi.fn().mockResolvedValue(response);
+    const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch, timeoutMs: 1_000 });
+
+    await expect(client.getResearchStatus()).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
+    expect(events).toEqual(failure === "mime"
+      ? ["cancel-start", "cancel-end"]
+      : ["reader", "cancel-start", "cancel-end"]);
   });
 
   it("cancels streamed response reading as soon as the 64 KiB accumulation limit is exceeded", async () => {
@@ -302,6 +335,162 @@ describe("LocalAgentBridgeClient", () => {
     await expect(client.getResearchStatus()).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
     expect(readCount).toBe(2);
     expect(cancelCount).toBe(1);
+  });
+
+  it("rejects a zero-length unfinished chunk and awaits cancel before releasing the reader lock", async () => {
+    const events: string[] = [];
+    let readCount = 0;
+    const response = {
+      status: 200,
+      headers: new Headers({ "content-type": "application/json" }),
+      body: {
+        getReader() {
+          return {
+            read: async () => {
+              readCount += 1;
+              return readCount === 1
+                ? { done: false as const, value: new Uint8Array() }
+                : { done: true as const, value: undefined };
+            },
+            cancel: async () => {
+              events.push("cancel-start");
+              await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 10));
+              events.push("cancel-end");
+            },
+            releaseLock: () => { events.push("release"); },
+          };
+        },
+      },
+    } as unknown as Response;
+    const fetch = vi.fn().mockResolvedValue(response);
+    const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch, timeoutMs: 1_000 });
+
+    await expect(client.getResearchStatus()).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
+    expect(readCount).toBe(1);
+    expect(events).toEqual(["cancel-start", "cancel-end", "release"]);
+  });
+
+  it("lets a 1 ms timeout interrupt a pathological stream of one-byte microtask chunks", async () => {
+    let readCount = 0;
+    let cancelCount = 0;
+    const response = {
+      status: 200,
+      headers: new Headers({ "content-type": "application/json" }),
+      body: {
+        getReader() {
+          return {
+            read: async () => {
+              readCount += 1;
+              return readCount <= 5_000
+                ? { done: false as const, value: new Uint8Array([0x20]) }
+                : { done: true as const, value: undefined };
+            },
+            cancel: async () => { cancelCount += 1; },
+            releaseLock: () => undefined,
+          };
+        },
+      },
+    } as unknown as Response;
+    const fetch = vi.fn().mockResolvedValue(response);
+    const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch, timeoutMs: 1 });
+
+    const error = await client.getResearchStatus().then(() => undefined, (value: unknown) => value);
+
+    expect(error).toMatchObject({ code: "BRIDGE_UNAVAILABLE" });
+    expect(readCount).toBeLessThan(5_000);
+    expect(cancelCount).toBe(1);
+  });
+
+  it("preserves the original response error when cancel and release also fail", async () => {
+    const response = {
+      status: 200,
+      headers: new Headers({ "content-type": "application/json" }),
+      body: {
+        getReader() {
+          let first = true;
+          return {
+            read: async () => {
+              if (first) {
+                first = false;
+                return { done: false as const, value: new Uint8Array() };
+              }
+              return { done: true as const, value: undefined };
+            },
+            cancel: async () => { throw new Error("cancel detail"); },
+            releaseLock: () => { throw new Error("release detail"); },
+          };
+        },
+      },
+    } as unknown as Response;
+    const fetch = vi.fn().mockResolvedValue(response);
+    const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch });
+
+    await expect(client.getResearchStatus()).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
+  });
+
+  it("cancels the body of a fetch response that arrives after the caller has already aborted", async () => {
+    let resolveFetch!: (response: Response) => void;
+    let bodyCancelled!: () => void;
+    const cancelled = new Promise<void>((resolve) => { bodyCancelled = resolve; });
+    let cancelCount = 0;
+    const response = {
+      status: 200,
+      headers: new Headers({ "content-type": "application/json" }),
+      body: {
+        cancel: async () => {
+          cancelCount += 1;
+          bodyCancelled();
+        },
+      },
+    } as unknown as Response;
+    const fetch = vi.fn(() => new Promise<Response>((resolve) => { resolveFetch = resolve; }));
+    const controller = new AbortController();
+    const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch, timeoutMs: 1_000 });
+
+    const request = client.getResearchStatus({ signal: controller.signal });
+    controller.abort(new Error("caller stopped"));
+    await expect(request).rejects.toMatchObject({ code: "BRIDGE_UNAVAILABLE" });
+    resolveFetch(response);
+    const cleanup = await Promise.race([
+      cancelled.then(() => "cancelled"),
+      new Promise<string>((resolve) => globalThis.setTimeout(() => resolve("still-open"), 30)),
+    ]);
+
+    expect(cleanup).toBe("cancelled");
+    expect(cancelCount).toBe(1);
+  });
+
+  it("closes a real loopback response socket when body reading times out", async () => {
+    let socketClosed!: () => void;
+    const closed = new Promise<void>((resolve) => { socketClosed = resolve; });
+    const server = createServer((_request: unknown, response: {
+      on(event: "close", listener: () => void): void;
+      writeHead(status: number, headers: Record<string, string>): void;
+      write(chunk: string): void;
+    }) => {
+      response.on("close", socketClosed);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.write("{\"ok\":true,\"data\":");
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("loopback test server did not bind");
+    const client = new LocalAgentBridgeClient(`http://127.0.0.1:${address.port}`, { timeoutMs: 10 });
+
+    try {
+      await expect(client.getResearchStatus()).rejects.toMatchObject({ code: "BRIDGE_UNAVAILABLE" });
+      const outcome = await Promise.race([
+        closed.then(() => "closed"),
+        new Promise<string>((resolve) => globalThis.setTimeout(() => resolve("still-open"), 500)),
+      ]);
+      expect(outcome).toBe("closed");
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("rejects a pre-aborted request without invoking fetch", async () => {
