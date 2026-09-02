@@ -33,7 +33,7 @@ describe("HotelComparePage", () => {
     await waitFor(() => expect(screen.getByText(/太平山顶 18 分钟/)).toBeVisible());
     expect(screen.getByTestId("hotel-commute")).toHaveTextContent("待高德路线确认");
     expect(screen.getAllByText(/非 2026 十一实时可订价/)).toHaveLength(2);
-    expect(screen.getByRole("link", { name: "Booking.com · 香港百乐酒店价格与房型（新窗口）", exact: true })).toHaveAttribute("href", "https://www.booking.com/hotel/hk/parkhotel.zh-tw.html");
+    expect(screen.getByRole("link", { name: "Booking.com · 香港百乐酒店价格与房型（新窗口）" })).toHaveAttribute("href", "https://www.booking.com/hotel/hk/parkhotel.zh-tw.html");
   });
 
   it("does not invent a commute when AMap has no response", async () => {
