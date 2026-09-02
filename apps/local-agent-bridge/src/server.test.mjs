@@ -9,6 +9,9 @@ const APP_ORIGIN = "https://trip.example";
 const STATUS = Object.freeze({
   phase: "needs_owner_action",
   researchTaskId: "research-task-1",
+  agentRunId: "agent-run-1",
+  operationId: "operation-1",
+  reconciliationState: "active",
   startedAt: "2026-09-01T00:00:00.000Z",
   updatedAt: "2026-09-01T00:01:00.000Z",
   blockedReason: "source_captcha",
@@ -165,6 +168,9 @@ function fakeRuntime(events = []) {
       return {
         phase: "cancelled",
         researchTaskId: input.researchTaskId,
+        agentRunId: input.agentRunId,
+        operationId: input.operationId,
+        reconciliationState: "active",
         startedAt: STATUS.startedAt,
         updatedAt: STATUS.updatedAt,
         errorCode: "CODEX_RESEARCH_CANCELLED",
@@ -289,6 +295,7 @@ test("the fixed route matrix dispatches only exact methods and strictly projects
     ["POST", "/v1/agent-runs/claim", { agentRunId: "agent-run-1" }, ["claim", "agent-run-1"]],
     ["POST", "/v1/agent-runs/execute-travel-research", {
       agentRunId: "agent-run-1",
+      operationId: "operation-1",
       targetCategory: "hotel",
       targetScopeId: `scope_${"a".repeat(64)}`,
       disclosureFingerprint: "b".repeat(64),
@@ -296,10 +303,15 @@ test("the fixed route matrix dispatches only exact methods and strictly projects
     ["GET", "/v1/agent-runs/research-status", undefined, ["status"]],
     ["POST", "/v1/agent-runs/resume-travel-research", {
       agentRunId: "agent-run-2",
+      operationId: "operation-2",
       researchTaskId: "research-task-1",
       resumeAction: "skip_blocked_source",
     }, ["resume"]],
-    ["POST", "/v1/agent-runs/cancel-research", { researchTaskId: "research-task-1" }, ["cancel"]],
+    ["POST", "/v1/agent-runs/cancel-research", {
+      researchTaskId: "research-task-1",
+      agentRunId: "agent-run-1",
+      operationId: "operation-1",
+    }, ["cancel"]],
   ];
 
   for (const [method, path, body, expectedEvent] of routes) {
@@ -549,6 +561,7 @@ test("stable business errors are allowlisted and never expose error details", as
   context.after(() => bridge.close());
   const validExecute = {
     agentRunId: "agent-run-1",
+    operationId: "operation-1",
     targetCategory: "hotel",
     targetScopeId: `scope_${"a".repeat(64)}`,
     disclosureFingerprint: "b".repeat(64),

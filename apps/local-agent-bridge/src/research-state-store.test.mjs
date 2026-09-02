@@ -22,6 +22,9 @@ function lockOwner(pid = process.pid, nonce = "replacement-owner-nonce-1234") {
 function recoverableState(overrides = {}) {
   return {
     researchTaskId: "research-task-1",
+    agentRunId: "agent-run-1",
+    operationId: "operation-1",
+    reconciliationState: "active",
     codexThreadId: "0198f29d-45df-7ce0-8f84-140b19c5ca21",
     targetCategory: "hotel",
     targetScopeId: `scope_${"a".repeat(64)}`,

@@ -5,7 +5,8 @@ import { MemoryRouter, useNavigate } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import seed from "../../../../content/trip.seed.json";
 import { TripApp } from "../App";
-import { browserDataMode, browserTestDecisionAgentEnabled, ProductionAuthGate, readBrowserTestDecisionCoordinator } from "./BrowserRoot";
+import { ProductionAuthGate } from "./BrowserRoot";
+import { browserDataMode, browserTestDecisionAgentEnabled, callActiveBrowserTestBridge, readBrowserTestDecisionCoordinator } from "./browserEnvironment";
 
 const seededTrip = TripSchema.parse(seed);
 
@@ -32,13 +33,9 @@ describe("browserDataMode", () => {
   });
 
   it("rejects a pre-aborted dev Bridge request before calling its coordinator", async () => {
-    const module = await import("./BrowserRoot") as unknown as {
-      callActiveBrowserTestBridge?: <T>(signal: AbortSignal | undefined, send: () => Promise<T>) => Promise<T>;
-    };
-    expect(module.callActiveBrowserTestBridge).toBeTypeOf("function");
     const send = vi.fn(async () => "unexpected");
 
-    await expect(module.callActiveBrowserTestBridge!(AbortSignal.abort(), send)).rejects.toMatchObject({
+    await expect(callActiveBrowserTestBridge(AbortSignal.abort(), send)).rejects.toMatchObject({
       name: "LocalAgentBridgeError",
       code: "AGENT_TRANSPORT_UNAVAILABLE",
     });

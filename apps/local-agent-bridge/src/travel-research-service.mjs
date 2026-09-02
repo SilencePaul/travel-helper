@@ -67,12 +67,18 @@ function safeHostname(value) {
 
 function baseStatus(value) {
   if (typeof value.researchTaskId !== "string" || value.researchTaskId.length === 0
+    || typeof value.agentRunId !== "string" || value.agentRunId.length === 0
+    || typeof value.operationId !== "string" || value.operationId.length === 0
+    || !["active", "self_revoke_reconciling"].includes(value.reconciliationState)
     || !canonicalTimestamp(value.startedAt) || !canonicalTimestamp(value.updatedAt)) {
     throw codedError("CODEX_RESEARCH_FAILED");
   }
   return {
     phase: value.phase,
     researchTaskId: value.researchTaskId,
+    agentRunId: value.agentRunId,
+    operationId: value.operationId,
+    reconciliationState: value.reconciliationState,
     startedAt: value.startedAt,
     updatedAt: value.updatedAt,
   };
@@ -224,11 +230,19 @@ export class TravelResearchService {
     this.#status = safeResearchStatus({
       phase,
       researchTaskId: this.#task.researchTaskId,
+      agentRunId: this.#task.agentRunId,
+      operationId: this.#task.operationId,
+      reconciliationState: this.#task.selfRevokeReconciling ? "self_revoke_reconciling" : "active",
       startedAt: this.#task.startedAt,
       updatedAt: this.#now(),
       ...extras,
     });
     return this.#status;
+  }
+
+  #finishStatus(phase, extras = {}) {
+    this.#task.selfRevokeReconciling = false;
+    return this.#setStatus(phase, extras);
   }
 
   #assertClaimed(agentRunId) {
@@ -409,8 +423,9 @@ export class TravelResearchService {
   }
 
   executeTravelResearch(input) {
-    if (!exactKeys(input, ["agentRunId", "targetCategory", "targetScopeId", "disclosureFingerprint"])
+    if (!exactKeys(input, ["agentRunId", "operationId", "targetCategory", "targetScopeId", "disclosureFingerprint"])
       || typeof input.agentRunId !== "string" || input.agentRunId.length === 0
+      || typeof input.operationId !== "string" || input.operationId.length === 0
       || !CATEGORIES.has(input.targetCategory)
       || typeof input.targetScopeId !== "string" || !/^scope_[a-f0-9]{64}$/u.test(input.targetScopeId)
       || typeof input.disclosureFingerprint !== "string" || !/^[a-f0-9]{64}$/u.test(input.disclosureFingerprint)) {
@@ -461,6 +476,7 @@ export class TravelResearchService {
         targetScopeId: input.targetScopeId,
         disclosureFingerprint: input.disclosureFingerprint,
         agentRunId: input.agentRunId,
+        operationId: input.operationId,
         operationKey,
         startedAt,
         activeRuntimeMs: 0,
@@ -481,7 +497,7 @@ export class TravelResearchService {
       if (built.disclosureFingerprint !== input.disclosureFingerprint) {
         await this.#revokeStrict({ cleanup: true });
         await this.#store.clear();
-        return this.#setStatus("superseded", { errorCode: "DISCLOSURE_CONTEXT_CHANGED" });
+        return this.#finishStatus("superseded", { errorCode: "DISCLOSURE_CONTEXT_CHANGED" });
       }
       if (this.#cancelRequested) return this.#finishCancelled();
       this.#task.built = built;
@@ -524,6 +540,8 @@ export class TravelResearchService {
     if (!recovered) return this.#status;
     this.#task = {
       researchTaskId: recovered.researchTaskId,
+      agentRunId: recovered.agentRunId,
+      operationId: recovered.operationId,
       aliasSalt: recovered.aliasSalt,
       targetCategory: recovered.targetCategory,
       targetScopeId: recovered.targetScopeId,
@@ -539,8 +557,9 @@ export class TravelResearchService {
   }
 
   resumeTravelResearch(input) {
-    if (!exactKeys(input, ["agentRunId", "researchTaskId", "resumeAction"])
+    if (!exactKeys(input, ["agentRunId", "operationId", "researchTaskId", "resumeAction"])
       || typeof input.agentRunId !== "string" || input.agentRunId.length === 0
+      || typeof input.operationId !== "string" || input.operationId.length === 0
       || typeof input.researchTaskId !== "string" || input.researchTaskId.length === 0
       || !RESUME_ACTIONS.has(input.resumeAction)) {
       if (typeof input?.agentRunId === "string") this.#releaseRejectedOperation(input.agentRunId);
@@ -590,6 +609,7 @@ export class TravelResearchService {
       this.#task = {
         researchTaskId: input.researchTaskId,
         agentRunId: input.agentRunId,
+        operationId: input.operationId,
         operationKey,
         agentExpiresAt,
         activeRuntimeMs: 0,
@@ -616,6 +636,7 @@ export class TravelResearchService {
         runnerRuntimeMs: recovered.activeRuntimeMs,
         serviceRuntimeMs: 0,
         agentRunId: input.agentRunId,
+        operationId: input.operationId,
         operationKey,
         agentExpiresAt,
         startedAt: recovered.startedAt,
@@ -714,7 +735,7 @@ export class TravelResearchService {
       return this.#finishFailure("AGENT_TRANSPORT_UNAVAILABLE", false);
     }
     await this.#store.clear();
-    this.#setStatus("superseded", { errorCode: "DISCLOSURE_CONTEXT_CHANGED" });
+    this.#finishStatus("superseded", { errorCode: "DISCLOSURE_CONTEXT_CHANGED" });
     return this.#status;
   }
 
@@ -775,7 +796,7 @@ export class TravelResearchService {
         } catch (error) {
           if (stableFailureCode(error) !== "AGENT_RUN_INACTIVE") throw error;
         }
-        return this.#setStatus("completed");
+        return this.#finishStatus("completed");
       }
     } catch (error) {
       if (error?.code === "CODEX_NOT_AUTHENTICATED") {
@@ -798,6 +819,9 @@ export class TravelResearchService {
       const updatedAt = this.#now();
       const record = {
         researchTaskId: this.#task.researchTaskId,
+        agentRunId: this.#task.agentRunId,
+        operationId: this.#task.operationId,
+        reconciliationState: "active",
         codexThreadId: this.#task.codexThreadId,
         targetCategory: this.#task.targetCategory,
         targetScopeId: this.#task.targetScopeId,
@@ -942,6 +966,16 @@ export class TravelResearchService {
       }
       this.#task.terminalStarted = true;
     }
+    if (action === "revokeAgentRunSelf" && !this.#task.selfRevokeReconciling) {
+      this.#task.selfRevokeReconciling = true;
+      if (this.#status.phase !== "idle") {
+        this.#status = safeResearchStatus({
+          ...this.#status,
+          updatedAt: this.#now(),
+          reconciliationState: "self_revoke_reconciling",
+        });
+      }
+    }
     this.#task.pendingSignedAction = action;
   }
 
@@ -970,7 +1004,7 @@ export class TravelResearchService {
     } catch {
       finalCode = "CODEX_RESEARCH_FAILED";
     }
-    return this.#setStatus("failed", { errorCode: finalCode });
+    return this.#finishStatus("failed", { errorCode: finalCode });
   }
 
   async #releaseOrphanClaim() {
@@ -1002,17 +1036,20 @@ export class TravelResearchService {
     } catch {
       return this.#finishFailure("CODEX_RESEARCH_FAILED", false);
     }
-    return this.#setStatus("cancelled", { errorCode: "CODEX_RESEARCH_CANCELLED" });
+    return this.#finishStatus("cancelled", { errorCode: "CODEX_RESEARCH_CANCELLED" });
   }
 
   async cancelResearch(input) {
-    if (!exactKeys(input, ["researchTaskId"])
-      || typeof input.researchTaskId !== "string" || input.researchTaskId.length === 0) {
+    if (!exactKeys(input, ["researchTaskId", "agentRunId", "operationId"])
+      || typeof input.researchTaskId !== "string" || input.researchTaskId.length === 0
+      || typeof input.agentRunId !== "string" || input.agentRunId.length === 0
+      || typeof input.operationId !== "string" || input.operationId.length === 0) {
       throw codedError("CODEX_RESEARCH_FAILED");
     }
     await this.getResearchStatus();
-    if (!this.#task || this.#task.researchTaskId !== input.researchTaskId) {
-      throw codedError("CODEX_RESEARCH_FAILED");
+    if (!this.#task || this.#task.researchTaskId !== input.researchTaskId
+      || this.#task.agentRunId !== input.agentRunId || this.#task.operationId !== input.operationId) {
+      throw codedError("AGENT_RUN_INACTIVE");
     }
     if (["completed", "failed", "cancelled", "superseded"].includes(this.#status.phase)) {
       return safeResearchStatus(this.#status);

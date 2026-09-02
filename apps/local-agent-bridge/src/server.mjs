@@ -167,8 +167,9 @@ function validClaim(value) {
 }
 
 function validExecute(value) {
-  return exactKeys(value, ["agentRunId", "targetCategory", "targetScopeId", "disclosureFingerprint"])
+  return exactKeys(value, ["agentRunId", "operationId", "targetCategory", "targetScopeId", "disclosureFingerprint"])
     && opaqueIdentifier(value.agentRunId)
+    && opaqueIdentifier(value.operationId)
     && CATEGORIES.has(value.targetCategory)
     && typeof value.targetScopeId === "string"
     && /^scope_[a-f0-9]{64}$/u.test(value.targetScopeId)
@@ -177,14 +178,18 @@ function validExecute(value) {
 }
 
 function validResume(value) {
-  return exactKeys(value, ["agentRunId", "researchTaskId", "resumeAction"])
+  return exactKeys(value, ["agentRunId", "operationId", "researchTaskId", "resumeAction"])
     && opaqueIdentifier(value.agentRunId)
+    && opaqueIdentifier(value.operationId)
     && opaqueIdentifier(value.researchTaskId)
     && RESUME_ACTIONS.has(value.resumeAction);
 }
 
 function validCancel(value) {
-  return exactKeys(value, ["researchTaskId"]) && opaqueIdentifier(value.researchTaskId);
+  return exactKeys(value, ["researchTaskId", "agentRunId", "operationId"])
+    && opaqueIdentifier(value.researchTaskId)
+    && opaqueIdentifier(value.agentRunId)
+    && opaqueIdentifier(value.operationId);
 }
 
 function projectPrepared(value) {

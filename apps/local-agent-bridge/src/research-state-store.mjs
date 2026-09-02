@@ -8,6 +8,9 @@ import { isAbsolute, join, parse, resolve } from "node:path";
 
 export const RECOVERY_STATE_FIELDS = Object.freeze([
   "researchTaskId",
+  "agentRunId",
+  "operationId",
+  "reconciliationState",
   "codexThreadId",
   "targetCategory",
   "targetScopeId",
@@ -178,6 +181,9 @@ function defaultIsProcessAlive(pid) {
 function validateStateShape(value) {
   const valid = hasExactFields(value)
     && opaqueIdentifier(value.researchTaskId)
+    && opaqueIdentifier(value.agentRunId)
+    && opaqueIdentifier(value.operationId)
+    && value.reconciliationState === "active"
     && opaqueIdentifier(value.codexThreadId)
     && TARGET_CATEGORIES.has(value.targetCategory)
     && /^scope_[a-f0-9]{64}$/u.test(value.targetScopeId)

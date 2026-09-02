@@ -17,12 +17,16 @@ const prepared = {
 const researchStatus = {
   phase: "researching" as const,
   researchTaskId: "research-task-1",
+  agentRunId: "agent-run-1",
+  operationId: "operation-1",
+  reconciliationState: "active" as const,
   startedAt: "2026-08-28T00:00:00.000Z",
   updatedAt: "2026-08-28T00:01:00.000Z",
 };
 
 const executeInput = {
   agentRunId: "agent-run-1",
+  operationId: "operation-1",
   targetCategory: "hotel" as const,
   targetScopeId: `scope_${"a".repeat(64)}`,
   disclosureFingerprint: "b".repeat(64),
@@ -30,8 +34,15 @@ const executeInput = {
 
 const resumeInput = {
   agentRunId: "agent-run-2",
+  operationId: "operation-2",
   researchTaskId: "research-task-1",
   resumeAction: "skip_blocked_source" as const,
+};
+
+const cancelInput = {
+  researchTaskId: "research-task-1",
+  agentRunId: "agent-run-1",
+  operationId: "operation-1",
 };
 
 function jsonResponse(body: unknown, status = 200) {
@@ -126,14 +137,22 @@ describe("LocalAgentBridgeClient", () => {
     const fetch = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ ok: true, data: researchStatus }))
       .mockResolvedValueOnce(jsonResponse({ ok: true, data: researchStatus }))
-      .mockResolvedValueOnce(jsonResponse({ ok: true, data: researchStatus }))
+      .mockResolvedValueOnce(jsonResponse({ ok: true, data: {
+        ...researchStatus,
+        agentRunId: resumeInput.agentRunId,
+        operationId: resumeInput.operationId,
+      } }))
       .mockResolvedValueOnce(jsonResponse({ ok: true, data: cancelledStatus }));
     const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch });
 
     await expect(client.executeTravelResearch(executeInput)).resolves.toEqual(researchStatus);
     await expect(client.getResearchStatus()).resolves.toEqual(researchStatus);
-    await expect(client.resumeTravelResearch(resumeInput)).resolves.toEqual(researchStatus);
-    await expect(client.cancelResearch({ researchTaskId: "research-task-1" })).resolves.toEqual(cancelledStatus);
+    await expect(client.resumeTravelResearch(resumeInput)).resolves.toEqual({
+      ...researchStatus,
+      agentRunId: resumeInput.agentRunId,
+      operationId: resumeInput.operationId,
+    });
+    await expect(client.cancelResearch(cancelInput)).resolves.toEqual(cancelledStatus);
 
     const calls = fetch.mock.calls;
     expect(calls).toHaveLength(4);
@@ -149,7 +168,7 @@ describe("LocalAgentBridgeClient", () => {
     expect(JSON.parse(String(calls[2]?.[1]?.body))).toEqual(resumeInput);
     expect(calls[3]?.[0]).toBe("http://127.0.0.1:43120/v1/agent-runs/cancel-research");
     expect(calls[3]?.[1]).toMatchObject({ method: "POST" });
-    expect(JSON.parse(String(calls[3]?.[1]?.body))).toEqual({ researchTaskId: "research-task-1" });
+    expect(JSON.parse(String(calls[3]?.[1]?.body))).toEqual(cancelInput);
     for (const [, init] of calls) assertSafeRequest(init);
   });
 
@@ -162,7 +181,7 @@ describe("LocalAgentBridgeClient", () => {
 
     const operation = method === "resume"
       ? client.resumeTravelResearch(resumeInput)
-      : client.cancelResearch({ researchTaskId: "research-task-1" });
+      : client.cancelResearch(cancelInput);
 
     await expect(operation).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
   });
@@ -173,7 +192,7 @@ describe("LocalAgentBridgeClient", () => {
 
     const operation = method === "resume"
       ? client.resumeTravelResearch(resumeInput)
-      : client.cancelResearch({ researchTaskId: "research-task-1" });
+      : client.cancelResearch(cancelInput);
 
     await expect(operation).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
   });
@@ -182,7 +201,12 @@ describe("LocalAgentBridgeClient", () => {
     ["prepare", () => ({ ok: true, data: { ...prepared, pairingCode: "plaintext-secret" } })],
     ["execute", () => ({ ok: true, data: { ...researchStatus, log: "Bearer private-token" } })],
     ["status", () => ({ ok: true, data: researchStatus, url: "https://user:pass@example.org/private" })],
-    ["resume", () => ({ ok: true, data: { ...researchStatus, credentials: "private" } })],
+    ["resume", () => ({ ok: true, data: {
+      ...researchStatus,
+      agentRunId: resumeInput.agentRunId,
+      operationId: resumeInput.operationId,
+      credentials: "private",
+    } })],
     ["cancel", () => ({ ok: true, data: { ...researchStatus, prompt: "private" } })],
   ])("strictly rejects extra secret-capable fields in a successful %s response", async (method, body) => {
     const fetch = vi.fn().mockResolvedValue(jsonResponse(body()));
@@ -191,7 +215,7 @@ describe("LocalAgentBridgeClient", () => {
       : method === "execute" ? client.executeTravelResearch(executeInput)
         : method === "status" ? client.getResearchStatus()
           : method === "resume" ? client.resumeTravelResearch(resumeInput)
-            : client.cancelResearch({ researchTaskId: "research-task-1" });
+            : client.cancelResearch(cancelInput);
 
     await expect(operation).rejects.toMatchObject({
       name: "LocalAgentBridgeError",

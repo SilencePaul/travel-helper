@@ -253,6 +253,9 @@ export const AgentDecisionContextSchema = z.object({
 
 const ResearchTaskStatusBase = {
   researchTaskId: z.string().min(1),
+  agentRunId: z.string().min(1),
+  operationId: z.string().min(1),
+  reconciliationState: z.enum(["active", "self_revoke_reconciling"]),
   startedAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 };

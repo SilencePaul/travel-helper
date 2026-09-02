@@ -83,7 +83,7 @@ type CloudRunHandle = {
   statusPromise?: Promise<AgentRun>;
   reconcilePromise?: Promise<boolean>;
 };
-type AttachedCloudRun = CloudRunHandle & { researchTaskId: string };
+type AttachedCloudRun = CloudRunHandle & { researchTaskId: string; operationId: string };
 type LifecycleContext = { tripSafetyKey: string; bridge?: LocalAgentBridge; repository: DecisionWorkspaceRepository };
 type TripCleanupTransition = {
   lifecycle: number;
@@ -112,8 +112,6 @@ const bridgeSelfRevokedPhases = new Set<ResearchStatus["phase"]>(["needs_owner_a
 const cloudRevokedSafePhases = new Set<ResearchStatus["phase"]>([...bridgeSelfRevokedPhases, "failed"]);
 const pollDelayMs = 2_000;
 const lifecycleStatusTimeoutMs = 2_000;
-// 7s state-lock wait + 5s notifier timeout + two 250ms termination waits, with a small scheduling margin.
-const cloudSelfRevocationGraceMs = 13_000;
 
 function tripProjection(trip: Trip) {
   return {
@@ -232,6 +230,9 @@ function syntheticSuperseded(status: Exclude<ResearchStatus, { phase: "idle" }>)
   return {
     phase: "superseded",
     researchTaskId: status.researchTaskId,
+    agentRunId: status.agentRunId,
+    operationId: status.operationId,
+    reconciliationState: "active",
     startedAt: status.startedAt,
     updatedAt: new Date().toISOString(),
     errorCode: "DISCLOSURE_CONTEXT_CHANGED",
@@ -280,11 +281,6 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
   const pendingCancellationRef = useRef<string | undefined>(undefined);
   const finalizingCancellationRef = useRef(false);
   const externallyInvalidatedTaskRef = useRef<{ agentRunId: string; researchTaskId: string } | undefined>(undefined);
-  const revokedRunActiveObservationRef = useRef<{
-    agentRunId: string;
-    researchTaskId: string;
-    firstObservedAtMs: number;
-  } | undefined>(undefined);
   const lifecycleContextRef = useRef<LifecycleContext | undefined>(undefined);
   const tripCleanupTransitionRef = useRef<TripCleanupTransition | undefined>(undefined);
   const blockedCleanupAttemptRef = useRef<PendingCloudAttempt | undefined>(undefined);
@@ -304,7 +300,6 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
     observeBridgeStatus(next);
     if (bridgeSelfRevokedPhases.has(next.phase)) {
       attachedCloudRunRef.current = undefined;
-      revokedRunActiveObservationRef.current = undefined;
       externallyInvalidatedTaskRef.current = undefined;
       setCloudCleanupRequired(false);
     } else if (next.phase === "failed" && attachedCloudRunRef.current) {
@@ -332,15 +327,20 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
   }, []);
 
   const attachCloudRun = useCallback((attempt: PendingCloudAttempt, status: ResearchStatus) => {
-    if (!attempt.agentRunId || !attempt.revokeIdempotencyKey || status.phase === "idle") throw new Error("AGENT_RUN_NOT_READY");
+    const request = attempt.bridgeRequest;
+    if (!attempt.agentRunId || !attempt.revokeIdempotencyKey || !request || status.phase === "idle"
+      || status.agentRunId !== attempt.agentRunId || status.operationId !== request.input.operationId
+      || (request.operation === "resume" && status.researchTaskId !== request.input.researchTaskId)) {
+      throw new Error("AGENT_RUN_NOT_READY");
+    }
     attachedCloudRunRef.current = {
       repository: attempt.repository,
       tripId: attempt.tripId,
       agentRunId: attempt.agentRunId,
       revokeIdempotencyKey: attempt.revokeIdempotencyKey,
       researchTaskId: status.researchTaskId,
+      operationId: status.operationId,
     };
-    revokedRunActiveObservationRef.current = undefined;
     setCloudCleanupRequired(false);
     clearPendingAttempt(attempt);
   }, [clearPendingAttempt]);
@@ -442,6 +442,8 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
         ? await attempt.bridge.executeTravelResearch(request.input, { signal })
         : await attempt.bridge.resumeTravelResearch(request.input, { signal });
       if (next.phase === "idle"
+        || next.agentRunId !== request.input.agentRunId
+        || next.operationId !== request.input.operationId
         || (request.operation === "resume" && next.researchTaskId !== request.input.researchTaskId)) {
         return { kind: "uncertain" };
       }
@@ -457,6 +459,18 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
     if (attempt.settlementPromise) return attempt.settlementPromise;
     attempt.settlementPromise = (async () => {
       if (attempt.stage === "bridgeOperationStarted") {
+        const request = attempt.bridgeRequest;
+        if (!request) return { kind: "uncertain" };
+        try {
+          const observed = await readResearchStatusForCleanup(attempt.bridge);
+          if (observed.phase !== "idle"
+            && observed.agentRunId === request.input.agentRunId
+            && observed.operationId === request.input.operationId
+            && (request.operation !== "resume" || observed.researchTaskId === request.input.researchTaskId)) {
+            clearPendingAttempt(attempt);
+            return { kind: "attached", status: observed };
+          }
+        } catch { /* A replay below distinguishes a rejected operation from a still-uncertain one. */ }
         let replay: PendingBridgeReplay;
         try {
           replay = await runBoundedCleanupCall((signal) => replayPendingBridgeOperation(attempt, signal));
@@ -507,7 +521,6 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
         }
         if (attachedCloudRunRef.current === run) {
           attachedCloudRunRef.current = undefined;
-          revokedRunActiveObservationRef.current = undefined;
           setCloudCleanupRequired(false);
         }
         return true;
@@ -539,12 +552,17 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       let cloudAlreadyCleaned = false;
       const cancelAndReadTerminal = async (current: Exclude<ResearchStatus, { phase: "idle" }>) => {
         try {
-          await runBoundedCleanupCall((signal) => transition.bridge.cancelResearch({ researchTaskId: current.researchTaskId }, { signal }));
+          await runBoundedCleanupCall((signal) => transition.bridge.cancelResearch({
+            researchTaskId: current.researchTaskId,
+            agentRunId: current.agentRunId,
+            operationId: current.operationId,
+          }, { signal }));
         } catch {
           // The independent status read below is authoritative when the cancellation response is lost.
         }
         const reconciled = await readResearchStatusForCleanup(transition.bridge);
         if (reconciled.phase === "idle" || reconciled.researchTaskId !== current.researchTaskId
+          || reconciled.agentRunId !== current.agentRunId || reconciled.operationId !== current.operationId
           || !["cancelled", "superseded", "completed", "failed"].includes(reconciled.phase)) {
           throw new Error("OLD_TRIP_CLEANUP_UNCERTAIN");
         }
@@ -657,7 +675,6 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       attachedCloudRunRef.current = undefined;
       blockedCleanupAttemptRef.current = undefined;
     }
-    revokedRunActiveObservationRef.current = undefined;
     taskFingerprintRef.current = undefined;
     confirmedFingerprintRef.current = undefined;
     pendingCancellationRef.current = undefined;
@@ -794,9 +811,9 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
     setBridgeStatusReady(false);
     setOperationError(undefined);
     const controller = new AbortController();
-    const previousContextNeedsCleanup = activePhases.has(previousStatus.phase)
-      || previousStatus.phase === "needs_owner_action"
-      || Boolean(previousPending || previousAttached);
+    const tripChanged = previousContext?.tripSafetyKey !== tripSafetyKey;
+    const previousContextNeedsCleanup = Boolean(previousPending || previousAttached)
+      || Boolean(tripChanged && (activePhases.has(previousStatus.phase) || previousStatus.phase === "needs_owner_action"));
     if (sourceContextChanged && previousContext?.bridge && previousContextNeedsCleanup) {
       tripCleanupAbortRef.current = controller;
       const transition: TripCleanupTransition = {
@@ -885,9 +902,12 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
             const localTaskId = localAfterCloudRevocation?.phase === "idle"
               ? undefined
               : localAfterCloudRevocation?.researchTaskId;
-            if (localTaskId !== attached.researchTaskId) {
+            const localMatchesAttached = localAfterCloudRevocation?.phase !== "idle"
+              && localTaskId === attached.researchTaskId
+              && localAfterCloudRevocation.agentRunId === attached.agentRunId
+              && localAfterCloudRevocation.operationId === attached.operationId;
+            if (!localMatchesAttached) {
               if (attachedCloudRunRef.current === attached) attachedCloudRunRef.current = undefined;
-              revokedRunActiveObservationRef.current = undefined;
               setCloudCleanupRequired(false);
               if (localAfterCloudRevocation) applyBridgeStatus(localAfterCloudRevocation);
               if (localAfterCloudRevocation && activePhases.has(localAfterCloudRevocation.phase)) {
@@ -902,7 +922,6 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
             }
             if (localAfterCloudRevocation && cloudRevokedSafePhases.has(localAfterCloudRevocation.phase)) {
               if (attachedCloudRunRef.current === attached) attachedCloudRunRef.current = undefined;
-              revokedRunActiveObservationRef.current = undefined;
               applyBridgeStatus(localAfterCloudRevocation);
               setOperation("idle");
               setOperationError(undefined);
@@ -913,35 +932,24 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
               throw new Error("LOCAL_RESEARCH_STATUS_UNCERTAIN");
             }
             const current = localAfterCloudRevocation;
-            const previousObservation = revokedRunActiveObservationRef.current;
-            if (!previousObservation || previousObservation.agentRunId !== attached.agentRunId
-              || previousObservation.researchTaskId !== current.researchTaskId) {
-              revokedRunActiveObservationRef.current = {
-                agentRunId: attached.agentRunId,
-                researchTaskId: current.researchTaskId,
-                firstObservedAtMs: Date.now(),
-              };
+            if (current.reconciliationState === "self_revoke_reconciling") {
               applyBridgeStatus(current);
               setOperation("error");
               setOperationError("云端授权已撤销，本机正在完成安全暂停；正在继续对账。");
               schedule();
               return;
             }
-            if (Math.max(0, Date.now() - previousObservation.firstObservedAtMs) < cloudSelfRevocationGraceMs) {
-              applyBridgeStatus(current);
-              setOperation("error");
-              setOperationError("云端授权已撤销，本机正在完成安全暂停；正在继续对账。");
-              schedule();
-              return;
-            }
-            revokedRunActiveObservationRef.current = undefined;
             if (attachedCloudRunRef.current === attached) attachedCloudRunRef.current = undefined;
             setCloudCleanupRequired(false);
             const existingInvalidation = externallyInvalidatedTaskRef.current;
             if (!existingInvalidation || existingInvalidation.agentRunId !== attached.agentRunId) {
               externallyInvalidatedTaskRef.current = { agentRunId: attached.agentRunId, researchTaskId: current.researchTaskId };
               try {
-                const cancellation = await bridge.cancelResearch({ researchTaskId: current.researchTaskId }, { signal: controller.signal });
+                const cancellation = await bridge.cancelResearch({
+                  researchTaskId: current.researchTaskId,
+                  agentRunId: current.agentRunId,
+                  operationId: current.operationId,
+                }, { signal: controller.signal });
                 if (controller.signal.aborted || lifecycleRef.current !== lifecycle) return;
                 observeBridgeStatus(cancellation);
               } catch {
@@ -1129,7 +1137,6 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
 
   function resetResearchUi() {
     blockedCleanupAttemptRef.current = undefined;
-    revokedRunActiveObservationRef.current = undefined;
     taskFingerprintRef.current = undefined;
     confirmedFingerprintRef.current = undefined;
     setPrepared(undefined);
@@ -1146,6 +1153,11 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       resetResearchUi();
       return;
     }
+    if (researchStatus.phase === "idle") {
+      resetResearchUi();
+      return;
+    }
+    const { agentRunId, operationId } = researchStatus;
     inFlightRef.current = true;
     const { controller, generation, lifecycle } = beginOperation("cancelling");
     try {
@@ -1153,7 +1165,11 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       let cloudAlreadyCleaned = false;
       let attached = attachedCloudRunRef.current ?? attachedRunForAttempt(pending);
       try {
-        const cancellation = await bridge.cancelResearch({ researchTaskId: taskId }, { signal: controller.signal });
+        const cancellation = await bridge.cancelResearch({
+          researchTaskId: taskId,
+          agentRunId,
+          operationId,
+        }, { signal: controller.signal });
         if (isCurrent(generation, lifecycle)) observeBridgeStatus(cancellation);
       } catch {
         // The authoritative status read below decides whether the persisted blocker was cleared.
@@ -1162,7 +1178,9 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       const reconciled = await bridge.getResearchStatus({ signal: controller.signal });
       if (!isCurrent(generation, lifecycle)) return;
       observeBridgeStatus(reconciled);
-      if (reconciled.phase === "idle" || reconciled.researchTaskId !== taskId) {
+      if (reconciled.phase === "idle" || reconciled.researchTaskId !== taskId
+        || reconciled.agentRunId !== agentRunId
+        || reconciled.operationId !== operationId) {
         throw new Error("BLOCKED_TASK_CLEANUP_UNCERTAIN");
       }
       if (!["cancelled", "superseded", "completed", "failed"].includes(reconciled.phase)) {
@@ -1286,6 +1304,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       stage = "execute";
       const executeInput: ExecuteTravelResearchInput = {
         agentRunId,
+        operationId: attempt.createIdempotencyKey,
         targetCategory: category,
         targetScopeId,
         disclosureFingerprint,
@@ -1439,6 +1458,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       stage = "resume";
       const resumeInput: ResumeTravelResearchInput = {
         agentRunId,
+        operationId: attempt.createIdempotencyKey,
         researchTaskId: blocked.researchTaskId,
         resumeAction,
       };
@@ -1522,7 +1542,11 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
     const { controller, generation, lifecycle } = beginOperation("cancelling");
     try {
       try {
-        const cancellation = await bridge.cancelResearch({ researchTaskId: taskId }, { signal: controller.signal });
+        const cancellation = await bridge.cancelResearch({
+          researchTaskId: taskId,
+          agentRunId: researchStatus.agentRunId,
+          operationId: researchStatus.operationId,
+        }, { signal: controller.signal });
         if (isCurrent(generation, lifecycle)) observeBridgeStatus(cancellation);
       } catch {
         // A lost cancellation response is reconciled by the required status read below.
@@ -1540,6 +1564,9 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       }
       observeBridgeStatus(reconciled);
       if (reconciled.phase === "idle" || reconciled.researchTaskId !== taskId) throw new Error("INVALID_RESEARCH_STATUS");
+      if (reconciled.agentRunId !== researchStatus.agentRunId || reconciled.operationId !== researchStatus.operationId) {
+        throw new Error("INVALID_RESEARCH_STATUS");
+      }
       if (reconciled.phase !== "cancelled") {
         setResearchStatus(reconciled);
         setOperation("error");

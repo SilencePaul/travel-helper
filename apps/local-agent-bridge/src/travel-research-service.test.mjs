@@ -11,6 +11,11 @@ import { LocalAgentBridgeRuntime } from "./runtime.mjs";
 import { safeResearchStatus, TravelResearchService } from "./travel-research-service.mjs";
 
 const PUBLIC_RESOLVER = async () => [{ address: "93.184.216.34", family: 4 }];
+const RECOVERED_OPERATION_IDENTITY = {
+  agentRunId: "agent-run-recovered",
+  operationId: "operation-recovered",
+  reconciliationState: "active",
+};
 
 function contextFixture() {
   return {
@@ -196,7 +201,7 @@ function fakeStore(events, initialState, options = {}) {
     async load() {
       events.push("store.load");
       if (options.loadError) throw options.loadError;
-      return state && structuredClone(state);
+      return state && structuredClone({ ...RECOVERED_OPERATION_IDENTITY, ...state });
     },
     async clear() {
       clearCount += 1;
@@ -292,6 +297,7 @@ function fakeTransport(events, context, options = {}) {
 
 function fakeRunner(events, scripts) {
   let createCount = 0;
+  const initialInputs = [];
   const resumeInputs = [];
   const sessions = [];
   const createOptions = [];
@@ -308,6 +314,7 @@ function fakeRunner(events, scripts) {
         async runInitial(input) {
           events.push("runner.runInitial");
           assert.equal(typeof input.prompt, "string");
+          initialInputs.push(structuredClone(input));
           const script = scripts.shift();
           if (typeof script === "function") return script({ input, cancelled, session });
           if (script instanceof Error) throw script;
@@ -338,6 +345,7 @@ function fakeRunner(events, scripts) {
       return session;
     },
     get createCount() { return createCount; },
+    initialInputs,
     resumeInputs,
     sessions,
     createOptions,
@@ -353,6 +361,7 @@ async function targetRequest(context = contextFixture()) {
   }, webcrypto);
   return {
     agentRunId: "agent-run-1",
+    operationId: "operation-1",
     targetCategory: "hotel",
     targetScopeId,
     disclosureFingerprint: built.disclosureFingerprint,
@@ -388,6 +397,16 @@ function createHarness({
   return { events, clock, store, notifier, transport, runner, service };
 }
 
+async function cancelCurrentResearch(service) {
+  const status = await service.getResearchStatus();
+  assert.notEqual(status.phase, "idle");
+  return service.cancelResearch({
+    researchTaskId: status.researchTaskId,
+    agentRunId: status.agentRunId,
+    operationId: status.operationId,
+  });
+}
+
 test("happy path starts Codex only after prepare/claim and writes one validated batch before revoke", async () => {
   const harness = createHarness({ scripts: [{
     codexThreadId: "codex-thread-1",
@@ -406,6 +425,9 @@ test("happy path starts Codex only after prepare/claim and writes one validated 
   assert.deepEqual(status, {
     phase: "completed",
     researchTaskId: "research-task-1",
+    agentRunId: request.agentRunId,
+    operationId: request.operationId,
+    reconciliationState: "active",
     startedAt: "2026-09-01T00:00:00.000Z",
     updatedAt: "2026-09-01T00:00:00.000Z",
   });
@@ -422,6 +444,8 @@ test("happy path starts Codex only after prepare/claim and writes one validated 
   ]);
   assert.equal(harness.transport.submittedPayloads.length, 1);
   assert.equal(harness.transport.submittedPayloads[0].candidates.length, 2);
+  assert.equal(harness.runner.initialInputs[0].prompt.includes(request.agentRunId), false);
+  assert.equal(harness.runner.initialInputs[0].prompt.includes(request.operationId), false);
 });
 
 test("store clear is a mandatory safety gate before the first signed submit", async () => {
@@ -454,7 +478,7 @@ test("cancel during the store safety gate prevents the first signed submit", asy
   const execution = harness.service.executeTravelResearch(request);
   while (!harness.events.includes("store.clear")) await new Promise((resolve) => setImmediate(resolve));
 
-  const cancellation = harness.service.cancelResearch({ researchTaskId: "research-task-1" });
+  const cancellation = cancelCurrentResearch(harness.service);
   releaseClear();
   const [executeStatus, cancelStatus] = await Promise.all([execution, cancellation]);
 
@@ -727,7 +751,7 @@ test("a real runtime keeps a pending signed submit alive past the service deadli
   }
 
   const timerFired = clock.fireNext();
-  clock.advance(20);
+  clock.advance(20_000);
   await new Promise((resolve) => setImmediate(resolve));
   const pendingStatus = await harness.service.getResearchStatus();
   const claimedWhilePending = harness.transport.claimedRun;
@@ -860,7 +884,7 @@ test("external AgentRun revocation lets cancel release the real runtime capabili
   const execution = harness.service.executeTravelResearch(request);
   await observedRunner;
 
-  const cancellation = harness.service.cancelResearch({ researchTaskId: "research-task-1" });
+  const cancellation = cancelCurrentResearch(harness.service);
   releaseRunner();
   const [executeStatus, cancelStatus] = await Promise.all([execution, cancellation]);
 
@@ -1001,13 +1025,14 @@ test("cancel waits for uncertain resumed context reconciliation and preserves bl
   await harness.service.claim("agent-run-context-retry");
   const resume = harness.service.resumeTravelResearch({
     agentRunId: "agent-run-context-retry",
+    operationId: "resume-operation-context-retry",
     researchTaskId: initialState.researchTaskId,
     resumeAction: "retry_codex_auth",
   });
   await contextStarted;
 
   const pendingPhase = (await harness.service.getResearchStatus()).phase;
-  const cancellation = harness.service.cancelResearch({ researchTaskId: initialState.researchTaskId });
+  const cancellation = cancelCurrentResearch(harness.service);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal((await harness.service.getResearchStatus()).phase, "cancelling");
   assert.deepEqual(harness.store.state, initialState);
@@ -1484,6 +1509,7 @@ test("resume binds the claimed handoff before restoring its fixed task", async (
 
   const resumed = harness.service.resumeTravelResearch({
     agentRunId: "agent-run-lease-resume",
+    operationId: "resume-operation-lease",
     researchTaskId: recovered.researchTaskId,
     resumeAction: "retry_codex_auth",
   });
@@ -1526,6 +1552,7 @@ test("concurrent resume reuses only the identical operation and rejects a differ
   await harness.service.claim("agent-run-resume");
   const input = {
     agentRunId: "agent-run-resume",
+    operationId: "resume-operation-concurrent",
     researchTaskId: recovered.researchTaskId,
     resumeAction: "retry_codex_auth",
   };
@@ -1568,6 +1595,7 @@ test("a settled resume replay returns the same task without another runner", asy
   await harness.service.claim("agent-run-settled-resume");
   const input = {
     agentRunId: "agent-run-settled-resume",
+    operationId: "resume-operation-settled",
     researchTaskId: recovered.researchTaskId,
     resumeAction: "retry_codex_auth",
   };
@@ -1641,6 +1669,7 @@ test("a different resume operation releases its newly claimed unbound runtime ca
   await harness.service.claim("agent-run-old-resume");
   const first = harness.service.resumeTravelResearch({
     agentRunId: "agent-run-old-resume",
+    operationId: "resume-operation-old",
     researchTaskId: recovered.researchTaskId,
     resumeAction: "retry_codex_auth",
   });
@@ -1650,6 +1679,7 @@ test("a different resume operation releases its newly claimed unbound runtime ca
 
   await assert.rejects(harness.service.resumeTravelResearch({
     agentRunId: "agent-run-new-resume",
+    operationId: "resume-operation-new",
     researchTaskId: "different-task",
     resumeAction: "retry_codex_auth",
   }), { code: "CODEX_RESEARCH_FAILED" });
@@ -1729,7 +1759,7 @@ test("cancel during owner-action revoke skips persistence and finishes cancelled
     await new Promise((resolve) => setImmediate(resolve));
   }
 
-  const cancellation = harness.service.cancelResearch({ researchTaskId: "research-task-1" });
+  const cancellation = cancelCurrentResearch(harness.service);
   releaseRevoke();
   const [executeStatus, cancelStatus] = await Promise.all([execution, cancellation]);
 
@@ -1760,7 +1790,10 @@ test("cancel during owner-action persistence clears the record and suppresses no
     await new Promise((resolve) => setImmediate(resolve));
   }
 
-  const cancellation = harness.service.cancelResearch({ researchTaskId: "research-task-1" });
+  const cancellation = cancelCurrentResearch(harness.service);
+  while ((await harness.service.getResearchStatus()).phase !== "cancelling") {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
   releasePersist();
   const [executeStatus, cancelStatus] = await Promise.all([execution, cancellation]);
 
@@ -1801,6 +1834,9 @@ test("an issued owner-action revocation finishes reconciliation after the active
 
   assert.equal(timerFired, false);
   assert.equal(pendingStatus.phase, "validating");
+  assert.equal(pendingStatus.agentRunId, request.agentRunId);
+  assert.equal(pendingStatus.operationId, request.operationId);
+  assert.equal(pendingStatus.reconciliationState, "self_revoke_reconciling");
   assert.equal(status.phase, "needs_owner_action");
   assert.equal(harness.events.includes("store.persistNeedsOwnerAction"), true);
 });
@@ -1844,6 +1880,7 @@ test("resume uses a newly claimed run, the same task/thread and a fixed skip pro
 
   const status = await resumed.service.resumeTravelResearch({
     agentRunId: "agent-run-2",
+    operationId: "resume-operation-source",
     researchTaskId: persisted.researchTaskId,
     resumeAction: "skip_blocked_source",
   });
@@ -1886,6 +1923,7 @@ test("resume rejects browser-controlled fields and supersedes changed context wi
   await assert.rejects(
     harness.service.resumeTravelResearch({
       agentRunId: "agent-run-2",
+      operationId: "resume-operation-browser-input",
       researchTaskId: "research-task-1",
       resumeAction: "retry_codex_auth",
       prompt: "browser supplied",
@@ -1896,6 +1934,7 @@ test("resume rejects browser-controlled fields and supersedes changed context wi
   await harness.service.claim("agent-run-2");
   const status = await harness.service.resumeTravelResearch({
     agentRunId: "agent-run-2",
+    operationId: "resume-operation-changed-context",
     researchTaskId: "research-task-1",
     resumeAction: "retry_codex_auth",
   });
@@ -1979,6 +2018,7 @@ test("owner waiting time is excluded when restoring the runner active budget", a
 
   await harness.service.resumeTravelResearch({
     agentRunId: "agent-run-new",
+    operationId: "resume-operation-wait",
     researchTaskId: "research-task-wait",
     resumeAction: "retry_codex_auth",
   });
@@ -2312,6 +2352,7 @@ test("resume action must match the persisted blocker and cannot carry credential
 
   await assert.rejects(harness.service.resumeTravelResearch({
     agentRunId: "agent-run-new",
+    operationId: "resume-operation-invalid-action",
     researchTaskId: "research-task-auth",
     resumeAction: "skip_blocked_source",
   }), { code: "CODEX_RESEARCH_FAILED" });
@@ -2319,6 +2360,7 @@ test("resume action must match the persisted blocker and cannot carry credential
   assert.deepEqual(harness.store.state, initialState);
   await assert.rejects(harness.service.resumeTravelResearch({
     agentRunId: "agent-run-new",
+    operationId: "resume-operation-private-input",
     researchTaskId: "research-task-auth",
     resumeAction: "retry_codex_auth",
     cookie: "private-cookie",
@@ -2405,6 +2447,7 @@ test("invalid resume state revokes a newly claimed real-runtime capability and p
 
     await assert.rejects(harness.service.resumeTravelResearch({
       agentRunId: "agent-run-invalid-resume",
+      operationId: "resume-operation-invalid-state",
       ...scenario.input,
     }), { code: "CODEX_RESEARCH_FAILED" }, scenario.name);
 
@@ -2479,6 +2522,7 @@ test("an unclaimed or mismatched resume preserves blocked recovery and never rev
   assert.equal((await unclaimed.service.getResearchStatus()).phase, "needs_owner_action");
   await assert.rejects(unclaimed.service.resumeTravelResearch({
     agentRunId: "agent-run-correct-resume",
+    operationId: "resume-operation-unclaimed",
     researchTaskId: recovered.researchTaskId,
     resumeAction: "retry_codex_auth",
   }), { code: "AGENT_RUN_INACTIVE" });
@@ -2490,6 +2534,7 @@ test("an unclaimed or mismatched resume preserves blocked recovery and never rev
   await unclaimed.service.claim("agent-run-correct-resume");
   const completed = await unclaimed.service.resumeTravelResearch({
     agentRunId: "agent-run-correct-resume",
+    operationId: "resume-operation-completed",
     researchTaskId: recovered.researchTaskId,
     resumeAction: "retry_codex_auth",
   });
@@ -2507,6 +2552,7 @@ test("an unclaimed or mismatched resume preserves blocked recovery and never rev
   await mismatched.service.claim("agent-run-other");
   await assert.rejects(mismatched.service.resumeTravelResearch({
     agentRunId: "agent-run-correct-resume",
+    operationId: "resume-operation-mismatch",
     researchTaskId: recovered.researchTaskId,
     resumeAction: "retry_codex_auth",
   }), { code: "AGENT_RUN_INACTIVE" });
@@ -2563,7 +2609,7 @@ test("cancelling an old blocker releases a newer orphan claim after external clo
   harness.service.prepare();
   await harness.service.claim("agent-run-new-orphan");
 
-  const status = await harness.service.cancelResearch({ researchTaskId: recovered.researchTaskId });
+  const status = await cancelCurrentResearch(harness.service);
 
   assert.equal(status.phase, "cancelled");
   assert.deepEqual(actions, ["claimAgentRun", "revokeAgentRunSelf"]);
@@ -2592,7 +2638,7 @@ test("an uncertain orphan revoke keeps the claim and reports failed instead of c
   harness.service.prepare();
   await harness.service.claim("agent-run-uncertain-orphan");
 
-  const status = await harness.service.cancelResearch({ researchTaskId: recovered.researchTaskId });
+  const status = await cancelCurrentResearch(harness.service);
 
   assert.equal(status.phase, "failed");
   assert.equal(status.errorCode, "AGENT_TRANSPORT_UNAVAILABLE");
@@ -2620,7 +2666,7 @@ test("cancelling an active task revokes its matching claim exactly once", async 
   const execution = harness.service.executeTravelResearch(request);
   await observedContext;
 
-  const cancellation = harness.service.cancelResearch({ researchTaskId: "research-task-1" });
+  const cancellation = cancelCurrentResearch(harness.service);
   releaseContext();
   const [executeStatus, cancelStatus] = await Promise.all([execution, cancellation]);
 
@@ -2677,7 +2723,7 @@ test("cleanup revoke remains available after cancellation exhausts the active re
   await harness.service.claim(request.agentRunId);
   const execution = harness.service.executeTravelResearch(request);
   await observedContext;
-  const cancellation = harness.service.cancelResearch({ researchTaskId: "research-task-1" });
+  const cancellation = cancelCurrentResearch(harness.service);
 
   clock.advance(600_001);
   releaseContext();
@@ -2801,6 +2847,7 @@ test("an expired uncertain resume context releases the run without deleting bloc
 
   const status = await harness.service.resumeTravelResearch({
     agentRunId: "agent-run-expired-context",
+    operationId: "resume-operation-expired-context",
     researchTaskId: recovered.researchTaskId,
     resumeAction: "retry_codex_auth",
   });
@@ -2808,6 +2855,7 @@ test("an expired uncertain resume context releases the run without deleting bloc
   assert.deepEqual(status, {
     phase: "needs_owner_action",
     researchTaskId: recovered.researchTaskId,
+    ...RECOVERED_OPERATION_IDENTITY,
     startedAt: recovered.startedAt,
     updatedAt: recovered.updatedAt,
     blockedReason: "codex_auth_required",
@@ -2954,7 +3002,7 @@ test("cancelling during signed context recheck prevents runner creation and cand
     await new Promise((resolve) => setImmediate(resolve));
   }
 
-  const cancellation = harness.service.cancelResearch({ researchTaskId: "research-task-1" });
+  const cancellation = cancelCurrentResearch(harness.service);
   releaseContext();
   const [executeStatus, cancelStatus] = await Promise.all([execution, cancellation]);
 
@@ -2982,7 +3030,7 @@ test("cancel stops an active runner before validation and produces no candidates
   const execution = harness.service.executeTravelResearch(request);
   while (!harness.events.includes("runner.runInitial")) await new Promise((resolve) => setImmediate(resolve));
 
-  const cancellation = harness.service.cancelResearch({ researchTaskId: "research-task-1" });
+    const cancellation = cancelCurrentResearch(harness.service);
   while (!harness.events.includes("runner.cancel")) await new Promise((resolve) => setImmediate(resolve));
   release();
   const [executeStatus, cancelStatus] = await Promise.all([execution, cancellation]);
@@ -2991,6 +3039,35 @@ test("cancel stops an active runner before validation and produces no candidates
   assert.equal(cancelStatus.phase, "cancelled");
   assert.equal(harness.transport.submittedPayloads.length, 0);
   assert.equal(harness.store.state, undefined);
+});
+
+test("cancel requires the exact task, run, and operation without affecting the current runner on mismatch", async () => {
+  let release;
+  const waiting = new Promise((resolve) => { release = resolve; });
+  const harness = createHarness({ scripts: [async () => {
+    await waiting;
+    return { codexThreadId: "thread-exact-cancel", output: completedOutput(), activeDurationMs: 10 };
+  }] });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+  const execution = harness.service.executeTravelResearch(request);
+  while (!harness.events.includes("runner.runInitial")) await new Promise((resolve) => setImmediate(resolve));
+  const status = await harness.service.getResearchStatus();
+
+  await assert.rejects(harness.service.cancelResearch({
+    researchTaskId: status.researchTaskId,
+    agentRunId: "agent-run-other",
+    operationId: status.operationId,
+  }), { code: "AGENT_RUN_INACTIVE" });
+  assert.equal(harness.events.includes("runner.cancel"), false);
+  assert.equal((await harness.service.getResearchStatus()).phase, "researching");
+
+  const cancellation = cancelCurrentResearch(harness.service);
+  release();
+  const [executeStatus, cancelStatus] = await Promise.all([execution, cancellation]);
+  assert.equal(executeStatus.phase, "cancelled");
+  assert.equal(cancelStatus.phase, "cancelled");
 });
 
 test("cancel during writing waits for terminal reconciliation and never reports cancelled", async () => {
@@ -3015,7 +3092,7 @@ test("cancel during writing waits for terminal reconciliation and never reports 
       await new Promise((resolve) => setImmediate(resolve));
     }
 
-    const cancellation = harness.service.cancelResearch({ researchTaskId: "research-task-1" });
+    const cancellation = cancelCurrentResearch(harness.service);
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal((await harness.service.getResearchStatus()).phase, "cancelling");
     releaseSubmit();
@@ -3092,6 +3169,7 @@ test("getResearchStatus restores only the safe blocked projection and strict sta
   assert.deepEqual(status, {
     phase: "needs_owner_action",
     researchTaskId: "research-task-1",
+    ...RECOVERED_OPERATION_IDENTITY,
     startedAt: "2026-09-01T00:00:00.000Z",
     updatedAt: "2026-09-01T00:01:00.000Z",
     blockedReason: "source_captcha",
@@ -3104,6 +3182,9 @@ test("getResearchStatus restores only the safe blocked projection and strict sta
   assert.deepEqual(safeResearchStatus({
     phase: "failed",
     researchTaskId: "task-2",
+    agentRunId: "agent-run-safe",
+    operationId: "operation-safe",
+    reconciliationState: "active",
     startedAt: "2026-09-01T00:00:00.000Z",
     updatedAt: "2026-09-01T00:01:00.000Z",
     errorCode: "CODEX_RESEARCH_FAILED",
@@ -3113,6 +3194,9 @@ test("getResearchStatus restores only the safe blocked projection and strict sta
   }), {
     phase: "failed",
     researchTaskId: "task-2",
+    agentRunId: "agent-run-safe",
+    operationId: "operation-safe",
+    reconciliationState: "active",
     startedAt: "2026-09-01T00:00:00.000Z",
     updatedAt: "2026-09-01T00:01:00.000Z",
     errorCode: "CODEX_RESEARCH_FAILED",
@@ -3122,6 +3206,9 @@ test("getResearchStatus restores only the safe blocked projection and strict sta
     assert.throws(() => safeResearchStatus({
       phase: "needs_owner_action",
       researchTaskId: "task-3",
+      agentRunId: "agent-run-safe",
+      operationId: "operation-safe",
+      reconciliationState: "active",
       startedAt: "2026-09-01T00:00:00.000Z",
       updatedAt: "2026-09-01T00:01:00.000Z",
       blockedReason: "source_login_required",

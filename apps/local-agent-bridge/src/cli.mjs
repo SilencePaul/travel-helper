@@ -392,10 +392,16 @@ function createServiceAwareShutdown(service, runner) {
             throw codedError(status.errorCode || "CODEX_RESEARCH_FAILED");
           }
           if (ACTIVE_RESEARCH_PHASES.has(status?.phase)) {
-            if (typeof status.researchTaskId !== "string" || status.researchTaskId.length === 0) {
+            if (typeof status.researchTaskId !== "string" || status.researchTaskId.length === 0
+              || typeof status.agentRunId !== "string" || status.agentRunId.length === 0
+              || typeof status.operationId !== "string" || status.operationId.length === 0) {
               throw codedError("CODEX_RESEARCH_FAILED");
             }
-            const terminal = await service.cancelResearch({ researchTaskId: status.researchTaskId });
+            const terminal = await service.cancelResearch({
+              researchTaskId: status.researchTaskId,
+              agentRunId: status.agentRunId,
+              operationId: status.operationId,
+            });
             if (!SUCCESSFUL_SHUTDOWN_PHASES.has(terminal?.phase)) {
               throw codedError(terminal?.phase === "failed"
                 ? terminal.errorCode || "CODEX_RESEARCH_FAILED"

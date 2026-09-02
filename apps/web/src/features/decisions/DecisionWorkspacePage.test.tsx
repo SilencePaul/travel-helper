@@ -710,6 +710,9 @@ test("queues a Codex completion refresh while a page command is busy and runs it
   await act(async () => finishStatus({
     phase: "completed",
     researchTaskId: "research-task-completed-while-busy",
+    agentRunId: "agent-run-completed-while-busy",
+    operationId: "operation-completed-while-busy",
+    reconciliationState: "active",
     startedAt: "2026-09-01T00:00:00.000Z",
     updatedAt: "2026-09-01T00:01:00.000Z",
   }));

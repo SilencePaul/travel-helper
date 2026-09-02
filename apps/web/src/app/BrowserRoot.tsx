@@ -20,28 +20,16 @@ import { PendingApprovalPage } from "../features/auth/PendingApprovalPage";
 import { AuthShell } from "../features/auth/AuthShell";
 import { logout, recoverAuthenticatedMember } from "../infrastructure/authSession";
 import { LocalAgentBridgeError, type LocalAgentBridge } from "../infrastructure/localAgentBridgeClient";
+import {
+  browserDataMode,
+  callActiveBrowserTestBridge,
+  readBrowserTestDecisionCoordinator,
+  type TestDecisionResearchCall,
+  type TestDecisionResearchCoordinator,
+} from "./browserEnvironment";
 
 const decisionResearchCoordinatorName = "__decisionResearchHarnessCall";
 const decisionResearchWorkspaceEvent = "decision-research-test-workspace-refresh";
-
-type TestDecisionResearchCall = {
-  operation:
-    | "workspace.load"
-    | "workspace.refresh"
-    | "workspace.command"
-    | "workspace.agent-run-status"
-    | "bridge.prepare"
-    | "bridge.claim"
-    | "bridge.execute"
-    | "bridge.status"
-    | "bridge.resume"
-    | "bridge.cancel"
-    | "bridge.abort";
-  input?: unknown;
-  request?: { requestId: string; aborted: boolean };
-};
-type TestDecisionResearchResult = { ok: true; data: unknown } | { ok: false; error: string };
-type TestDecisionResearchCoordinator = (call: TestDecisionResearchCall) => Promise<TestDecisionResearchResult>;
 
 type ProductionAuthState =
   | { status: "checking" }
@@ -54,30 +42,10 @@ function authErrorCode(error: unknown) {
   return error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
 }
 
-/* oxlint-disable react/only-export-components -- exported pure gates prove the production path never reads the E2E coordinator */
-export function browserTestDecisionAgentEnabled(isDevelopment: boolean, search: string) {
-  return isDevelopment && new URLSearchParams(search).get("__testDecisionAgent") === "1";
-}
-
-export function readBrowserTestDecisionCoordinator(
-  isDevelopment: boolean,
-  search: string,
-  readCoordinator: () => unknown,
-): TestDecisionResearchCoordinator | undefined {
-  if (!browserTestDecisionAgentEnabled(isDevelopment, search)) return undefined;
-  const coordinator = readCoordinator();
-  return typeof coordinator === "function" ? coordinator as TestDecisionResearchCoordinator : undefined;
-}
-
-export function callActiveBrowserTestBridge<T>(signal: AbortSignal | undefined, send: () => Promise<T>): Promise<T> {
-  if (signal?.aborted) return Promise.reject(new LocalAgentBridgeError("AGENT_TRANSPORT_UNAVAILABLE"));
-  return send();
-}
-/* oxlint-enable react/only-export-components */
-
 function browserTestDecisionCoordinator(): TestDecisionResearchCoordinator | undefined {
+  if (!import.meta.env.DEV) return undefined;
   return readBrowserTestDecisionCoordinator(
-    import.meta.env.DEV,
+    true,
     window.location.search,
     () => (window as typeof window & { __decisionResearchHarnessCall?: TestDecisionResearchCoordinator })[decisionResearchCoordinatorName],
   );
@@ -307,11 +275,6 @@ function createBrowserTestAgentBridge(): LocalAgentBridge | undefined {
     resumeTravelResearch: (input, options) => callBridge("bridge.resume", input, options),
     cancelResearch: (input, options) => callBridge("bridge.cancel", input, options),
   };
-}
-
-export function browserDataMode(isDevelopment: boolean, configuredMode: string | undefined): "cloudbase" | "local" | "invalid" {
-  if (configuredMode === "cloudbase") return "cloudbase";
-  return isDevelopment ? "local" : "invalid";
 }
 
 export function BrowserRoot({ agentBridge }: { agentBridge?: LocalAgentBridge } = {}) {

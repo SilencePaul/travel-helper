@@ -158,10 +158,12 @@ export class DecisionResearchHarness {
   private createByIdempotency = new Map<string, string>();
   private selectedCategory: CandidateCategory = "hotel";
   private currentResearchTaskId?: string;
+  private currentResearchAgentRunId?: string;
+  private currentResearchOperationId?: string;
   private currentClaimedRunId?: string;
   private nextRun = 1;
   private nextResearchTask = 1;
-  private readonly researchRoundByCategory: Partial<Record<CandidateCategory, number>> = {};
+  private currentResearchRound = 0;
   private readonly prepareError?: HarnessOptions["prepareError"];
   private readonly holdPrepare: boolean;
   private readonly pendingRequests = new Map<string, (result: HarnessResult) => void>();
@@ -170,12 +172,10 @@ export class DecisionResearchHarness {
     this.currentWorkspace = options.existingSharedDecision
       ? workspaceWithExistingSharedDecision()
       : workspace(options.initialCandidates);
-    for (const item of this.currentWorkspace.candidates) {
-      this.researchRoundByCategory[item.category] = Math.max(
-        this.researchRoundByCategory[item.category] ?? 0,
-        item.recommendation.round,
-      );
-    }
+    this.currentResearchRound = this.currentWorkspace.candidates.reduce(
+      (maximum, item) => Math.max(maximum, item.recommendation.round),
+      0,
+    );
     this.prepareError = options.prepareError;
     this.holdPrepare = options.holdPrepare ?? false;
   }
@@ -233,7 +233,7 @@ export class DecisionResearchHarness {
 
   complete() {
     const currentTask = this.currentTaskBase();
-    const generated = workspace([this.selectedCategory], this.researchRoundByCategory[this.selectedCategory] ?? 1);
+    const generated = workspace([this.selectedCategory], this.currentResearchRound);
     const mergedCandidates = mergeById(this.currentWorkspace.candidates, generated.candidates);
     const mergedEvidence = mergeById(this.currentWorkspace.evidence, generated.evidence);
     const addedCandidateCount = mergedCandidates.length - this.currentWorkspace.candidates.length;
@@ -263,8 +263,16 @@ export class DecisionResearchHarness {
   }
 
   private currentTaskBase() {
-    if (!this.currentResearchTaskId) throw new Error("NO_ACTIVE_RESEARCH_TASK");
-    return { ...taskBase, researchTaskId: this.currentResearchTaskId };
+    if (!this.currentResearchTaskId || !this.currentResearchAgentRunId || !this.currentResearchOperationId) {
+      throw new Error("NO_ACTIVE_RESEARCH_TASK");
+    }
+    return {
+      ...taskBase,
+      researchTaskId: this.currentResearchTaskId,
+      agentRunId: this.currentResearchAgentRunId,
+      operationId: this.currentResearchOperationId,
+      reconciliationState: "active" as const,
+    };
   }
 
   private allocateResearchTaskId() {
@@ -338,8 +346,13 @@ export class DecisionResearchHarness {
           return { ok: false, error: "INVALID_RESEARCH_TARGET" };
         }
         this.selectedCategory = input.targetCategory as CandidateCategory;
-        this.researchRoundByCategory[this.selectedCategory] = (this.researchRoundByCategory[this.selectedCategory] ?? 0) + 1;
+        if (typeof input.operationId !== "string" || input.operationId.length === 0) {
+          return { ok: false, error: "AGENT_RUN_INACTIVE" };
+        }
+        this.currentResearchRound += 1;
         this.currentResearchTaskId = this.allocateResearchTaskId();
+        this.currentResearchAgentRunId = activeRun.agentRunId;
+        this.currentResearchOperationId = input.operationId;
         const status = { phase: "researching", ...this.currentTaskBase() } satisfies ResearchStatus;
         this.currentStatus = status;
         return { ok: true, data: status };
@@ -354,16 +367,21 @@ export class DecisionResearchHarness {
           ? "retry_codex_auth"
           : "skip_blocked_source";
         if (!input || input.agentRunId !== activeRun?.agentRunId || input.researchTaskId !== this.currentResearchTaskId
+          || typeof input.operationId !== "string" || input.operationId.length === 0
           || this.currentStatus.phase !== "needs_owner_action" || input.resumeAction !== expectedAction) {
           return { ok: false, error: "AGENT_RUN_INACTIVE" };
         }
+        this.currentResearchAgentRunId = activeRun.agentRunId;
+        this.currentResearchOperationId = input.operationId;
         const status = { phase: "resuming", ...this.currentTaskBase() } satisfies ResearchStatus;
         this.currentStatus = status;
         return { ok: true, data: status };
       }
       case "bridge.cancel": {
-        const requestedTaskId = inputRecord(call.input)?.researchTaskId;
-        if (!this.currentResearchTaskId || requestedTaskId !== this.currentResearchTaskId) {
+        const input = inputRecord(call.input);
+        if (!this.currentResearchTaskId || input?.researchTaskId !== this.currentResearchTaskId
+          || input.agentRunId !== this.currentResearchAgentRunId
+          || input.operationId !== this.currentResearchOperationId) {
           return { ok: false, error: "AGENT_RUN_INACTIVE" };
         }
         if (this.currentStatus.phase === "completed") {

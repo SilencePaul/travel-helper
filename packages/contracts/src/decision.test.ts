@@ -194,6 +194,9 @@ describe("decision contracts", () => {
     const blockedStatus = ResearchStatusSchema.parse({
       phase: "needs_owner_action",
       researchTaskId: "research-1",
+      agentRunId: "agent-run-1",
+      operationId: "operation-1",
+      reconciliationState: "active",
       startedAt: "2026-08-28T00:00:00.000Z",
       updatedAt: "2026-08-28T00:01:00.000Z",
       blockedReason: "source_captcha",
@@ -206,10 +209,26 @@ describe("decision contracts", () => {
       expect(ResearchStatusSchema.safeParse({
         phase: "researching",
         researchTaskId: "research-1",
+        agentRunId: "agent-run-1",
+        operationId: "operation-1",
+        reconciliationState: "active",
         startedAt: "2026-08-28T00:00:00.000Z",
         updatedAt: "2026-08-28T00:01:00.000Z",
         [leakedField]: "secret",
       }).success).toBe(false);
+    }
+    for (const missingField of ["agentRunId", "operationId", "reconciliationState"] as const) {
+      const complete = {
+        phase: "researching",
+        researchTaskId: "research-1",
+        agentRunId: "agent-run-1",
+        operationId: "operation-1",
+        reconciliationState: "self_revoke_reconciling",
+        startedAt: "2026-08-28T00:00:00.000Z",
+        updatedAt: "2026-08-28T00:01:00.000Z",
+      };
+      delete (complete as Partial<typeof complete>)[missingField];
+      expect(ResearchStatusSchema.safeParse(complete).success).toBe(false);
     }
   });
 
@@ -217,6 +236,9 @@ describe("decision contracts", () => {
     const base = {
       phase: "needs_owner_action",
       researchTaskId: "research-1",
+      agentRunId: "agent-run-1",
+      operationId: "operation-1",
+      reconciliationState: "active",
       startedAt: "2026-08-28T00:00:00.000Z",
       updatedAt: "2026-08-28T00:01:00.000Z",
     };
@@ -249,6 +271,9 @@ describe("decision contracts", () => {
     const failed = {
       phase: "failed",
       researchTaskId: "research-1",
+      agentRunId: "agent-run-1",
+      operationId: "operation-1",
+      reconciliationState: "active",
       startedAt: "2026-08-28T00:00:00.000Z",
       updatedAt: "2026-08-28T00:01:00.000Z",
     };

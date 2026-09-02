@@ -155,6 +155,9 @@ test("SIGTERM on the real HTTP bridge cancels active research before runner clos
   const executionStarted = new Promise((resolve) => { markExecutionStarted = resolve; });
   const timestamps = {
     researchTaskId: "research-task-1",
+    agentRunId: "agent-run-1",
+    operationId: "operation-1",
+    reconciliationState: "active",
     startedAt: "2026-09-01T00:00:00.000Z",
     updatedAt: "2026-09-01T00:01:00.000Z",
   };
@@ -209,6 +212,7 @@ test("SIGTERM on the real HTTP bridge cancels active research before runner clos
     headers: { origin: "https://trip.example", "content-type": "application/json", connection: "close" },
     body: JSON.stringify({
       agentRunId: "agent-run-1",
+      operationId: "operation-1",
       targetCategory: "hotel",
       targetScopeId: `scope_${"a".repeat(64)}`,
       disclosureFingerprint: "b".repeat(64),
@@ -225,7 +229,11 @@ test("SIGTERM on the real HTTP bridge cancels active research before runner clos
   const cancelIndex = events.findIndex((event) => Array.isArray(event) && event[0] === "service.cancel");
   assert.equal(cancelIndex >= 0, true);
   assert.equal(events.indexOf("runner.close") > cancelIndex, true);
-  assert.deepEqual(events[cancelIndex], ["service.cancel", { researchTaskId: "research-task-1" }]);
+  assert.deepEqual(events[cancelIndex], ["service.cancel", {
+    researchTaskId: "research-task-1",
+    agentRunId: "agent-run-1",
+    operationId: "operation-1",
+  }]);
 });
 
 test("shutdown preserves owner-action state and propagates active cancellation failure after closing the runner", async () => {
@@ -280,22 +288,34 @@ test("shutdown preserves owner-action state and propagates active cancellation f
   const active = await createHarness({
     phase: "writing",
     researchTaskId: "research-task-writing",
+    agentRunId: "agent-run-writing",
+    operationId: "operation-writing",
   }, async () => { throw cancellationError; });
   await assert.rejects(active.bridge.close(), cancellationError);
   assert.deepEqual(active.events, [
     "service.status:writing",
-    ["service.cancel", { researchTaskId: "research-task-writing" }],
+    ["service.cancel", {
+      researchTaskId: "research-task-writing",
+      agentRunId: "agent-run-writing",
+      operationId: "operation-writing",
+    }],
     "runner.close",
   ]);
 
   const terminalFailure = await createHarness({
     phase: "cancelling",
     researchTaskId: "research-task-terminal-failure",
+    agentRunId: "agent-run-terminal-failure",
+    operationId: "operation-terminal-failure",
   }, async () => ({ phase: "failed", errorCode: "AGENT_TRANSPORT_UNAVAILABLE" }));
   await assert.rejects(terminalFailure.bridge.close(), { code: "AGENT_TRANSPORT_UNAVAILABLE" });
   assert.deepEqual(terminalFailure.events, [
     "service.status:cancelling",
-    ["service.cancel", { researchTaskId: "research-task-terminal-failure" }],
+    ["service.cancel", {
+      researchTaskId: "research-task-terminal-failure",
+      agentRunId: "agent-run-terminal-failure",
+      operationId: "operation-terminal-failure",
+    }],
     "runner.close",
   ]);
 
@@ -427,6 +447,8 @@ test("SIGTERM cannot wash a failed cancellation into success while retrying reso
       return {
         phase,
         researchTaskId: "research-task-1",
+        agentRunId: "agent-run-1",
+        operationId: "operation-1",
         ...(phase === "failed" ? { errorCode: "AGENT_TRANSPORT_UNAVAILABLE" } : {}),
       };
     },
@@ -437,6 +459,8 @@ test("SIGTERM cannot wash a failed cancellation into success while retrying reso
       return {
         phase,
         researchTaskId: "research-task-1",
+        agentRunId: "agent-run-1",
+        operationId: "operation-1",
         errorCode: "AGENT_TRANSPORT_UNAVAILABLE",
       };
     },
@@ -486,7 +510,12 @@ test("SIGTERM reports exit failure when active terminal reconciliation cannot fi
     async claim() { return {}; },
     async executeTravelResearch() { return {}; },
     async getResearchStatus() {
-      return { phase: "cancelling", researchTaskId: "research-task-1" };
+      return {
+        phase: "cancelling",
+        researchTaskId: "research-task-1",
+        agentRunId: "agent-run-1",
+        operationId: "operation-1",
+      };
     },
     async resumeTravelResearch() { return {}; },
     async cancelResearch() { events.push("service.cancel"); throw failure; },

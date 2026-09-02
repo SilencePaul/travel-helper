@@ -159,7 +159,7 @@ test("two completed rounds for the same category append new candidates without r
   await expect(page.getByRole("heading", { name: "湾畔酒店" })).toHaveCount(2);
 });
 
-test("a seeded category continues at its next recommendation round and advances cursor only for additions", async ({ page }) => {
+test("recommendation rounds advance globally across categories and continue for a seeded category", async ({ page }) => {
   const harness = new DecisionResearchHarness(page, { initialCandidates: ["hotel"] });
   await harness.install();
   await openDecisionResearch(page);
@@ -168,18 +168,34 @@ test("a seeded category continues at its next recommendation round and advances 
   const seededEvidenceIds = before.evidence.map((evidence) => evidence.id);
   const initialCursor = Number(before.workspaceCursor);
 
-  await selectResearchTarget(page, "hotel");
-  await page.getByRole("button", { name: "开始研究酒店候选" }).click();
+  await selectResearchTarget(page, "restaurant");
+  await page.getByRole("button", { name: "开始研究餐厅候选" }).click();
   await expect.poll(() => harness.count("bridge.execute")).toBe(1);
+  await expect(page.getByText("正在请 Codex 搜索候选与可核验来源")).toBeVisible();
   harness.complete();
 
-  const after = harness.workspaceSnapshot();
-  expect(after.candidates.filter((candidate) => seededIds.includes(candidate.id))).toEqual(before.candidates);
-  expect(after.evidence.filter((evidence) => seededEvidenceIds.includes(evidence.id))).toEqual(before.evidence);
-  expect(after.candidates.filter((candidate) => !seededIds.includes(candidate.id)).map((candidate) => candidate.recommendation.round)).toEqual([2, 2]);
-  expect(Number(after.workspaceCursor) - initialCursor).toBe(2);
-  await expect(page.getByRole("heading", { name: "海景行旅" })).toHaveCount(2);
-  await expect(page.getByRole("heading", { name: "湾畔酒店" })).toHaveCount(2);
+  const afterRestaurant = harness.workspaceSnapshot();
+  expect(afterRestaurant.candidates.filter((candidate) => seededIds.includes(candidate.id))).toEqual(before.candidates);
+  expect(afterRestaurant.evidence.filter((evidence) => seededEvidenceIds.includes(evidence.id))).toEqual(before.evidence);
+  expect(afterRestaurant.candidates.filter((candidate) => candidate.category === "restaurant").map((candidate) => candidate.recommendation.round)).toEqual([2, 2]);
+  expect(Number(afterRestaurant.workspaceCursor) - initialCursor).toBe(2);
+  await expect(page.getByRole("heading", { name: "码头茶餐厅" })).toBeVisible();
+
+  await selectResearchTarget(page, "hotel");
+  await page.getByRole("button", { name: "开始研究酒店候选" }).click();
+  await expect.poll(() => harness.count("bridge.execute")).toBe(2);
+  await expect(page.getByText("正在请 Codex 搜索候选与可核验来源")).toBeVisible();
+  const refreshesBeforeHotelCompletion = harness.count("workspace.refresh");
+  harness.complete();
+  await expect.poll(() => harness.count("workspace.refresh")).toBeGreaterThan(refreshesBeforeHotelCompletion);
+
+  const afterHotel = harness.workspaceSnapshot();
+  expect(afterHotel.candidates.filter((candidate) => seededIds.includes(candidate.id))).toEqual(before.candidates);
+  expect(afterHotel.candidates.filter((candidate) => candidate.category === "hotel" && !seededIds.includes(candidate.id)).map((candidate) => candidate.recommendation.round)).toEqual([3, 3]);
+  expect(afterHotel.candidates.filter((candidate) => candidate.category === "restaurant")).toEqual(afterRestaurant.candidates.filter((candidate) => candidate.category === "restaurant"));
+  expect(Number(afterHotel.workspaceCursor) - initialCursor).toBe(4);
+  await expect(page.getByRole("heading", { name: "海景行旅" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "码头茶餐厅" })).toBeVisible();
 });
 
 test("a multi-city trip binds the exact selected segment into the disclosure and execute request", async ({ page }) => {
@@ -208,6 +224,7 @@ test("a multi-city trip binds the exact selected segment into the disclosure and
   await expect.poll(() => harness.count("bridge.execute")).toBe(1);
   expect(harness.inputs("bridge.execute")).toEqual([{
     agentRunId: "agent-run-e2e-1",
+    operationId: expect.any(String),
     targetCategory: "hotel",
     targetScopeId: hongKongScope!.targetScopeId,
     disclosureFingerprint,
@@ -269,12 +286,15 @@ test("an auth blocker creates a new run and resumes the same local research task
   await expect(page.getByRole("alert")).toContainText("请在 ChatGPT/Codex 中恢复登录");
   await page.getByRole("button", { name: "已恢复登录，继续研究" }).click();
   await expect.poll(() => harness.count("bridge.resume")).toBe(1);
-  expect(harness.inputs("bridge.execute")).toEqual([expect.objectContaining({ agentRunId: "agent-run-e2e-1" })]);
+  const executeInput = harness.inputs("bridge.execute")[0] as { operationId: string };
+  expect(harness.inputs("bridge.execute")).toEqual([expect.objectContaining({ agentRunId: "agent-run-e2e-1", operationId: expect.any(String) })]);
   expect(harness.inputs("bridge.resume")).toEqual([{
     agentRunId: "agent-run-e2e-2",
+    operationId: expect.any(String),
     researchTaskId: "research-task-e2e",
     resumeAction: "retry_codex_auth",
   }]);
+  expect((harness.inputs("bridge.resume")[0] as { operationId: string }).operationId).not.toBe(executeInput.operationId);
   expect(harness.count("workspace.command")).toBe(2);
   expect(harness.count("bridge.claim")).toBe(2);
   expect(harness.inputs("bridge.claim")).toEqual([
@@ -305,12 +325,15 @@ test("a blocked external source exposes only the hostname and a fixed skip actio
   }))).toEqual({ passwordInputs: 0, editableElements: 0 });
   await page.getByRole("button", { name: "跳过该来源并继续" }).click();
   await expect.poll(() => harness.count("bridge.resume")).toBe(1);
-  expect(harness.inputs("bridge.execute")).toEqual([expect.objectContaining({ agentRunId: "agent-run-e2e-1" })]);
+  const executeInput = harness.inputs("bridge.execute")[0] as { operationId: string };
+  expect(harness.inputs("bridge.execute")).toEqual([expect.objectContaining({ agentRunId: "agent-run-e2e-1", operationId: expect.any(String) })]);
   expect(harness.inputs("bridge.resume")).toEqual([{
     agentRunId: "agent-run-e2e-2",
+    operationId: expect.any(String),
     researchTaskId: "research-task-e2e",
     resumeAction: "skip_blocked_source",
   }]);
+  expect((harness.inputs("bridge.resume")[0] as { operationId: string }).operationId).not.toBe(executeInput.operationId);
   expect(harness.count("workspace.command")).toBe(2);
   expect(harness.inputs("bridge.claim")).toEqual([
     { agentRunId: "agent-run-e2e-1" },
@@ -389,8 +412,8 @@ test("the fixture replays the same active claim and rejects mismatched task cont
     }).__decisionResearchHarnessCall;
     return Promise.all([
       coordinator({ operation: "bridge.claim", input: { agentRunId: "agent-run-e2e-3" } }),
-      coordinator({ operation: "bridge.resume", input: { agentRunId: "agent-run-e2e-1", researchTaskId: "wrong-task", resumeAction: "retry_codex_auth" } }),
-      coordinator({ operation: "bridge.cancel", input: { researchTaskId: "wrong-task" } }),
+      coordinator({ operation: "bridge.resume", input: { agentRunId: "agent-run-e2e-1", operationId: "wrong-operation", researchTaskId: "wrong-task", resumeAction: "retry_codex_auth" } }),
+      coordinator({ operation: "bridge.cancel", input: { researchTaskId: "wrong-task", agentRunId: "agent-run-e2e-1", operationId: "wrong-operation" } }),
     ]);
   });
   expect(remainingResults).toEqual([
@@ -413,7 +436,12 @@ test("stopping an active research task leaves no generated candidate", async ({ 
   await expect(page.getByText("Codex 研究已停止")).toBeVisible();
   await expect(page.getByRole("heading", { name: "海景行旅" })).toHaveCount(0);
   expect(harness.count("bridge.cancel")).toBe(1);
-  expect(harness.inputs("bridge.cancel")).toEqual([{ researchTaskId: "research-task-e2e" }]);
+  const executeInput = harness.inputs("bridge.execute")[0] as { agentRunId: string; operationId: string };
+  expect(harness.inputs("bridge.cancel")).toEqual([{
+    researchTaskId: "research-task-e2e",
+    agentRunId: executeInput.agentRunId,
+    operationId: executeInput.operationId,
+  }]);
 
   await selectResearchTarget(page, "restaurant");
   await page.getByRole("button", { name: "开始研究餐厅候选" }).click();
@@ -489,8 +517,15 @@ test("the admin confirms the Codex scope and completes the signed local Bridge c
     return Response.json({ ok: true, action: "getDecisionContext", data: { tripId: "trip-2026-gba", preferences: [], candidates: [] } });
   };
   const runtime = new LocalAgentBridgeRuntime({ agentEndpoint: "https://api.example.test/api/agent", fetch: fetchImpl });
-  const taskStatus = { phase: "researching" as const, researchTaskId: "research-task-e2e", startedAt: "2026-08-31T00:00:00.000Z", updatedAt: "2026-08-31T00:00:00.000Z" };
-  let serverStatus: { phase: "idle" } | typeof taskStatus = { phase: "idle" };
+  let serverStatus: { phase: "idle" } | {
+    phase: "researching";
+    researchTaskId: string;
+    agentRunId: string;
+    operationId: string;
+    reconciliationState: "active";
+    startedAt: string;
+    updatedAt: string;
+  } = { phase: "idle" };
   let decisionContext: unknown;
   let forwardedExecuteInput: unknown;
   const serverRuntime = {
@@ -500,12 +535,21 @@ test("the admin confirms the Codex scope and completes the signed local Bridge c
     executeTravelResearch: async (input: unknown) => {
       forwardedExecuteInput = structuredClone(input);
       decisionContext = await runtime.getDecisionContext();
-      serverStatus = taskStatus;
-      return taskStatus;
+      const exactInput = input as { agentRunId: string; operationId: string };
+      serverStatus = {
+        phase: "researching",
+        researchTaskId: "research-task-e2e",
+        agentRunId: exactInput.agentRunId,
+        operationId: exactInput.operationId,
+        reconciliationState: "active",
+        startedAt: "2026-08-31T00:00:00.000Z",
+        updatedAt: "2026-08-31T00:00:00.000Z",
+      };
+      return serverStatus;
     },
     getResearchStatus: async () => serverStatus,
-    resumeTravelResearch: async () => taskStatus,
-    cancelResearch: async () => ({ ...taskStatus, phase: "cancelled" as const, errorCode: "CODEX_RESEARCH_CANCELLED" as const }),
+    resumeTravelResearch: async () => serverStatus,
+    cancelResearch: async () => ({ ...serverStatus, phase: "cancelled" as const, errorCode: "CODEX_RESEARCH_CANCELLED" as const }),
   };
   const bridge = await startLocalAgentBridge({ appUrl: "http://127.0.0.1:4173/?__testDecisionAgent=1", port: 0, runtime: serverRuntime, allowInsecureLoopbackApp: true });
 
@@ -523,6 +567,7 @@ test("the admin confirms the Codex scope and completes the signed local Bridge c
     await expect.poll(() => decisionContext).toMatchObject({ tripId: "trip-2026-gba" });
     expect(forwardedExecuteInput).toEqual({
       agentRunId: "agent-run-e2e",
+      operationId: expect.any(String),
       targetCategory: "hotel",
       targetScopeId: hongKongScope!.targetScopeId,
       disclosureFingerprint,
