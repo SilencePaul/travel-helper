@@ -98,6 +98,28 @@ test("highlights Zhuhai and only the returning Beijing endpoint for day 6", () =
   expect(screen.getByRole("img", { name: "北京出发，经深圳、香港、澳门、珠海，返回北京的路线；当前 D6，珠海、北京已高亮" })).toBeVisible();
 });
 
+test("updates active route stations when the selected day changes", () => {
+  const { container, rerender } = render(<TravelPassHero trip={trip} selectedDayId="day-1" />);
+
+  expect(activeStations(container)).toEqual(["SZX 深圳"]);
+  expect(screen.getByRole("img", { name: "北京出发，经深圳、香港、澳门、珠海，返回北京的路线；当前 D1，深圳已高亮" })).toBeVisible();
+
+  rerender(<TravelPassHero trip={trip} selectedDayId="day-5" />);
+
+  expect(container.querySelector('[data-station="SZX 深圳"]')).not.toHaveAttribute("data-active");
+  expect(activeStations(container)).toEqual(["MFM 澳门", "ZUH 珠海"]);
+  expect(screen.getByRole("img", { name: "北京出发，经深圳、香港、澳门、珠海，返回北京的路线；当前 D5，澳门、珠海已高亮" })).toBeVisible();
+
+  rerender(<TravelPassHero trip={trip} selectedDayId="day-6" />);
+
+  expect(activeStations(container)).toEqual(["ZUH 珠海", "PEK 北京"]);
+  const beijingStations = container.querySelectorAll('[data-station="PEK 北京"]');
+  expect(beijingStations[0]).not.toHaveAttribute("data-active");
+  expect(beijingStations[1]).toHaveAttribute("data-active", "true");
+  expect(container.querySelector('[data-station="MFM 澳门"]')).not.toHaveAttribute("data-active");
+  expect(screen.getByRole("img", { name: "北京出发，经深圳、香港、澳门、珠海，返回北京的路线；当前 D6，珠海、北京已高亮" })).toBeVisible();
+});
+
 test("falls back to day 1 for both the ticket and active station when the selected day is invalid", () => {
   const { container } = render(<TravelPassHero trip={trip} selectedDayId="missing-day" />);
 
