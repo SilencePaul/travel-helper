@@ -676,6 +676,14 @@ export class TravelResearchService {
       || this.#reconciliationRecord
       || this.#inflight) return false;
     try {
+      const claimed = this.#transport.claimedRun;
+      if (claimed === undefined) return true;
+      const expiresAt = Date.parse(claimed.expiresAt);
+      if (claimed.agentRunId !== this.#task.agentRunId
+        || !Number.isFinite(expiresAt)
+        || expiresAt !== this.#task.agentExpiresAt
+        || expiresAt > this.#date().getTime()
+        || this.#transport.expireUnboundClaim(this.#task.agentRunId, 0) !== true) return false;
       return this.#transport.claimedRun === undefined;
     } catch {
       return false;

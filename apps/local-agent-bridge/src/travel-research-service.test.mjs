@@ -2390,6 +2390,38 @@ test("claimed-run expiry bounds signed context before any runner or write starts
   assert.equal(harness.transport.submittedPayloads.length, 0);
 });
 
+test("a definitively expired task claim is released before terminal trip handoff", async () => {
+  let releaseContext;
+  const contextGate = new Promise((resolve) => { releaseContext = resolve; });
+  const clock = createControlledClock();
+  const harness = createHarness({
+    clock,
+    transportOptions: {
+      claimExpiresAt: "2026-09-01T00:00:10.000Z",
+      contextGate,
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare(request.tripId);
+  await harness.service.claim(request.agentRunId);
+  const execution = harness.service.executeTravelResearch(request);
+  while (!harness.events.includes("transport.getDecisionContext")) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  clock.advance(10_020);
+  releaseContext();
+  const failed = await execution;
+
+  assert.equal(failed.phase, "failed");
+  assert.equal(failed.errorCode, "AGENT_RUN_INACTIVE");
+  assert.equal(harness.transport.claimedRun?.agentRunId, request.agentRunId);
+  assert.deepEqual(await harness.service.getResearchStatus("trip-next"), { phase: "idle" });
+  assert.equal(harness.transport.claimedRun, undefined);
+  assert.doesNotThrow(() => harness.service.prepare("trip-next"));
+  assert.equal(harness.runner.createCount, 0);
+  assert.equal(harness.transport.submittedPayloads.length, 0);
+});
+
 test("active deadline bounds validation before cloud submission", async () => {
   let releaseResolution;
   const resolutionGate = new Promise((resolve) => { releaseResolution = resolve; });
