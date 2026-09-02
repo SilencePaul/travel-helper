@@ -234,6 +234,11 @@ function syntheticSuperseded(status: Exclude<ResearchStatus, { phase: "idle" }>)
   };
 }
 
+function isUncertainBridgeError(error: unknown): error is LocalAgentBridgeError {
+  return error instanceof LocalAgentBridgeError
+    && (error.code === "BRIDGE_UNAVAILABLE" || error.code === "AGENT_TRANSPORT_UNAVAILABLE");
+}
+
 export function DecisionAgentPanel({ repository, bridge, trip, workspace, onResearchCompleted, newIdempotencyKey }: Props) {
   const tripProjectionKey = JSON.stringify(tripProjection(trip));
   const tripSafetyKey = JSON.stringify({ tripId: trip.id, projection: JSON.parse(tripProjectionKey) });
@@ -367,7 +372,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
         attempt.claimState = "confirmed";
         return;
       } catch (error) {
-        if (error instanceof LocalAgentBridgeError && error.code === "BRIDGE_UNAVAILABLE") {
+        if (isUncertainBridgeError(error)) {
           attempt.claimState = "uncertain";
           if (replay === 0 && !signal.aborted) continue;
         } else {
@@ -430,7 +435,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       }
       return { kind: "attached", status: next };
     } catch (error) {
-      return error instanceof LocalAgentBridgeError && error.code !== "BRIDGE_UNAVAILABLE"
+      return error instanceof LocalAgentBridgeError && !isUncertainBridgeError(error)
         ? { kind: "definitive" }
         : { kind: "uncertain" };
     }
@@ -1231,8 +1236,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
         setConfirmed(false);
         setPrepared(undefined);
         setOperation("idle");
-      } else if (stage === "claim" && attempt.claimState === "uncertain"
-        && error instanceof LocalAgentBridgeError && error.code === "BRIDGE_UNAVAILABLE") {
+      } else if (stage === "claim" && attempt.claimState === "uncertain" && isUncertainBridgeError(error)) {
         setOperation("error");
         setOperationError("本机 claim 响应尚未确认；重试会继续同一云端授权，不会新建任务。");
       } else if (stage === "create") {
@@ -1240,7 +1244,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
         setOperation("error");
         setOperationError("云端授权创建响应尚未确认；重试会使用同一幂等请求。");
       } else {
-        const responseUncertain = error instanceof LocalAgentBridgeError && error.code === "BRIDGE_UNAVAILABLE";
+        const responseUncertain = isUncertainBridgeError(error);
         const outcome = responseUncertain
           ? await reconcileAfterBridgeFailure(attempt, controller.signal)
           : await cleanupAfterDefinitiveBridgeFailure(attempt);
@@ -1381,8 +1385,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
         setConfirmed(false);
         setPrepared(undefined);
         setOperation("idle");
-      } else if (stage === "claim" && attempt.claimState === "uncertain"
-        && error instanceof LocalAgentBridgeError && error.code === "BRIDGE_UNAVAILABLE") {
+      } else if (stage === "claim" && attempt.claimState === "uncertain" && isUncertainBridgeError(error)) {
         setOperation("error");
         setOperationError("本机 claim 响应尚未确认；再次继续会重放同一授权，不会新建任务。");
       } else if (stage === "create") {
@@ -1390,7 +1393,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
         setOperation("error");
         setOperationError("恢复授权创建响应尚未确认；重试会使用同一幂等请求。");
       } else {
-        const responseUncertain = error instanceof LocalAgentBridgeError && error.code === "BRIDGE_UNAVAILABLE";
+        const responseUncertain = isUncertainBridgeError(error);
         const outcome = responseUncertain
           ? await reconcileAfterBridgeFailure(attempt, controller.signal)
           : await cleanupAfterDefinitiveBridgeFailure(attempt);

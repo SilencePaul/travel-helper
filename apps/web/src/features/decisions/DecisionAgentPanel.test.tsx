@@ -238,12 +238,12 @@ describe("DecisionAgentPanel", () => {
     expect(bridge.resumeTravelResearch).not.toHaveBeenCalled();
   });
 
-  it("claim 响应丢失时用同一 agentRunId 重放 claim，成功后才 execute", async () => {
+  it.each(["BRIDGE_UNAVAILABLE", "AGENT_TRANSPORT_UNAVAILABLE"] as const)("claim 收到 %s 时用同一 agentRunId 重放，成功后才 execute", async (uncertainCode) => {
     const command = vi.fn()
       .mockResolvedValueOnce({ ok: true, action: "createAgentRun", data: { agentRunId: "agent-run-1", expiresAt: "2099-08-28T00:15:00.000Z" } });
     const bridge = makeBridge({
       claim: vi.fn()
-        .mockRejectedValueOnce(new LocalAgentBridgeError("BRIDGE_UNAVAILABLE"))
+        .mockRejectedValueOnce(new LocalAgentBridgeError(uncertainCode))
         .mockResolvedValueOnce({ agentRunId: "agent-run-1", status: "claimed" }),
       getResearchStatus: vi.fn().mockResolvedValue({ phase: "idle" }),
     });
@@ -259,11 +259,11 @@ describe("DecisionAgentPanel", () => {
     expect(command.mock.calls.map(([input]) => input.action)).toEqual(["createAgentRun"]);
   });
 
-  it("claim 持续不确定时保留原 run 与材料，用户重试继续同一 claim", async () => {
+  it.each(["BRIDGE_UNAVAILABLE", "AGENT_TRANSPORT_UNAVAILABLE"] as const)("claim 持续返回 %s 时保留原 run 与材料，用户重试继续同一 claim", async (uncertainCode) => {
     const bridge = makeBridge({
       claim: vi.fn()
-        .mockRejectedValueOnce(new LocalAgentBridgeError("BRIDGE_UNAVAILABLE"))
-        .mockRejectedValueOnce(new LocalAgentBridgeError("BRIDGE_UNAVAILABLE"))
+        .mockRejectedValueOnce(new LocalAgentBridgeError(uncertainCode))
+        .mockRejectedValueOnce(new LocalAgentBridgeError(uncertainCode))
         .mockResolvedValueOnce({ agentRunId: "agent-run-1", status: "claimed" }),
     });
     const repository = makeRepository();
@@ -284,10 +284,10 @@ describe("DecisionAgentPanel", () => {
     expect(vi.mocked(bridge.claim).mock.calls.every(([agentRunId]) => agentRunId === "agent-run-1")).toBe(true);
   });
 
-  it("execute 响应丢失时对账已有本机任务，不创建第二个 run", async () => {
+  it.each(["BRIDGE_UNAVAILABLE", "AGENT_TRANSPORT_UNAVAILABLE"] as const)("execute 收到 %s 时重放固定操作，不创建第二个 run", async (uncertainCode) => {
     const bridge = makeBridge({
       executeTravelResearch: vi.fn()
-        .mockRejectedValueOnce(new LocalAgentBridgeError("BRIDGE_UNAVAILABLE"))
+        .mockRejectedValueOnce(new LocalAgentBridgeError(uncertainCode))
         .mockResolvedValueOnce(researching),
       getResearchStatus: vi.fn().mockResolvedValue({ phase: "idle" }),
     });
@@ -355,10 +355,10 @@ describe("DecisionAgentPanel", () => {
     expect(screen.queryByText(oldRunning.researchTaskId)).not.toBeInTheDocument();
   });
 
-  it("execute 同操作重放仍不确定时保留 pending，用户重试继续重放而不新建 run", async () => {
+  it.each(["BRIDGE_UNAVAILABLE", "AGENT_TRANSPORT_UNAVAILABLE"] as const)("execute 同操作重放持续返回 %s 时保留 pending，用户重试继续重放而不新建 run", async (uncertainCode) => {
     const executeTravelResearch = vi.fn()
-      .mockRejectedValueOnce(new LocalAgentBridgeError("BRIDGE_UNAVAILABLE"))
-      .mockRejectedValueOnce(new LocalAgentBridgeError("BRIDGE_UNAVAILABLE"))
+      .mockRejectedValueOnce(new LocalAgentBridgeError(uncertainCode))
+      .mockRejectedValueOnce(new LocalAgentBridgeError(uncertainCode))
       .mockRejectedValueOnce(new LocalAgentBridgeError("CODEX_RESEARCH_FAILED"));
     const command = makeCreateAndRevokeCommand();
     setup({ bridge: makeBridge({ executeTravelResearch }), repository: makeRepository(command) });
@@ -380,12 +380,12 @@ describe("DecisionAgentPanel", () => {
     expect(command.mock.calls.map(([input]) => input.action)).toEqual(["createAgentRun", "revokeAgentRun"]);
   });
 
-  it("resume 响应丢失时只恢复同一 researchTaskId 的本机状态", async () => {
+  it.each(["BRIDGE_UNAVAILABLE", "AGENT_TRANSPORT_UNAVAILABLE"] as const)("resume 收到 %s 时只重放同一 researchTaskId 的固定操作", async (uncertainCode) => {
     const blocked = { phase: "needs_owner_action", ...timestamps, blockedReason: "codex_auth_required" as const } satisfies ResearchStatus;
     const bridge = makeBridge({
       getResearchStatus: vi.fn().mockResolvedValue(blocked),
       resumeTravelResearch: vi.fn()
-        .mockRejectedValueOnce(new LocalAgentBridgeError("BRIDGE_UNAVAILABLE"))
+        .mockRejectedValueOnce(new LocalAgentBridgeError(uncertainCode))
         .mockResolvedValueOnce(researching),
     });
     const repository = makeRepository();
@@ -400,6 +400,32 @@ describe("DecisionAgentPanel", () => {
     expect(bridge.getResearchStatus).toHaveBeenCalledTimes(1);
     await unmountAndFlush(view);
     expect(repository.command).toHaveBeenCalledTimes(1);
+  });
+
+  it("resume 同操作持续返回 AGENT_TRANSPORT_UNAVAILABLE 时保留 pending，用户重试仍使用同一 run", async () => {
+    const blocked = { phase: "needs_owner_action", ...timestamps, blockedReason: "codex_auth_required" as const } satisfies ResearchStatus;
+    const resumeTravelResearch = vi.fn()
+      .mockRejectedValueOnce(new LocalAgentBridgeError("AGENT_TRANSPORT_UNAVAILABLE"))
+      .mockRejectedValueOnce(new LocalAgentBridgeError("AGENT_TRANSPORT_UNAVAILABLE"))
+      .mockResolvedValueOnce(researching);
+    const bridge = makeBridge({
+      getResearchStatus: vi.fn().mockResolvedValue(blocked),
+      resumeTravelResearch,
+    });
+    const repository = makeRepository();
+    setup({ bridge, repository });
+
+    await userEvent.click(await screen.findByRole("button", { name: "已恢复登录，继续研究" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/恢复|撤销|对账|未确认/);
+    expect(repository.command).toHaveBeenCalledTimes(1);
+    expect(resumeTravelResearch).toHaveBeenCalledTimes(2);
+    await userEvent.click(screen.getByRole("button", { name: "已恢复登录，继续研究" }));
+
+    await screen.findByText("正在请 Codex 搜索候选与可核验来源");
+    expect(repository.command).toHaveBeenCalledTimes(1);
+    expect(resumeTravelResearch).toHaveBeenCalledTimes(3);
+    expect(resumeTravelResearch.mock.calls.every(([input]) => input.agentRunId === "agent-run-1" && input.researchTaskId === blocked.researchTaskId)).toBe(true);
   });
 
   it("resume 响应未到且同操作重放被确定拒绝时撤销本次 run，不读取旧 blocker 猜归属", async () => {
@@ -574,14 +600,14 @@ describe("DecisionAgentPanel", () => {
     expect(bridge.cancelResearch).not.toHaveBeenCalled();
   });
 
-  it("resume 的 claim 响应丢失也只重放同一 claim，不读全局状态", async () => {
+  it.each(["BRIDGE_UNAVAILABLE", "AGENT_TRANSPORT_UNAVAILABLE"] as const)("resume 的 claim 收到 %s 时也只重放同一 claim，不读全局状态", async (uncertainCode) => {
     const blocked = { phase: "needs_owner_action", ...timestamps, blockedReason: "codex_auth_required" as const } satisfies ResearchStatus;
     const resuming = { phase: "resuming", ...timestamps, updatedAt: "2026-08-28T00:02:00.000Z" } satisfies ResearchStatus;
     const getResearchStatus = vi.fn().mockResolvedValue(blocked);
     const bridge = makeBridge({
       getResearchStatus,
       claim: vi.fn()
-        .mockRejectedValueOnce(new LocalAgentBridgeError("BRIDGE_UNAVAILABLE"))
+        .mockRejectedValueOnce(new LocalAgentBridgeError(uncertainCode))
         .mockResolvedValueOnce({ agentRunId: "agent-run-1", status: "claimed" }),
       resumeTravelResearch: vi.fn().mockResolvedValue(resuming),
     });
