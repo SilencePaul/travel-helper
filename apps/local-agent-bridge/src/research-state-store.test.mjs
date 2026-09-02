@@ -11,6 +11,7 @@ import {
   RECONCILIATION_STATE_FIELDS,
   createResearchStateStore,
 } from "./research-state-store.mjs";
+import { LocalAgentBridgeRuntime } from "./runtime.mjs";
 import { createMacosNotifier } from "./macos-notifier.mjs";
 
 const STATE_FILE = "travel-research-state.json";
@@ -267,6 +268,152 @@ test("proposal recovery applies an exact field allowlist at every payload bounda
       submission: { ...state.submission, submitBody: JSON.stringify(envelope) },
     })), { code: "RESEARCH_STATE_INVALID" }, boundary);
   }
+});
+
+test("two stores cannot replace a different proposal responsibility", async (context) => {
+  const { directory, store: first } = await temporaryStore(context);
+  const second = createResearchStateStore({ directory, resolveHostname: PUBLIC_RESOLVER });
+  const firstRecord = proposalReconciliationState();
+  const secondRecord = proposalReconciliationState({
+    researchTaskId: "research-task-2",
+    operationId: "operation-2",
+    updatedAt: "2026-09-01T01:05:06.000Z",
+  });
+
+  await first.persistProposalReconciliation(firstRecord);
+
+  await assert.rejects(second.persistProposalReconciliation(secondRecord), {
+    code: "RESEARCH_STATE_CONFLICT",
+  });
+  assert.deepEqual(await first.load(), firstRecord);
+});
+
+test("a stale store cleanup cannot delete a newer proposal responsibility", async (context) => {
+  const { directory, store: stale } = await temporaryStore(context);
+  const current = createResearchStateStore({ directory, resolveHostname: PUBLIC_RESOLVER });
+  const oldRecord = proposalReconciliationState();
+  const newRecord = proposalReconciliationState({
+    researchTaskId: "research-task-new",
+    operationId: "operation-new",
+    updatedAt: "2026-09-01T01:05:06.000Z",
+  });
+  await stale.persistProposalReconciliation(oldRecord);
+  await current.save(newRecord);
+
+  await assert.rejects(stale.clear(oldRecord), { code: "RESEARCH_STATE_CONFLICT" });
+  assert.deepEqual(await current.load(), newRecord);
+});
+
+test("persists and reloads a bounded proposal envelope near the legal payload limit", async (context) => {
+  const { store } = await temporaryStore(context);
+  const state = proposalReconciliationState();
+  const submit = JSON.parse(state.submission.submitBody);
+  const filled = (prefix, length) => `${prefix}${"x".repeat(length - prefix.length)}`;
+  const largeCandidate = (suffix) => ({
+    category: "hotel",
+    entity: { name: filled(`Hotel ${suffix}`, 200), address: filled("Address", 500) },
+    applicability: {
+      dates: { start: "2026-10-03", end: "2026-10-04" },
+      travelers: 2,
+    },
+    recommendation: {
+      round: 1,
+      reason: filled("Reason", 2_000),
+      preferenceRevisionIds: Array.from(
+        { length: 64 },
+        (_, index) => filled(`preference-${suffix}-${index}-`, 128),
+      ),
+      feedbackIds: Array.from(
+        { length: 64 },
+        (_, index) => filled(`feedback-${suffix}-${index}-`, 128),
+      ),
+    },
+    evidence: Array.from({ length: 8 }, (_, index) => ({
+      sourceKind: index === 0 ? "official" : "web",
+      sourceName: filled("Source", 300),
+      sourceUrl: `https://source-${suffix}-${index}.public.org/${"x".repeat(1_600)}`,
+      capturedAt: "2026-09-01T01:02:03.000Z",
+      queryContext: {
+        dates: { start: "2026-10-03", end: "2026-10-04" },
+        travelers: 2,
+        roomOrTicket: filled("Room", 300),
+      },
+      captureMethod: index === 0 ? "detail_page" : "search_result",
+      facts: {
+        propertyName: filled(`Hotel ${suffix}`, 200),
+        address: filled("Address", 500),
+        checkInDate: "2026-10-03",
+        checkOutDate: "2026-10-04",
+        travelers: 2,
+        roomTypeOrBed: filled("Bed", 300),
+        availability: "available",
+        priceAmount: 1_288,
+        currency: filled("CNY", 32),
+        priceDisplay: "total",
+        cancellationPolicy: filled("Cancel", 2_000),
+      },
+    })),
+  });
+  submit.payload.candidates = ["A", "B", "C", "D"].map(largeCandidate);
+  const largeState = proposalReconciliationState({
+    submission: { ...state.submission, submitBody: JSON.stringify(submit) },
+  });
+  const payloadBytes = Buffer.byteLength(JSON.stringify(submit.payload), "utf8");
+  assert.equal(payloadBytes > 240 * 1_024, true);
+  assert.equal(payloadBytes < 256 * 1_024, true);
+
+  await store.persistProposalReconciliation(largeState);
+
+  const loaded = await store.load();
+  assert.deepEqual(loaded, largeState);
+  const replayedBodies = [];
+  const restarted = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.public.org/api/agent",
+    now: () => new Date("2026-09-01T01:04:05.000Z"),
+    fetch: async (_url, init) => {
+      replayedBodies.push(init.body);
+      const envelope = JSON.parse(init.body);
+      if (envelope.action === "submitProposalBatch") {
+        const candidate = (index) => ({
+          id: `candidate-${index}`,
+          tripId: "trip-private",
+          revision: 0,
+          updatedAt: "2026-09-01T01:04:05.000Z",
+          category: "hotel",
+          entity: { name: `Hotel ${index}` },
+          applicability: {},
+          recommendation: { round: 1, reason: "safe", preferenceRevisionIds: [], feedbackIds: [] },
+          verificationState: "candidate",
+          decisionState: "none",
+        });
+        return Response.json({
+          ok: true,
+          action: envelope.action,
+          data: [candidate(1), candidate(2)],
+        });
+      }
+      return Response.json({
+        ok: true,
+        action: envelope.action,
+        data: { agentRunId: envelope.agentRunId, revokedAt: "2026-09-01T01:04:06.000Z" },
+      });
+    },
+  });
+  restarted.restoreProposalSubmission(loaded.submission);
+  await restarted.reconcileProposalSubmission(loaded.submission);
+  restarted.restoreProposalRevoke(loaded.submission, "completed");
+  await restarted.reconcileProposalRevoke(loaded.submission, "completed");
+  assert.equal(replayedBodies[0], largeState.submission.submitBody);
+  assert.equal(replayedBodies[1], largeState.submission.successRevokeBody);
+  await store.clear(loaded);
+  assert.equal(await store.load(), undefined);
+
+  submit.payload.candidates[0].recommendation.reason = "x".repeat(280_000);
+  const oversized = proposalReconciliationState({
+    submission: { ...state.submission, submitBody: JSON.stringify(submit) },
+  });
+  assert.equal(Buffer.byteLength(JSON.stringify(submit.payload), "utf8") > 256 * 1_024, true);
+  await assert.rejects(store.persistProposalReconciliation(oversized), { code: "RESEARCH_STATE_INVALID" });
 });
 
 test("writes through a same-directory temporary file and atomic rename", async (context) => {

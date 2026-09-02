@@ -5,6 +5,7 @@ import * as defaultFileSystem from "node:fs/promises";
 import { BlockList, isIP } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, parse, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 export const RECOVERY_STATE_FIELDS = Object.freeze([
   "tripId",
@@ -60,7 +61,11 @@ export const PROPOSAL_RECONCILIATION_STATE_FIELDS = Object.freeze([
 
 const STATE_FILE_NAME = "travel-research-state.json";
 const LOCK_FILE_NAME = ".travel-research-state.lock";
-const MAX_STATE_BYTES = 32 * 1_024;
+const MAX_PROPOSAL_PAYLOAD_BYTES = 256 * 1_024;
+const MAX_SIGNED_PROPOSAL_BODY_BYTES = 272 * 1_024;
+const MAX_SIGNED_REVOKE_BODY_BYTES = 4 * 1_024;
+// The submit envelope is stored as an escaped JSON string inside the state JSON.
+const MAX_STATE_BYTES = 768 * 1_024;
 const MAX_LOCK_BYTES = 512;
 const DEFAULT_LOCK_WAIT_MS = 7_000;
 const DEFAULT_LOCK_RETRY_MS = 10;
@@ -244,7 +249,10 @@ function validRevokeRequest(value, agentRunId) {
 }
 
 function validSignedEnvelope(body, agentRunId, action) {
-  if (typeof body !== "string" || Buffer.byteLength(body, "utf8") > MAX_STATE_BYTES) return undefined;
+  const maximumBodyBytes = action === "submitProposalBatch"
+    ? MAX_SIGNED_PROPOSAL_BODY_BYTES
+    : MAX_SIGNED_REVOKE_BODY_BYTES;
+  if (typeof body !== "string" || Buffer.byteLength(body, "utf8") > maximumBodyBytes) return undefined;
   let envelope;
   try {
     envelope = JSON.parse(body);
@@ -271,7 +279,7 @@ function safePersistedProposalValue(value, depth = 0, state = { nodes: 0, textBy
   if (typeof value === "number") return Number.isFinite(value);
   if (typeof value === "string") {
     state.textBytes += Buffer.byteLength(value, "utf8");
-    return state.textBytes <= MAX_STATE_BYTES && !PERSISTED_PRIVATE_VALUE_PATTERN.test(value);
+    return state.textBytes <= MAX_PROPOSAL_PAYLOAD_BYTES && !PERSISTED_PRIVATE_VALUE_PATTERN.test(value);
   }
   if (Array.isArray(value)) {
     return value.length <= 256 && value.every((item) => safePersistedProposalValue(item, depth + 1, state));
@@ -831,14 +839,38 @@ export function createResearchStateStore({
     return result;
   }
 
-  async function clear() {
-    await ensureDirectory();
+  async function clear(expected) {
+    const compare = arguments.length > 0;
+    const expectedState = compare && expected !== undefined ? await validateState(expected) : undefined;
+    const lock = await acquireLock();
+    let result;
+    let failure;
     try {
-      await fileSystem.unlink(filePath);
-      await syncDirectory();
+      const current = await load();
+      if (compare && current !== undefined
+        && (expectedState === undefined || !isDeepStrictEqual(current, expectedState))) {
+        throw codedError("RESEARCH_STATE_CONFLICT");
+      }
+      if (current !== undefined) {
+        if (!await ownsLock(lock, OWNERSHIP_CHECK_ATTEMPTS)) {
+          throw codedError("RESEARCH_STATE_UNAVAILABLE");
+        }
+        await fileSystem.unlink(filePath);
+        await syncDirectory();
+      }
+      result = true;
     } catch (error) {
-      if (error?.code !== "ENOENT") throw codedError("RESEARCH_STATE_UNAVAILABLE");
+      failure = error?.code === "RESEARCH_STATE_CONFLICT"
+        ? error
+        : codedError("RESEARCH_STATE_UNAVAILABLE");
     }
+    try {
+      await releaseLock(lock);
+    } catch (error) {
+      failure ??= error;
+    }
+    if (failure) throw failure;
+    return result;
   }
 
   async function currentTime() {
@@ -1220,14 +1252,22 @@ export function createResearchStateStore({
     return result;
   }
 
-  async function persistProposalReconciliation(value) {
+  async function persistProposalReconciliation(value, expected) {
     const state = await validateState(value);
     if (state.recordType !== "proposal_submit_reconciliation") throw codedError("RESEARCH_STATE_INVALID");
+    const expectedState = expected === undefined ? undefined : await validateState(expected);
     const lock = await acquireLock();
     let result;
     let failure;
     try {
-      result = await writeState(state, lock);
+      const current = await load();
+      if (isDeepStrictEqual(current, state)) {
+        result = state;
+      } else if (!isDeepStrictEqual(current, expectedState)) {
+        throw codedError("RESEARCH_STATE_CONFLICT");
+      } else {
+        result = await writeState(state, lock);
+      }
     } catch (error) {
       failure = error;
     }

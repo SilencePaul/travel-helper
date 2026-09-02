@@ -29,6 +29,8 @@ const PUBLIC_AGENT_ERRORS = new Set([
 ]);
 const UNCERTAIN_HTTP_STATUSES = new Set([408, 425, 429]);
 const MIN_UNBOUND_CLAIM_AGE_MS = 8_000;
+const MAX_SIGNED_PROPOSAL_BODY_BYTES = 272 * 1_024;
+const MAX_SIGNED_REVOKE_BODY_BYTES = 4 * 1_024;
 const BRIDGE_ERROR = Symbol("bridgeError");
 
 export { canonicalJson };
@@ -171,7 +173,10 @@ function safeRevokeSnapshot(value) {
 }
 
 function signedEnvelope(body, action, agentRunId) {
-  if (typeof body !== "string" || Buffer.byteLength(body, "utf8") > 32 * 1_024) {
+  const maximumBodyBytes = action === "submitProposalBatch"
+    ? MAX_SIGNED_PROPOSAL_BODY_BYTES
+    : MAX_SIGNED_REVOKE_BODY_BYTES;
+  if (typeof body !== "string" || Buffer.byteLength(body, "utf8") > maximumBodyBytes) {
     throw codedError("INVALID_REQUEST");
   }
   let envelope;

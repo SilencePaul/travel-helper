@@ -5,6 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { isDeepStrictEqual } from "node:util";
 
 import { buildResearchTargetScopes } from "@travel/contracts/decision-research";
 
@@ -202,20 +203,31 @@ function createAutoAdvanceClock(start = "2026-09-01T00:00:00.000Z", { parkedDela
 function fakeStore(events, initialState, options = {}) {
   let state = initialState && structuredClone(initialState);
   let clearCount = 0;
+  let loadCount = 0;
+  let proposalPersistCount = 0;
   return {
     async load() {
+      loadCount += 1;
       events.push("store.load");
+      if (options.loadFailures?.includes(loadCount)) {
+        throw Object.assign(new Error("private load failure"), { code: "RESEARCH_STATE_UNAVAILABLE" });
+      }
       if (options.loadError) throw options.loadError;
       options.onLoadStarted?.();
       if (options.loadGate) await options.loadGate;
       return state && structuredClone({ ...RECOVERED_OPERATION_IDENTITY, ...state });
     },
-    async clear() {
+    async clear(expected) {
       clearCount += 1;
       events.push("store.clear");
       if (options.clearGate) await options.clearGate;
       if (options.clearFailures?.includes(clearCount)) {
         throw Object.assign(new Error("private store failure"), { code: "RESEARCH_STATE_UNAVAILABLE" });
+      }
+      const current = state && { ...RECOVERED_OPERATION_IDENTITY, ...state };
+      if (arguments.length > 0 && current !== undefined
+        && (expected === undefined || !isDeepStrictEqual(current, expected))) {
+        throw Object.assign(new Error("private state conflict"), { code: "RESEARCH_STATE_CONFLICT" });
       }
       state = undefined;
     },
@@ -240,8 +252,15 @@ function fakeStore(events, initialState, options = {}) {
       return structuredClone(state);
     },
     async persistProposalReconciliation(value) {
+      proposalPersistCount += 1;
       events.push("store.persistProposalReconciliation");
+      if (options.proposalPersistFailures?.includes(proposalPersistCount)) {
+        throw Object.assign(new Error("private proposal persist failure"), { code: "RESEARCH_STATE_UNAVAILABLE" });
+      }
       if (options.proposalPersistError) throw options.proposalPersistError;
+      if (state !== undefined && !isDeepStrictEqual(state, value)) {
+        throw Object.assign(new Error("private state conflict"), { code: "RESEARCH_STATE_CONFLICT" });
+      }
       state = structuredClone(value);
       return structuredClone(state);
     },
@@ -297,7 +316,13 @@ function fakeTransport(events, context, options = {}) {
     submittedPayloads.push(structuredClone(payload));
     submitAttempts += 1;
     if (options.submitGate) await options.submitGate;
-    if (options.submitError) throw options.submitError;
+    if (options.submitError) {
+      if (options.clearProposalOnSubmitError) {
+        claimed = undefined;
+        proposalReconciliation = undefined;
+      }
+      throw options.submitError;
+    }
     if (options.uncertainSubmitOnce && submitAttempts === 1) {
       throw Object.assign(new Error("private network detail"), {
         code: "AGENT_TRANSPORT_UNAVAILABLE",
@@ -1259,6 +1284,12 @@ test("an uncertain proposal response persists exact replay responsibility and co
   context.after(() => rm(root, { recursive: true, force: true }));
   const directory = join(root, "application-data");
   const clock = createControlledClock();
+  const scheduleTimer = clock.setTimeout.bind(clock);
+  let firstProcessTerminated = false;
+  clock.setTimeout = (callback, delay) => {
+    if (firstProcessTerminated) throw new Error("simulated process termination");
+    return scheduleTimer(callback, delay);
+  };
   const request = await targetRequest();
   const firstSubmitBodies = [];
   const restartedSubmitBodies = [];
@@ -1285,6 +1316,7 @@ test("an uncertain proposal response persists exact replay responsibility and co
       }
       assert.equal(body.action, "submitProposalBatch");
       firstSubmitBodies.push(init.body);
+      firstProcessTerminated = true;
       throw new TypeError("server committed but response was lost before process crash");
     },
   });
@@ -1307,8 +1339,13 @@ test("an uncertain proposal response persists exact replay responsibility and co
   });
   firstService.prepare(request.tripId);
   await firstService.claim(request.agentRunId);
-  void firstService.executeTravelResearch(request);
+  const firstExecution = firstService.executeTravelResearch(request);
   while (firstSubmitBodies.length === 0) await new Promise((resolve) => setImmediate(resolve));
+
+  const stoppedStatus = await firstExecution;
+  assert.equal(stoppedStatus.phase, "writing");
+  assert.equal(clock.pendingTimers(), 0);
+  const stoppedSubmitCount = firstSubmitBodies.length;
 
   const persisted = await firstStore.load();
   assert.equal(persisted.recordType, "proposal_submit_reconciliation");
@@ -1318,9 +1355,10 @@ test("an uncertain proposal response persists exact replay responsibility and co
   assert.equal(JSON.stringify(persisted).includes("privateKey"), false);
   assert.equal(JSON.stringify(persisted).includes("pairingCode"), false);
 
+  const restartedClock = createControlledClock();
   const restartedRuntime = new LocalAgentBridgeRuntime({
     agentEndpoint: "https://api.public.org/api/agent",
-    now: clock,
+    now: restartedClock,
     fetch: async (_url, init) => {
       const body = JSON.parse(init.body);
       if (body.action === "submitProposalBatch") {
@@ -1348,7 +1386,7 @@ test("an uncertain proposal response persists exact replay responsibility and co
     runner: restartedRunner,
     store: restartedStore,
     notifier: { async notifyOwnerAction() { return true; } },
-    clock,
+    clock: restartedClock,
     idGenerator: () => "must-not-generate",
   });
 
@@ -1365,6 +1403,7 @@ test("an uncertain proposal response persists exact replay responsibility and co
   assert.equal(restartedSubmitBodies[0], firstSubmitBodies[0]);
   assert.equal(restartedRevokeBodies.length, 1);
   assert.equal(restartedRevokeBodies[0], persisted.submission.successRevokeBody);
+  assert.equal(firstSubmitBodies.length, stoppedSubmitCount);
   assert.equal(await restartedStore.load(), undefined);
 });
 
@@ -1393,6 +1432,178 @@ test("a confirmed proposal remains recoverable until final responsibility cleanu
   assert.equal(harness.transport.submittedPayloads.length, 2);
   assert.deepEqual(harness.transport.submittedPayloads[0], harness.transport.submittedPayloads[1]);
   assert.equal(harness.store.state, undefined);
+});
+
+test("an uncertain persistence readback retries in-process before any proposal is sent", async () => {
+  const harness = createHarness({
+    scripts: [{ codexThreadId: "thread-persist-retry", output: completedOutput(), activeDurationMs: 10_000 }],
+    storeOptions: {
+      proposalPersistFailures: [1],
+      loadFailures: [2],
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare(request.tripId);
+  await harness.service.claim(request.agentRunId);
+
+  const pending = await harness.service.executeTravelResearch(request);
+
+  assert.equal(pending.phase, "writing");
+  assert.equal(harness.transport.submittedPayloads.length, 0);
+  assert.equal(harness.store.state, undefined);
+
+  let status = await harness.service.getResearchStatus(request.tripId);
+  for (let attempt = 0; attempt < 10 && status.phase === "writing"; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    status = await harness.service.getResearchStatus(request.tripId);
+  }
+
+  assert.equal(status.phase, "completed");
+  assert.equal(harness.transport.submittedPayloads.length, 1);
+  assert.equal(harness.store.state, undefined);
+});
+
+test("cancel retries an uncertain unsent persistence responsibility before terminal submission", async () => {
+  const harness = createHarness({
+    scripts: [{ codexThreadId: "thread-persist-cancel", output: completedOutput(), activeDurationMs: 10_000 }],
+    storeOptions: {
+      proposalPersistFailures: [1],
+      loadFailures: [2],
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare(request.tripId);
+  await harness.service.claim(request.agentRunId);
+  const pending = await harness.service.executeTravelResearch(request);
+  assert.equal(pending.phase, "writing");
+  assert.equal(harness.transport.submittedPayloads.length, 0);
+
+  const status = await harness.service.cancelResearch({
+    tripId: pending.tripId,
+    researchTaskId: pending.researchTaskId,
+    agentRunId: pending.agentRunId,
+    operationId: pending.operationId,
+  });
+
+  assert.equal(status.phase, "completed");
+  assert.equal(harness.transport.submittedPayloads.length, 1);
+  assert.equal(harness.store.state, undefined);
+});
+
+test("a definitive expired or invalid proposal submit clears recovery and fails without attempting revoke", async (context) => {
+  for (const code of ["AGENT_RUN_EXPIRED", "INVALID_AGENT_CLAIM"]) {
+    await context.test(code, async () => {
+      const harness = createHarness({
+        scripts: [{ codexThreadId: `thread-inactive-submit-${code}`, output: completedOutput(), activeDurationMs: 10_000 }],
+        transportOptions: {
+          submitError: Object.assign(new Error("inactive"), { code }),
+          clearProposalOnSubmitError: true,
+        },
+      });
+      const request = await targetRequest();
+      harness.service.prepare(request.tripId);
+      await harness.service.claim(request.agentRunId);
+
+      const status = await harness.service.executeTravelResearch(request);
+
+      assert.equal(status.phase, "failed");
+      assert.equal(status.errorCode, "AGENT_RUN_INACTIVE");
+      assert.equal(harness.store.state, undefined);
+      assert.equal(harness.events.includes("transport.revokeSelf"), false);
+    });
+  }
+});
+
+test("two services crossing after the empty-state gate cannot overwrite proposal ownership", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "travel-proposal-cas-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const directory = join(root, "application-data");
+  const firstBaseStore = createResearchStateStore({ directory, resolveHostname: PUBLIC_RESOLVER });
+  const secondBaseStore = createResearchStateStore({ directory, resolveHostname: PUBLIC_RESOLVER });
+  let releaseFirstClear;
+  let releaseSecondClear;
+  let observeFirstClear;
+  let observeSecondClear;
+  const firstClearGate = new Promise((resolve) => { releaseFirstClear = resolve; });
+  const secondClearGate = new Promise((resolve) => { releaseSecondClear = resolve; });
+  const firstCleared = new Promise((resolve) => { observeFirstClear = resolve; });
+  const secondCleared = new Promise((resolve) => { observeSecondClear = resolve; });
+  const gateInitialClear = (store, observe, gate) => {
+    let first = true;
+    return {
+      load: (...args) => store.load(...args),
+      async clear(...args) {
+        const result = await store.clear(...args);
+        if (first) {
+          first = false;
+          observe();
+          await gate;
+        }
+        return result;
+      },
+      save: (...args) => store.save(...args),
+      persistNeedsOwnerAction: (...args) => store.persistNeedsOwnerAction(...args),
+      persistSelfRevokeReconciliation: (...args) => store.persistSelfRevokeReconciliation(...args),
+      persistProposalReconciliation: (...args) => store.persistProposalReconciliation(...args),
+    };
+  };
+  const firstEvents = [];
+  const secondEvents = [];
+  let releaseFirstSubmit;
+  const firstSubmitGate = new Promise((resolve) => { releaseFirstSubmit = resolve; });
+  const firstTransport = fakeTransport(firstEvents, contextFixture(), { submitGate: firstSubmitGate });
+  const secondTransport = fakeTransport(secondEvents, contextFixture());
+  const firstService = new TravelResearchService({
+    transport: firstTransport,
+    runner: fakeRunner(firstEvents, [{ codexThreadId: "thread-cas-first", output: completedOutput(), activeDurationMs: 10 }]),
+    store: gateInitialClear(firstBaseStore, observeFirstClear, firstClearGate),
+    notifier: { async notifyOwnerAction() { return true; } },
+    clock: createClock(),
+    idGenerator: (() => { const values = ["research-task-cas-first", "alias-salt-cas-first"]; return () => values.shift(); })(),
+  });
+  const secondService = new TravelResearchService({
+    transport: secondTransport,
+    runner: fakeRunner(secondEvents, [{ codexThreadId: "thread-cas-second", output: completedOutput(), activeDurationMs: 10 }]),
+    store: gateInitialClear(secondBaseStore, observeSecondClear, secondClearGate),
+    notifier: { async notifyOwnerAction() { return true; } },
+    clock: createClock(),
+    idGenerator: (() => { const values = ["research-task-cas-second", "alias-salt-cas-second"]; return () => values.shift(); })(),
+  });
+  const firstRequest = await targetRequest();
+  const secondRequest = {
+    ...firstRequest,
+    agentRunId: "agent-run-cas-second",
+    operationId: "operation-cas-second",
+  };
+  firstService.prepare(firstRequest.tripId);
+  secondService.prepare(secondRequest.tripId);
+  await firstService.claim(firstRequest.agentRunId);
+  await secondService.claim(secondRequest.agentRunId);
+
+  const firstExecution = firstService.executeTravelResearch(firstRequest);
+  const secondExecution = secondService.executeTravelResearch(secondRequest);
+  await Promise.all([firstCleared, secondCleared]);
+  releaseFirstClear();
+  while (firstTransport.submittedPayloads.length === 0) await new Promise((resolve) => setImmediate(resolve));
+  releaseSecondClear();
+
+  const secondStatus = await secondExecution;
+  const owned = await secondBaseStore.load();
+  assert.equal(secondStatus.phase, "writing");
+  assert.equal(owned.operationId, firstRequest.operationId);
+  assert.equal(owned.agentRunId, firstRequest.agentRunId);
+  assert.equal(secondTransport.submittedPayloads.length, 0);
+
+  releaseFirstSubmit();
+  assert.equal((await firstExecution).phase, "completed");
+  let retriedSecondStatus = await secondService.getResearchStatus(secondRequest.tripId);
+  while (retriedSecondStatus.phase === "writing") {
+    await new Promise((resolve) => setImmediate(resolve));
+    retriedSecondStatus = await secondService.getResearchStatus(secondRequest.tripId);
+  }
+  assert.equal(retriedSecondStatus.phase, "completed");
+  assert.equal(secondTransport.submittedPayloads.length, 1);
+  assert.equal(await secondBaseStore.load(), undefined);
 });
 
 test("cancel waits for uncertain resumed context reconciliation and preserves blocked recovery until determined", async () => {
