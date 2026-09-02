@@ -416,6 +416,37 @@ test("persists and reloads a bounded proposal envelope near the legal payload li
   await assert.rejects(store.persistProposalReconciliation(oversized), { code: "RESEARCH_STATE_INVALID" });
 });
 
+test("rejects a proposal whose JSON structure pushes the total payload beyond 256 KiB", async (context) => {
+  const { store } = await temporaryStore(context);
+  const state = proposalReconciliationState();
+  const submit = JSON.parse(state.submission.submitBody);
+  for (const [candidateIndex, candidate] of submit.payload.candidates.entries()) {
+    const evidence = candidate.evidence.map((item) => structuredClone(item));
+    candidate.evidence = Array.from({ length: 25 }, (_, evidenceIndex) => ({
+      ...structuredClone(evidence[evidenceIndex % evidence.length]),
+      sourceUrl: `https://source-${candidateIndex}-${evidenceIndex}.public.org/${"x".repeat(4_700)}`,
+    }));
+  }
+  const stringValueBytes = (value) => {
+    if (typeof value === "string") return Buffer.byteLength(value, "utf8");
+    if (Array.isArray(value)) return value.reduce((total, item) => total + stringValueBytes(item), 0);
+    if (value && typeof value === "object") {
+      return Object.values(value).reduce((total, item) => total + stringValueBytes(item), 0);
+    }
+    return 0;
+  };
+  const payloadBytes = Buffer.byteLength(JSON.stringify(submit.payload), "utf8");
+  const submitBody = JSON.stringify(submit);
+  assert.equal(stringValueBytes(submit.payload) < 256 * 1_024, true);
+  assert.equal(payloadBytes > 256 * 1_024, true);
+  assert.equal(Buffer.byteLength(submitBody, "utf8") < 272 * 1_024, true);
+
+  const oversized = proposalReconciliationState({
+    submission: { ...state.submission, submitBody },
+  });
+  await assert.rejects(store.persistProposalReconciliation(oversized), { code: "RESEARCH_STATE_INVALID" });
+});
+
 test("writes through a same-directory temporary file and atomic rename", async (context) => {
   const renames = [];
   const synced = [];

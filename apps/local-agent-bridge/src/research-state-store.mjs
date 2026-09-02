@@ -437,6 +437,7 @@ function validProposalSubmission(value, agentRunId) {
   const successRevoke = validSignedEnvelope(value.successRevokeBody, agentRunId, "revokeAgentRunSelf");
   const failureRevoke = validSignedEnvelope(value.failureRevokeBody, agentRunId, "revokeAgentRunSelf");
   return Boolean(submit && successRevoke && failureRevoke
+    && Buffer.byteLength(JSON.stringify(submit.payload), "utf8") <= MAX_PROPOSAL_PAYLOAD_BYTES
     && validProposalPayload(submit.payload)
     && safePersistedProposalValue(submit.payload)
     && hasExactFields(successRevoke.payload, [])
