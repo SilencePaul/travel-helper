@@ -45,6 +45,18 @@ export const RECONCILIATION_STATE_FIELDS = Object.freeze([
   "startedAt",
   "updatedAt",
 ]);
+export const PROPOSAL_RECONCILIATION_STATE_FIELDS = Object.freeze([
+  "recordType",
+  "tripId",
+  "researchTaskId",
+  "agentRunId",
+  "operationId",
+  "reconciliationState",
+  "submission",
+  "activeRuntimeMs",
+  "startedAt",
+  "updatedAt",
+]);
 
 const STATE_FILE_NAME = "travel-research-state.json";
 const LOCK_FILE_NAME = ".travel-research-state.lock";
@@ -99,6 +111,8 @@ const BROAD_DIRECTORIES = new Set([
   "/Volumes",
 ]);
 const BROAD_LEAF_NAMES = new Set(["Desktop", "Documents", "Downloads", "Library", "Application Support"]);
+const PERSISTED_PRIVATE_KEY_PATTERN = /(?:credential|password|passwd|token|authorization|cookie|privatekey|pairingcode|codexthread|agentrun|signature|idempotency|secretkey|secretid|accesskey)/u;
+const PERSISTED_PRIVATE_VALUE_PATTERN = /(?:\bBearer\s+[A-Za-z0-9._~+\/-]{4,}|\b(?:authorization|cookie|password|passwd|api[._\s-]*key|access[._\s-]*token|refresh[._\s-]*token)\s*[:=]\s*[A-Za-z0-9._~+\/-]{4,}|\b(?:access[._\s-]*key(?:[._\s-]*id)?|secret[._\s-]*(?:id|key)|tencent[._\s-]*cloud[._\s-]*secret[._\s-]*(?:id|key))\s*[:=]\s*[A-Za-z0-9._~+\/-]{4,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:AKID|AKIA|ASIA)[A-Za-z0-9]{12,}|\b(?:sk|ghp|xox[baprs])[-_][A-Za-z0-9_-]{8,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|\b(?:agent\s*run|idempotency|signature|sequence)\b|file:\/\/|\/(?:Users|home|etc|private|var|tmp)\/|[A-Za-z]:\\(?:Users|Documents|Windows)\\)/iu;
 // This is a cooperative lock for protocol-following Bridge instances under one account,
 // not a security boundary against an arbitrary malicious process running as the same UID.
 const ORPHANED_LOCK_NONCES = new Set();
@@ -223,6 +237,92 @@ function validRevokeRequest(value, agentRunId) {
     && /^[A-Za-z0-9_-]{86}$/u.test(envelope.signature);
 }
 
+function validSignedEnvelope(body, agentRunId, action) {
+  if (typeof body !== "string" || Buffer.byteLength(body, "utf8") > MAX_STATE_BYTES) return undefined;
+  let envelope;
+  try {
+    envelope = JSON.parse(body);
+  } catch {
+    return undefined;
+  }
+  if (!hasExactFields(envelope, ["agentRunId", "sequence", "idempotencyKey", "action", "payload", "signature"])
+    || envelope.agentRunId !== agentRunId
+    || !Number.isSafeInteger(envelope.sequence) || envelope.sequence < 1
+    || typeof envelope.idempotencyKey !== "string"
+    || envelope.idempotencyKey.length < 8 || envelope.idempotencyKey.length > 128
+    || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(envelope.idempotencyKey)
+    || envelope.action !== action
+    || typeof envelope.signature !== "string" || !/^[A-Za-z0-9_-]{86}$/u.test(envelope.signature)) {
+    return undefined;
+  }
+  return envelope;
+}
+
+function safePersistedProposalValue(value, depth = 0, state = { nodes: 0, textBytes: 0 }) {
+  state.nodes += 1;
+  if (state.nodes > 2_048 || depth > 16) return false;
+  if (value === null || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value === "string") {
+    state.textBytes += Buffer.byteLength(value, "utf8");
+    return state.textBytes <= MAX_STATE_BYTES && !PERSISTED_PRIVATE_VALUE_PATTERN.test(value);
+  }
+  if (Array.isArray(value)) {
+    return value.length <= 256 && value.every((item) => safePersistedProposalValue(item, depth + 1, state));
+  }
+  if (!plainObject(value)) return false;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length > 128) return false;
+  for (const key of keys) {
+    if (typeof key !== "string"
+      || PERSISTED_PRIVATE_KEY_PATTERN.test(key.toLowerCase().replace(/[^a-z0-9]/gu, ""))
+      || !safePersistedProposalValue(value[key], depth + 1, state)) return false;
+  }
+  return true;
+}
+
+function validProposalSubmission(value, agentRunId) {
+  if (!plainObject(value)
+    || !hasExactFields(value, [
+      "agentRunId", "expiresAt", "firstSentAt", "submitBody", "successRevokeBody", "failureRevokeBody",
+    ])
+    || value.agentRunId !== agentRunId
+    || !canonicalTimestamp(value.expiresAt)
+    || !Number.isSafeInteger(value.firstSentAt) || value.firstSentAt < 0) return false;
+  const submit = validSignedEnvelope(value.submitBody, agentRunId, "submitProposalBatch");
+  const successRevoke = validSignedEnvelope(value.successRevokeBody, agentRunId, "revokeAgentRunSelf");
+  const failureRevoke = validSignedEnvelope(value.failureRevokeBody, agentRunId, "revokeAgentRunSelf");
+  return Boolean(submit && successRevoke && failureRevoke
+    && hasExactFields(submit.payload, ["round", "candidates"])
+    && Number.isSafeInteger(submit.payload.round) && submit.payload.round > 0
+    && Array.isArray(submit.payload.candidates)
+    && submit.payload.candidates.length >= 2 && submit.payload.candidates.length <= 4
+    && safePersistedProposalValue(submit.payload)
+    && hasExactFields(successRevoke.payload, [])
+    && hasExactFields(failureRevoke.payload, [])
+    && successRevoke.sequence === submit.sequence + 1
+    && failureRevoke.sequence === submit.sequence);
+}
+
+function validateProposalReconciliationShape(value) {
+  const valid = hasExactFields(value, PROPOSAL_RECONCILIATION_STATE_FIELDS)
+    && value.recordType === "proposal_submit_reconciliation"
+    && opaqueIdentifier(value.tripId)
+    && opaqueIdentifier(value.researchTaskId)
+    && opaqueIdentifier(value.agentRunId)
+    && opaqueIdentifier(value.operationId)
+    && value.reconciliationState === "active"
+    && validProposalSubmission(value.submission, value.agentRunId)
+    && Number.isSafeInteger(value.activeRuntimeMs)
+    && value.activeRuntimeMs >= 0
+    && value.activeRuntimeMs <= 600_000
+    && canonicalTimestamp(value.startedAt)
+    && canonicalTimestamp(value.updatedAt)
+    && Date.parse(value.updatedAt) >= Date.parse(value.startedAt);
+  if (!valid) throw codedError("RESEARCH_STATE_INVALID");
+  return Object.freeze(Object.fromEntries(PROPOSAL_RECONCILIATION_STATE_FIELDS.map((field) => [field, value[field]])));
+}
+
 function validateReconciliationShape(value) {
   const valid = hasExactFields(value, RECONCILIATION_STATE_FIELDS)
     && value.recordType === "self_revoke_reconciliation"
@@ -257,6 +357,9 @@ function validateReconciliationShape(value) {
 }
 
 function validateStateShape(value) {
+  if (plainObject(value) && value.recordType === "proposal_submit_reconciliation") {
+    return validateProposalReconciliationShape(value);
+  }
   if (plainObject(value) && value.recordType === "self_revoke_reconciliation") {
     return validateReconciliationShape(value);
   }
@@ -984,6 +1087,26 @@ export function createResearchStateStore({
     return result;
   }
 
+  async function persistProposalReconciliation(value) {
+    const state = await validateState(value);
+    if (state.recordType !== "proposal_submit_reconciliation") throw codedError("RESEARCH_STATE_INVALID");
+    const lock = await acquireLock();
+    let result;
+    let failure;
+    try {
+      result = await writeState(state, lock);
+    } catch (error) {
+      failure = error;
+    }
+    try {
+      await releaseLock(lock);
+    } catch (error) {
+      failure ??= error;
+    }
+    if (failure) throw failure;
+    return result;
+  }
+
   return Object.freeze({
     filePath,
     load,
@@ -991,5 +1114,6 @@ export function createResearchStateStore({
     clear,
     persistNeedsOwnerAction,
     persistSelfRevokeReconciliation,
+    persistProposalReconciliation,
   });
 }

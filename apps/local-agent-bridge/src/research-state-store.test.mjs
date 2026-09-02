@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 
 import {
+  PROPOSAL_RECONCILIATION_STATE_FIELDS,
   RECOVERY_STATE_FIELDS,
   RECONCILIATION_STATE_FIELDS,
   createResearchStateStore,
@@ -80,6 +81,41 @@ function reconciliationState(overrides = {}) {
   };
 }
 
+function proposalReconciliationState(overrides = {}) {
+  const agentRunId = "agent-run-1";
+  const envelope = (action, payload, sequence, suffix) => JSON.stringify({
+    agentRunId,
+    sequence,
+    idempotencyKey: `${action}-${suffix}`,
+    action,
+    payload,
+    signature: "s".repeat(86),
+  });
+  return {
+    recordType: "proposal_submit_reconciliation",
+    tripId: "trip-private",
+    researchTaskId: "research-task-1",
+    agentRunId,
+    operationId: "operation-1",
+    reconciliationState: "active",
+    submission: {
+      agentRunId,
+      expiresAt: "2026-09-01T01:15:00.000Z",
+      firstSentAt: Date.parse("2026-09-01T01:03:00.000Z"),
+      submitBody: envelope("submitProposalBatch", {
+        round: 1,
+        candidates: [{ category: "hotel" }, { category: "hotel" }],
+      }, 4, "submit"),
+      successRevokeBody: envelope("revokeAgentRunSelf", {}, 5, "success"),
+      failureRevokeBody: envelope("revokeAgentRunSelf", {}, 4, "failure"),
+    },
+    activeRuntimeMs: 12_345,
+    startedAt: "2026-09-01T01:02:03.000Z",
+    updatedAt: "2026-09-01T01:04:05.000Z",
+    ...overrides,
+  };
+}
+
 async function temporaryStore(context, options = {}) {
   const root = await mkdtemp(join(tmpdir(), "research-state-store-test-"));
   context.after(() => rm(root, { recursive: true, force: true }));
@@ -124,6 +160,32 @@ test("persists only the fixed signed self-revoke replay record before terminal p
   for (const forbidden of ["privateKey", "pairingCode", "travelerName", "prompt", "output", "cookie"]) {
     assert.equal(serialized.includes(forbidden), false, forbidden);
   }
+});
+
+test("persists only a strict proposal replay responsibility and rejects nested private data", async (context) => {
+  const { filePath, store } = await temporaryStore(context);
+  const state = proposalReconciliationState();
+
+  await store.persistProposalReconciliation(state);
+
+  assert.deepEqual(await store.load(), state);
+  const serialized = await readFile(filePath, "utf8");
+  assert.deepEqual(Object.keys(JSON.parse(serialized)), PROPOSAL_RECONCILIATION_STATE_FIELDS);
+  for (const forbidden of ["privateKey", "pairingCode", "cookie", "credential", "codexThreadId"]) {
+    assert.equal(serialized.includes(forbidden), false, forbidden);
+  }
+
+  const privateEnvelope = JSON.parse(state.submission.submitBody);
+  privateEnvelope.payload.candidates[0].privateKey = "must-never-persist";
+  await assert.rejects(store.persistProposalReconciliation(proposalReconciliationState({
+    submission: { ...state.submission, submitBody: JSON.stringify(privateEnvelope) },
+  })), { code: "RESEARCH_STATE_INVALID" });
+
+  const credentialEnvelope = JSON.parse(state.submission.submitBody);
+  credentialEnvelope.payload.candidates[0].reason = "Bearer exposed-token-1234";
+  await assert.rejects(store.persistProposalReconciliation(proposalReconciliationState({
+    submission: { ...state.submission, submitBody: JSON.stringify(credentialEnvelope) },
+  })), { code: "RESEARCH_STATE_INVALID" });
 });
 
 test("writes through a same-directory temporary file and atomic rename", async (context) => {

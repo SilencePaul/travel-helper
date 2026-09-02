@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { buildResearchTargetScopes } from "@travel/contracts/decision-research";
 
 import { buildTravelResearchInput } from "./travel-research-input.mjs";
 import { createCodexRunner } from "./codex-runner.mjs";
+import { createResearchStateStore } from "./research-state-store.mjs";
 import { LocalAgentBridgeRuntime } from "./runtime.mjs";
 import { safeResearchStatus, TravelResearchService } from "./travel-research-service.mjs";
 
@@ -235,6 +239,12 @@ function fakeStore(events, initialState, options = {}) {
       if (options.reconciliationPersistErrorAfterWrite) throw options.reconciliationPersistErrorAfterWrite;
       return structuredClone(state);
     },
+    async persistProposalReconciliation(value) {
+      events.push("store.persistProposalReconciliation");
+      if (options.proposalPersistError) throw options.proposalPersistError;
+      state = structuredClone(value);
+      return structuredClone(state);
+    },
     get state() { return state && structuredClone(state); },
   };
 }
@@ -246,6 +256,7 @@ function fakeTransport(events, context, options = {}) {
   let contextAttempts = 0;
   let submitAttempts = 0;
   let revokeAttempts = 0;
+  let proposalReconciliation;
   const submittedPayloads = [];
   const prepareRevokeSelf = () => {
     if (!claimed) throw Object.assign(new Error("not claimed"), { code: "AGENT_RUN_INACTIVE" });
@@ -280,6 +291,21 @@ function fakeTransport(events, context, options = {}) {
     claimed = undefined;
     preparedMaterial = undefined;
     return { ok: true };
+  };
+  const performSubmit = async (payload) => {
+    events.push("transport.submitProposalBatch");
+    submittedPayloads.push(structuredClone(payload));
+    submitAttempts += 1;
+    if (options.submitGate) await options.submitGate;
+    if (options.submitError) throw options.submitError;
+    if (options.uncertainSubmitOnce && submitAttempts === 1) {
+      throw Object.assign(new Error("private network detail"), {
+        code: "AGENT_TRANSPORT_UNAVAILABLE",
+        uncertain: true,
+      });
+    }
+    if (claimed) claimed.nextSequence += 1;
+    return { ok: true, action: "submitProposalBatch", data: { count: payload.candidates.length } };
   };
   return {
     prepare() {
@@ -322,18 +348,59 @@ function fakeTransport(events, context, options = {}) {
       return structuredClone(context);
     },
     async submitProposalBatch(payload) {
-      events.push("transport.submitProposalBatch");
-      submittedPayloads.push(structuredClone(payload));
-      submitAttempts += 1;
-      if (options.submitGate) await options.submitGate;
-      if (options.submitError) throw options.submitError;
-      if (options.uncertainSubmitOnce && submitAttempts === 1) {
-        throw Object.assign(new Error("private network detail"), {
-          code: "AGENT_TRANSPORT_UNAVAILABLE",
-          uncertain: true,
-        });
-      }
-      return { ok: true, action: "submitProposalBatch", data: { count: payload.candidates.length } };
+      return performSubmit(payload);
+    },
+    prepareProposalSubmission(payload) {
+      if (!claimed) throw Object.assign(new Error("not claimed"), { code: "AGENT_RUN_INACTIVE" });
+      if (proposalReconciliation) return structuredClone(proposalReconciliation);
+      const envelope = (action, commandPayload, sequence, suffix) => JSON.stringify({
+        agentRunId: claimed.agentRunId,
+        sequence,
+        idempotencyKey: `${action}-${suffix}`,
+        action,
+        payload: commandPayload,
+        signature: "s".repeat(86),
+      });
+      proposalReconciliation = {
+        agentRunId: claimed.agentRunId,
+        expiresAt: claimed.expiresAt,
+        firstSentAt: Date.parse("2026-09-01T00:00:00.000Z"),
+        submitBody: envelope("submitProposalBatch", structuredClone(payload), claimed.nextSequence, "submit"),
+        successRevokeBody: envelope("revokeAgentRunSelf", {}, claimed.nextSequence + 1, "success"),
+        failureRevokeBody: envelope("revokeAgentRunSelf", {}, claimed.nextSequence, "failure"),
+      };
+      return structuredClone(proposalReconciliation);
+    },
+    restoreProposalSubmission(snapshot) {
+      proposalReconciliation = structuredClone(snapshot);
+      claimed ??= {
+        agentRunId: snapshot.agentRunId,
+        expiresAt: snapshot.expiresAt,
+        nextSequence: JSON.parse(snapshot.submitBody).sequence,
+      };
+      return true;
+    },
+    async reconcileProposalSubmission(snapshot) {
+      return performSubmit(JSON.parse(snapshot.submitBody).payload);
+    },
+    restoreProposalRevoke(snapshot, outcome) {
+      const body = outcome === "completed" ? snapshot.successRevokeBody : snapshot.failureRevokeBody;
+      proposalReconciliation.revokeRequest = {
+        agentRunId: snapshot.agentRunId,
+        expiresAt: snapshot.expiresAt,
+        firstSentAt: snapshot.firstSentAt,
+        body,
+      };
+      return true;
+    },
+    async reconcileProposalRevoke(snapshot, outcome) {
+      this.restoreProposalRevoke(snapshot, outcome);
+      return reconcileRevokeSelf(proposalReconciliation.revokeRequest);
+    },
+    discardPreparedProposalSubmission(snapshot) {
+      if (snapshot?.submitBody !== proposalReconciliation?.submitBody) return false;
+      proposalReconciliation = undefined;
+      return true;
     },
     prepareRevokeSelf,
     discardPreparedRevokeSelf(snapshot) {
@@ -537,8 +604,10 @@ test("happy path starts Codex only after prepare/claim and writes one validated 
     "runner.create:new",
     "runner.runInitial",
     "store.clear",
+    "store.persistProposalReconciliation",
     "transport.submitProposalBatch",
     "transport.revokeSelf",
+    "store.clear",
   ]);
   assert.equal(harness.transport.submittedPayloads.length, 1);
   assert.equal(harness.transport.submittedPayloads[0].candidates.length, 2);
@@ -1183,6 +1252,147 @@ test("two lost real-runtime submit responses replay one envelope until the third
   assert.equal(submitBodies[1], submitBodies[2]);
   assert.equal(actions.includes("revokeAgentRunSelf"), true);
   assert.equal(harness.transport.claimedRun, undefined);
+});
+
+test("an uncertain proposal response persists exact replay responsibility and converges after restart", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "travel-submit-restart-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const directory = join(root, "application-data");
+  const clock = createControlledClock();
+  const request = await targetRequest();
+  const firstSubmitBodies = [];
+  const restartedSubmitBodies = [];
+  const restartedRevokeBodies = [];
+
+  const firstRuntime = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.public.org/api/agent",
+    now: clock,
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.action === "claimAgentRun") {
+        return Response.json({
+          ok: true,
+          data: {
+            agentRunId: body.agentRunId,
+            claimedAt: "2026-09-01T00:00:00.000Z",
+            expiresAt: "2026-09-01T00:15:00.000Z",
+            nextSequence: 1,
+          },
+        });
+      }
+      if (body.action === "getDecisionContext") {
+        return Response.json({ ok: true, action: body.action, data: contextFixture() });
+      }
+      assert.equal(body.action, "submitProposalBatch");
+      firstSubmitBodies.push(init.body);
+      throw new TypeError("server committed but response was lost before process crash");
+    },
+  });
+  const firstStore = createResearchStateStore({ directory, resolveHostname: PUBLIC_RESOLVER });
+  const firstRunner = fakeRunner([], [{
+    codexThreadId: "thread-submit-restart",
+    output: completedOutput(),
+    activeDurationMs: 10_000,
+  }]);
+  const firstService = new TravelResearchService({
+    transport: firstRuntime,
+    runner: firstRunner,
+    store: firstStore,
+    notifier: { async notifyOwnerAction() { return true; } },
+    clock,
+    idGenerator: (() => {
+      const generated = ["research-task-submit-restart", "alias-salt-submit-restart"];
+      return () => generated.shift();
+    })(),
+  });
+  firstService.prepare(request.tripId);
+  await firstService.claim(request.agentRunId);
+  void firstService.executeTravelResearch(request);
+  while (firstSubmitBodies.length === 0) await new Promise((resolve) => setImmediate(resolve));
+
+  const persisted = await firstStore.load();
+  assert.equal(persisted.recordType, "proposal_submit_reconciliation");
+  assert.equal(persisted.tripId, request.tripId);
+  assert.equal(persisted.agentRunId, request.agentRunId);
+  assert.equal(persisted.operationId, request.operationId);
+  assert.equal(JSON.stringify(persisted).includes("privateKey"), false);
+  assert.equal(JSON.stringify(persisted).includes("pairingCode"), false);
+
+  const restartedRuntime = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.public.org/api/agent",
+    now: clock,
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.action === "submitProposalBatch") {
+        restartedSubmitBodies.push(init.body);
+        return Response.json({
+          ok: true,
+          action: body.action,
+          data: candidateBatchData(),
+          replayed: true,
+        });
+      }
+      assert.equal(body.action, "revokeAgentRunSelf");
+      restartedRevokeBodies.push(init.body);
+      return Response.json({
+        ok: true,
+        action: body.action,
+        data: { agentRunId: body.agentRunId, revokedAt: "2026-09-01T00:02:00.000Z" },
+      });
+    },
+  });
+  const restartedStore = createResearchStateStore({ directory, resolveHostname: PUBLIC_RESOLVER });
+  const restartedRunner = fakeRunner([], []);
+  const restartedService = new TravelResearchService({
+    transport: restartedRuntime,
+    runner: restartedRunner,
+    store: restartedStore,
+    notifier: { async notifyOwnerAction() { return true; } },
+    clock,
+    idGenerator: () => "must-not-generate",
+  });
+
+  assert.equal((await restartedService.getResearchStatus(request.tripId)).phase, "writing");
+  let restartedStatus;
+  do {
+    await new Promise((resolve) => setImmediate(resolve));
+    restartedStatus = await restartedService.getResearchStatus(request.tripId);
+  } while (restartedStatus.phase === "writing");
+
+  assert.equal(restartedStatus.phase, "completed");
+  assert.equal(restartedRunner.createCount, 0);
+  assert.equal(restartedSubmitBodies.length, 1);
+  assert.equal(restartedSubmitBodies[0], firstSubmitBodies[0]);
+  assert.equal(restartedRevokeBodies.length, 1);
+  assert.equal(restartedRevokeBodies[0], persisted.submission.successRevokeBody);
+  assert.equal(await restartedStore.load(), undefined);
+});
+
+test("a confirmed proposal remains recoverable until final responsibility cleanup succeeds", async () => {
+  const harness = createHarness({
+    scripts: [{ codexThreadId: "thread-final-clear-retry", output: completedOutput(), activeDurationMs: 10_000 }],
+    storeOptions: { clearFailures: [2] },
+  });
+  const request = await targetRequest();
+  harness.service.prepare(request.tripId);
+  await harness.service.claim(request.agentRunId);
+
+  const pending = await harness.service.executeTravelResearch(request);
+
+  assert.equal(pending.phase, "writing");
+  assert.equal(harness.store.state.recordType, "proposal_submit_reconciliation");
+  assert.equal(harness.transport.submittedPayloads.length, 1);
+
+  let status = await harness.service.getResearchStatus(request.tripId);
+  do {
+    await new Promise((resolve) => setImmediate(resolve));
+    status = await harness.service.getResearchStatus(request.tripId);
+  } while (status.phase === "writing");
+
+  assert.equal(status.phase, "completed");
+  assert.equal(harness.transport.submittedPayloads.length, 2);
+  assert.deepEqual(harness.transport.submittedPayloads[0], harness.transport.submittedPayloads[1]);
+  assert.equal(harness.store.state, undefined);
 });
 
 test("cancel waits for uncertain resumed context reconciliation and preserves blocked recovery until determined", async () => {
@@ -2129,7 +2339,7 @@ test("resume uses a newly claimed run, the same task/thread and a fixed skip pro
     resumed.events.indexOf("store.clear") < resumed.events.indexOf("transport.submitProposalBatch"),
     true,
   );
-  assert.equal(resumed.events.filter((event) => event === "store.clear").length, 1);
+  assert.equal(resumed.events.filter((event) => event === "store.clear").length, 2);
 });
 
 test("resume rejects browser-controlled fields and supersedes changed context without touching the old thread", async () => {

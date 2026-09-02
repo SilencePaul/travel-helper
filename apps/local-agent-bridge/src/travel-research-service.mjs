@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 
-import { RECONCILIATION_STATE_FIELDS } from "./research-state-store.mjs";
+import {
+  PROPOSAL_RECONCILIATION_STATE_FIELDS,
+  RECONCILIATION_STATE_FIELDS,
+} from "./research-state-store.mjs";
 import { buildTravelResearchInput } from "./travel-research-input.mjs";
 import { validateTravelResearchOutput } from "./travel-research-output.mjs";
 
@@ -119,6 +122,19 @@ function sameReconciliationIntent(left, right) {
     : left[field] === right[field]);
 }
 
+function sameProposalReconciliation(left, right) {
+  const submissionFields = [
+    "agentRunId", "expiresAt", "firstSentAt", "submitBody", "successRevokeBody", "failureRevokeBody",
+  ];
+  if (!exactKeys(left, PROPOSAL_RECONCILIATION_STATE_FIELDS)
+    || !exactKeys(right, PROPOSAL_RECONCILIATION_STATE_FIELDS)
+    || !exactKeys(left.submission, submissionFields)
+    || !exactKeys(right.submission, submissionFields)) return false;
+  return PROPOSAL_RECONCILIATION_STATE_FIELDS.every((field) => field === "submission"
+    ? submissionFields.every((requestField) => left.submission[requestField] === right.submission[requestField])
+    : left[field] === right[field]);
+}
+
 export function safeResearchStatus(value) {
   if (!plainObject(value) || typeof value.phase !== "string") throw codedError("CODEX_RESEARCH_FAILED");
   if (value.phase === "idle") return Object.freeze({ phase: "idle" });
@@ -208,6 +224,7 @@ export class TravelResearchService {
   #operationAgentRunId;
   #claimHandoffLease;
   #reconciliationRecord;
+  #proposalReconciliationRecord;
   #preparedTripId;
   #preparedCapabilityIdentity;
   #restored = false;
@@ -225,11 +242,18 @@ export class TravelResearchService {
       || typeof transport.prepareRevokeSelf !== "function"
       || typeof transport.discardPreparedRevokeSelf !== "function"
       || typeof transport.reconcileRevokeSelf !== "function"
+      || typeof transport.prepareProposalSubmission !== "function"
+      || typeof transport.restoreProposalSubmission !== "function"
+      || typeof transport.reconcileProposalSubmission !== "function"
+      || typeof transport.restoreProposalRevoke !== "function"
+      || typeof transport.reconcileProposalRevoke !== "function"
+      || typeof transport.discardPreparedProposalSubmission !== "function"
       || (typeof transport.submitProposalBatch !== "function" && typeof transport.command !== "function")
       || !runner || typeof runner.create !== "function"
       || !store || typeof store.load !== "function" || typeof store.clear !== "function"
       || typeof store.persistNeedsOwnerAction !== "function"
       || typeof store.persistSelfRevokeReconciliation !== "function"
+      || typeof store.persistProposalReconciliation !== "function"
       || !notifier || typeof notifier.notifyOwnerAction !== "function"
       || typeof clock !== "function" || typeof idGenerator !== "function") {
       throw codedError("CODEX_RESEARCH_FAILED");
@@ -291,8 +315,35 @@ export class TravelResearchService {
   }
 
   #restoreRecoveredState(recovered) {
+    const proposalReconciling = recovered.recordType === "proposal_submit_reconciliation";
     const reconciling = recovered.recordType === "self_revoke_reconciliation";
+    this.#proposalReconciliationRecord = proposalReconciling ? recovered : undefined;
     this.#reconciliationRecord = reconciling ? recovered : undefined;
+    if (proposalReconciling) {
+      this.#task = {
+        tripId: recovered.tripId,
+        researchTaskId: recovered.researchTaskId,
+        agentRunId: recovered.agentRunId,
+        operationId: recovered.operationId,
+        agentExpiresAt: Date.parse(recovered.submission.expiresAt),
+        activeRuntimeMs: recovered.activeRuntimeMs,
+        runnerRuntimeMs: recovered.activeRuntimeMs,
+        serviceRuntimeMs: 0,
+        startedAt: recovered.startedAt,
+        terminalStarted: true,
+      };
+      this.#status = safeResearchStatus({
+        phase: "writing",
+        tripId: recovered.tripId,
+        researchTaskId: recovered.researchTaskId,
+        agentRunId: recovered.agentRunId,
+        operationId: recovered.operationId,
+        reconciliationState: "active",
+        startedAt: recovered.startedAt,
+        updatedAt: recovered.updatedAt,
+      });
+      return this.#status;
+    }
     this.#task = {
       tripId: recovered.tripId,
       researchTaskId: recovered.researchTaskId,
@@ -673,6 +724,7 @@ export class TravelResearchService {
       || this.#task?.recoveryCleared !== true
       || this.#task?.pendingSignedAction
       || this.#task?.selfRevokeReconciling
+      || this.#proposalReconciliationRecord
       || this.#reconciliationRecord
       || this.#inflight) return false;
     try {
@@ -697,7 +749,8 @@ export class TravelResearchService {
         if (this.#terminalCleanupConfirmed()) return safeResearchStatus({ phase: "idle" });
         throw codedError("AGENT_RUN_INACTIVE");
       }
-      if (this.#reconciliationRecord && !this.#inflight) this.#startRecoveredSelfRevoke();
+      if (this.#proposalReconciliationRecord && !this.#inflight) this.#startRecoveredProposal();
+      else if (this.#reconciliationRecord && !this.#inflight) this.#startRecoveredSelfRevoke();
       return safeResearchStatus(this.#status);
     }
     let recovered;
@@ -710,8 +763,20 @@ export class TravelResearchService {
     if (!recovered) return this.#status;
     this.#restoreRecoveredState(recovered);
     if (tripId !== undefined && recovered.tripId !== tripId) throw codedError("AGENT_RUN_INACTIVE");
-    if (recovered.recordType === "self_revoke_reconciliation") this.#startRecoveredSelfRevoke();
+    if (recovered.recordType === "proposal_submit_reconciliation") this.#startRecoveredProposal();
+    else if (recovered.recordType === "self_revoke_reconciliation") this.#startRecoveredSelfRevoke();
     return this.#status;
+  }
+
+  #startRecoveredProposal() {
+    if (!this.#proposalReconciliationRecord || this.#inflight) return;
+    const record = this.#proposalReconciliationRecord;
+    let operation;
+    operation = this.#finishProposalReconciliation(record).finally(() => {
+      if (this.#inflight === operation) this.#inflight = undefined;
+    });
+    this.#inflight = operation;
+    void operation.catch(() => undefined);
   }
 
   #startRecoveredSelfRevoke() {
@@ -1009,13 +1074,39 @@ export class TravelResearchService {
         if (this.#cancelRequested) return this.#finishCancelled();
         await this.#bounded(() => this.#clearRecovery());
         if (this.#cancelRequested) return this.#finishCancelled();
-        await this.#submitWithRetry(validated.payload);
+        const submission = this.#transport.prepareProposalSubmission(validated.payload);
+        const record = {
+          recordType: "proposal_submit_reconciliation",
+          tripId: this.#task.tripId,
+          researchTaskId: this.#task.researchTaskId,
+          agentRunId: this.#task.agentRunId,
+          operationId: this.#task.operationId,
+          reconciliationState: "active",
+          submission,
+          activeRuntimeMs: Math.min(ACTIVE_BUDGET_MS, Math.ceil(this.#task.activeRuntimeMs)),
+          startedAt: this.#task.startedAt,
+          updatedAt: this.#now(),
+        };
         try {
-          await this.#revokeStrict();
+          await this.#store.persistProposalReconciliation(record);
         } catch (error) {
-          if (stableFailureCode(error) !== "AGENT_RUN_INACTIVE") throw error;
+          let observed;
+          let readBackCertain = true;
+          try {
+            observed = await this.#store.load();
+          } catch {
+            readBackCertain = false;
+          }
+          if (readBackCertain && observed === undefined) {
+            this.#transport.discardPreparedProposalSubmission(submission);
+            throw error;
+          }
+          if (!readBackCertain || !sameProposalReconciliation(observed, record)) {
+            return safeResearchStatus(this.#status);
+          }
         }
-        return this.#finishStatus("completed");
+        this.#proposalReconciliationRecord = record;
+        return this.#finishProposalReconciliation(record);
       }
     } catch (error) {
       if (error?.code === "CODEX_NOT_AUTHENTICATED") {
@@ -1125,11 +1216,48 @@ export class TravelResearchService {
     }
   }
 
-  async #submitWithRetry(payload) {
-    const submit = typeof this.#transport.submitProposalBatch === "function"
-      ? () => this.#transport.submitProposalBatch(payload)
-      : () => this.#transport.command("submitProposalBatch", payload);
+  async #submitWithRetry(payload, submission) {
+    const submit = submission
+      ? () => this.#transport.reconcileProposalSubmission(submission)
+      : typeof this.#transport.submitProposalBatch === "function"
+        ? () => this.#transport.submitProposalBatch(payload)
+        : () => this.#transport.command("submitProposalBatch", payload);
     return this.#reconcileSigned("submitProposalBatch", submit, { terminal: true });
+  }
+
+  async #finishProposalReconciliation(record) {
+    let outcome = "completed";
+    let submitError;
+    try {
+      this.#transport.restoreProposalSubmission(record.submission);
+      try {
+        await this.#submitWithRetry(undefined, record.submission);
+      } catch (error) {
+        if (error?.uncertain) return safeResearchStatus(this.#status);
+        outcome = "failed";
+        submitError = error;
+      }
+      try {
+        this.#transport.restoreProposalRevoke(record.submission, outcome);
+        await this.#reconcileSigned(
+          "revokeAgentRunSelf",
+          () => this.#transport.reconcileProposalRevoke(record.submission, outcome),
+          { terminal: true, cleanup: true },
+        );
+      } catch (error) {
+        if (stableFailureCode(error) !== "AGENT_RUN_INACTIVE") return safeResearchStatus(this.#status);
+      }
+      try {
+        await this.#clearRecovery();
+      } catch {
+        return safeResearchStatus(this.#status);
+      }
+      this.#proposalReconciliationRecord = undefined;
+      if (outcome === "completed") return this.#finishStatus("completed");
+      return this.#finishStatus("failed", { errorCode: stableFailureCode(submitError) });
+    } catch {
+      return safeResearchStatus(this.#status);
+    }
   }
 
   async #revokeStrict({ cleanup = false, revokeRequest } = {}) {

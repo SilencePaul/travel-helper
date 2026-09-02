@@ -170,6 +170,72 @@ function safeRevokeSnapshot(value) {
   });
 }
 
+function signedEnvelope(body, action, agentRunId) {
+  if (typeof body !== "string" || Buffer.byteLength(body, "utf8") > 32 * 1_024) {
+    throw codedError("INVALID_REQUEST");
+  }
+  let envelope;
+  try {
+    envelope = JSON.parse(body);
+  } catch {
+    throw codedError("INVALID_REQUEST");
+  }
+  if (!hasExactOwnKeys(envelope, ["agentRunId", "sequence", "idempotencyKey", "action", "payload", "signature"])
+    || envelope.agentRunId !== agentRunId
+    || !Number.isSafeInteger(envelope.sequence) || envelope.sequence < 1
+    || !opaqueIdentifier(envelope.idempotencyKey)
+    || envelope.action !== action
+    || typeof envelope.signature !== "string" || !/^[A-Za-z0-9_-]{86}$/u.test(envelope.signature)) {
+    throw codedError("INVALID_REQUEST");
+  }
+  return envelope;
+}
+
+function safeProposalReconciliation(value) {
+  if (!hasExactOwnKeys(value, [
+    "agentRunId", "expiresAt", "firstSentAt", "submitBody", "successRevokeBody", "failureRevokeBody",
+  ])
+    || !opaqueIdentifier(value.agentRunId)
+    || !Number.isFinite(utcDateTimeMilliseconds(value.expiresAt))
+    || !Number.isSafeInteger(value.firstSentAt) || value.firstSentAt < 0) {
+    throw codedError("INVALID_REQUEST");
+  }
+  const submit = signedEnvelope(value.submitBody, "submitProposalBatch", value.agentRunId);
+  const successRevoke = signedEnvelope(value.successRevokeBody, "revokeAgentRunSelf", value.agentRunId);
+  const failureRevoke = signedEnvelope(value.failureRevokeBody, "revokeAgentRunSelf", value.agentRunId);
+  if (!hasExactOwnKeys(submit.payload, ["round", "candidates"])
+    || !Number.isSafeInteger(submit.payload.round) || submit.payload.round < 1
+    || !Array.isArray(submit.payload.candidates)
+    || submit.payload.candidates.length < 2 || submit.payload.candidates.length > 4
+    || !hasExactOwnKeys(successRevoke.payload, [])
+    || !hasExactOwnKeys(failureRevoke.payload, [])
+    || successRevoke.sequence !== submit.sequence + 1
+    || failureRevoke.sequence !== submit.sequence) {
+    throw codedError("INVALID_REQUEST");
+  }
+  return Object.freeze({
+    agentRunId: value.agentRunId,
+    expiresAt: value.expiresAt,
+    firstSentAt: value.firstSentAt,
+    submitBody: value.submitBody,
+    successRevokeBody: value.successRevokeBody,
+    failureRevokeBody: value.failureRevokeBody,
+    submit,
+    successRevoke,
+    failureRevoke,
+  });
+}
+
+function sameProposalReconciliation(left, right) {
+  return left && right
+    && left.agentRunId === right.agentRunId
+    && left.expiresAt === right.expiresAt
+    && left.firstSentAt === right.firstSentAt
+    && left.submitBody === right.submitBody
+    && left.successRevokeBody === right.successRevokeBody
+    && left.failureRevokeBody === right.failureRevokeBody;
+}
+
 function validDate(value) {
   const match = typeof value === "string" ? /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value) : undefined;
   if (!match) return false;
@@ -282,6 +348,7 @@ export class LocalAgentBridgeRuntime {
   #claimed;
   #pendingClaim;
   #pendingCommand;
+  #proposalReconciliation;
   #busy;
 
   constructor({ agentEndpoint, fetch: fetchImpl = globalThis.fetch, timeoutMs = 15_000, now = () => new Date() } = {}) {
@@ -341,6 +408,7 @@ export class LocalAgentBridgeRuntime {
     this.#claimed = undefined;
     this.#pendingClaim = undefined;
     this.#pendingCommand = undefined;
+    this.#proposalReconciliation = undefined;
   }
 
   prepare() {
@@ -477,10 +545,12 @@ export class LocalAgentBridgeRuntime {
     return this.#executeCommand(action, payload);
   }
 
-  async #executeCommand(action, payload, allowPersistedRevoke = false) {
-    if ((!this.#prepared && !allowPersistedRevoke) || !this.#claimed) throw codedError("BRIDGE_NOT_CLAIMED");
+  async #executeCommand(action, payload, allowPersistedCommand = false) {
+    if ((!this.#prepared && !allowPersistedCommand) || !this.#claimed) throw codedError("BRIDGE_NOT_CLAIMED");
     if (this.#busy) throw codedError("BRIDGE_BUSY");
-    if (!CONTROL_ACTIONS.has(action) && !this.#prepared.scope.includes(action)) throw codedError("ACTION_NOT_ALLOWED");
+    if (!CONTROL_ACTIONS.has(action) && !allowPersistedCommand && !this.#prepared.scope.includes(action)) {
+      throw codedError("ACTION_NOT_ALLOWED");
+    }
     const { payload: safePayload, requested } = requestSnapshot(action, payload);
     if (!this.#pendingCommand) {
       const firstSentAt = currentTime(this.#now);
@@ -554,7 +624,7 @@ export class LocalAgentBridgeRuntime {
     } catch (error) {
       if (!error?.uncertain && ["INVALID_AGENT_CLAIM", "AGENT_RUN_EXPIRED"].includes(error?.code)) {
         this.#clearCapability();
-      } else if (!error?.uncertain && !(allowPersistedRevoke && action === "revokeAgentRunSelf")) {
+      } else if (!error?.uncertain && !(allowPersistedCommand && action === "revokeAgentRunSelf")) {
         this.#pendingCommand = undefined;
       }
       throw error;
@@ -570,6 +640,167 @@ export class LocalAgentBridgeRuntime {
 
   async submitProposalBatch(payload) {
     return this.#executeCommand("submitProposalBatch", payload);
+  }
+
+  prepareProposalSubmission(payload) {
+    if (!this.#prepared || !this.#claimed) throw codedError("BRIDGE_NOT_CLAIMED");
+    if (this.#busy) throw codedError("BRIDGE_BUSY");
+    const { payload: safePayload, requested } = requestSnapshot("submitProposalBatch", payload);
+    if (!hasExactOwnKeys(safePayload, ["round", "candidates"])
+      || !Number.isSafeInteger(safePayload.round) || safePayload.round < 1
+      || !Array.isArray(safePayload.candidates)
+      || safePayload.candidates.length < 2 || safePayload.candidates.length > 4) {
+      throw codedError("INVALID_REQUEST");
+    }
+    if (this.#proposalReconciliation) {
+      if (!this.#pendingCommand || this.#pendingCommand.requested !== requested) {
+        throw codedError("COMMAND_RETRY_REQUIRED");
+      }
+      return Object.freeze({
+        agentRunId: this.#proposalReconciliation.agentRunId,
+        expiresAt: this.#proposalReconciliation.expiresAt,
+        firstSentAt: this.#proposalReconciliation.firstSentAt,
+        submitBody: this.#proposalReconciliation.submitBody,
+        successRevokeBody: this.#proposalReconciliation.successRevokeBody,
+        failureRevokeBody: this.#proposalReconciliation.failureRevokeBody,
+      });
+    }
+    if (this.#pendingCommand) throw codedError("COMMAND_RETRY_REQUIRED");
+    const firstSentAt = currentTime(this.#now);
+    if (!activeAgentRun(this.#claimed.expiresAt, firstSentAt)) throw codedError("AGENT_RUN_EXPIRED");
+    const sequence = this.#claimed.nextSequence;
+    if (!Number.isSafeInteger(sequence) || sequence >= Number.MAX_SAFE_INTEGER) {
+      throw codedError("SEQUENCE_EXHAUSTED");
+    }
+    const makeBody = (action, commandPayload, commandSequence) => {
+      const signed = {
+        agentRunId: this.#claimed.agentRunId,
+        sequence: commandSequence,
+        idempotencyKey: randomUUID(),
+        action,
+        payload: commandPayload,
+      };
+      return JSON.stringify({ ...signed, signature: signature(this.#prepared.privateKey, signed) });
+    };
+    const snapshot = safeProposalReconciliation({
+      agentRunId: this.#claimed.agentRunId,
+      expiresAt: this.#claimed.expiresAt,
+      firstSentAt,
+      submitBody: makeBody("submitProposalBatch", safePayload, sequence),
+      successRevokeBody: makeBody("revokeAgentRunSelf", {}, sequence + 1),
+      failureRevokeBody: makeBody("revokeAgentRunSelf", {}, sequence),
+    });
+    this.#pendingCommand = {
+      action: "submitProposalBatch",
+      requested,
+      firstSentAt,
+      body: snapshot.submitBody,
+      sent: false,
+    };
+    this.#proposalReconciliation = snapshot;
+    return Object.freeze({
+      agentRunId: snapshot.agentRunId,
+      expiresAt: snapshot.expiresAt,
+      firstSentAt: snapshot.firstSentAt,
+      submitBody: snapshot.submitBody,
+      successRevokeBody: snapshot.successRevokeBody,
+      failureRevokeBody: snapshot.failureRevokeBody,
+    });
+  }
+
+  restoreProposalSubmission(value) {
+    const snapshot = safeProposalReconciliation(value);
+    const requested = canonicalJson({ action: "submitProposalBatch", payload: snapshot.submit.payload });
+    if (this.#proposalReconciliation) {
+      if (!sameProposalReconciliation(this.#proposalReconciliation, snapshot)
+        || !this.#claimed || this.#claimed.agentRunId !== snapshot.agentRunId
+        || this.#claimed.expiresAt !== snapshot.expiresAt
+        || this.#claimed.nextSequence !== snapshot.submit.sequence
+        || !this.#pendingCommand || this.#pendingCommand.action !== "submitProposalBatch"
+        || this.#pendingCommand.requested !== requested
+        || this.#pendingCommand.firstSentAt !== snapshot.firstSentAt
+        || this.#pendingCommand.body !== snapshot.submitBody) {
+        throw codedError("COMMAND_RETRY_REQUIRED");
+      }
+      return true;
+    }
+    if (this.#busy || this.#prepared || this.#claimed || this.#pendingClaim || this.#pendingCommand) {
+      throw codedError("COMMAND_RETRY_REQUIRED");
+    }
+    this.#claimed = {
+      agentRunId: snapshot.agentRunId,
+      expiresAt: snapshot.expiresAt,
+      nextSequence: snapshot.submit.sequence,
+      firstSentAt: snapshot.firstSentAt,
+    };
+    this.#pendingCommand = {
+      action: "submitProposalBatch",
+      requested,
+      firstSentAt: snapshot.firstSentAt,
+      body: snapshot.submitBody,
+      sent: true,
+    };
+    this.#proposalReconciliation = snapshot;
+    return true;
+  }
+
+  async reconcileProposalSubmission(value) {
+    const snapshot = safeProposalReconciliation(value);
+    this.restoreProposalSubmission(value);
+    return this.#executeCommand("submitProposalBatch", snapshot.submit.payload, true);
+  }
+
+  restoreProposalRevoke(value, outcome) {
+    const snapshot = safeProposalReconciliation(value);
+    if (!sameProposalReconciliation(this.#proposalReconciliation, snapshot)
+      || !["completed", "failed"].includes(outcome)
+      || this.#busy || !this.#claimed) {
+      throw codedError("COMMAND_RETRY_REQUIRED");
+    }
+    const revoke = outcome === "completed" ? snapshot.successRevoke : snapshot.failureRevoke;
+    const body = outcome === "completed" ? snapshot.successRevokeBody : snapshot.failureRevokeBody;
+    if (this.#claimed.agentRunId !== snapshot.agentRunId
+      || this.#claimed.expiresAt !== snapshot.expiresAt
+      || this.#claimed.nextSequence !== revoke.sequence) {
+      throw codedError("COMMAND_RETRY_REQUIRED");
+    }
+    const requested = canonicalJson({ action: "revokeAgentRunSelf", payload: {} });
+    if (this.#pendingCommand) {
+      if (this.#pendingCommand.action !== "revokeAgentRunSelf"
+        || this.#pendingCommand.requested !== requested
+        || this.#pendingCommand.firstSentAt !== snapshot.firstSentAt
+        || this.#pendingCommand.body !== body) throw codedError("COMMAND_RETRY_REQUIRED");
+    } else {
+      this.#pendingCommand = {
+        action: "revokeAgentRunSelf",
+        requested,
+        firstSentAt: snapshot.firstSentAt,
+        body,
+        sent: true,
+      };
+    }
+    return true;
+  }
+
+  async reconcileProposalRevoke(value, outcome) {
+    this.restoreProposalRevoke(value, outcome);
+    return this.#executeCommand("revokeAgentRunSelf", {}, true);
+  }
+
+  discardPreparedProposalSubmission(value) {
+    let snapshot;
+    try {
+      snapshot = safeProposalReconciliation(value);
+    } catch {
+      return false;
+    }
+    if (this.#busy || !this.#prepared || !this.#claimed || !this.#pendingCommand
+      || this.#pendingCommand.sent || this.#pendingCommand.action !== "submitProposalBatch"
+      || !sameProposalReconciliation(this.#proposalReconciliation, snapshot)
+      || this.#pendingCommand.body !== snapshot.submitBody) return false;
+    this.#pendingCommand = undefined;
+    this.#proposalReconciliation = undefined;
+    return true;
   }
 
   async revokeSelf() {
