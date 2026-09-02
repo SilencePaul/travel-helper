@@ -1043,6 +1043,45 @@ test("a persisted self-revoke can retry its exact envelope after a definitive re
   assert.equal(restarted.claimedRun, undefined);
 });
 
+test("the same runtime retries an exactly persisted self-revoke after a definitive response failure", async () => {
+  const bodies = [];
+  let revokeAttempts = 0;
+  const runtime = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.example.test/api/agent",
+    now: () => new Date("2026-08-31T00:05:00.000Z"),
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.action === "claimAgentRun") {
+        return Response.json({ ok: true, data: claimedData(body.agentRunId, 7) });
+      }
+      bodies.push(init.body);
+      revokeAttempts += 1;
+      if (revokeAttempts === 1) {
+        return Response.json({ ok: false, error: "INVALID_REQUEST" }, { status: 400 });
+      }
+      return Response.json({
+        ok: true,
+        action: "revokeAgentRunSelf",
+        data: { agentRunId: body.agentRunId, revokedAt: "2026-08-31T00:05:01.000Z" },
+        replayed: true,
+      });
+    },
+  });
+  runtime.prepare();
+  await runtime.claim("agent-run-same-process-retry");
+  const persisted = runtime.prepareRevokeSelf();
+
+  await assert.rejects(runtime.reconcileRevokeSelf(persisted), /INVALID_REQUEST/);
+  await assert.rejects(runtime.reconcileRevokeSelf({
+    ...persisted,
+    firstSentAt: persisted.firstSentAt + 1,
+  }), /COMMAND_RETRY_REQUIRED/);
+  await assert.doesNotReject(runtime.reconcileRevokeSelf(persisted));
+
+  assert.deepEqual(bodies, [persisted.body, persisted.body]);
+  assert.equal(runtime.claimedRun, undefined);
+});
+
 test("a definitive self-revoke failure clears its pending envelope", async () => {
   const revokeBodies = [];
   let revokeAttempts = 0;

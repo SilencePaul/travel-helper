@@ -165,6 +165,45 @@ test("writes through a same-directory temporary file and atomic rename", async (
   assert.equal(synced.includes(directory), true);
 });
 
+test("a post-rename directory sync failure reports uncertainty while preserving the exact reconciliation record", async (context) => {
+  let stateDirectory;
+  let stateFilePath;
+  let published = false;
+  let failDirectorySync = false;
+  const fileSystem = {
+    ...fs,
+    async open(path, flags, mode) {
+      const handle = await fs.open(path, flags, mode);
+      if (path !== stateDirectory || !failDirectorySync) return handle;
+      return {
+        async stat(...args) { return handle.stat(...args); },
+        async sync() {
+          failDirectorySync = false;
+          throw new Error("directory sync failed after publish");
+        },
+        async close() { return handle.close(); },
+      };
+    },
+    async rename(from, to) {
+      const result = await fs.rename(from, to);
+      if (to === stateFilePath) {
+        published = true;
+        failDirectorySync = true;
+      }
+      return result;
+    },
+  };
+  const created = await temporaryStore(context, { fileSystem });
+  stateDirectory = created.directory;
+  stateFilePath = created.filePath;
+  const state = reconciliationState();
+
+  await assert.rejects(created.store.persistSelfRevokeReconciliation(state), { code: "RESEARCH_STATE_UNAVAILABLE" });
+
+  assert.equal(published, true);
+  assert.deepEqual(await created.store.load(), state);
+});
+
 test("cleans an exclusively-created temporary file when writing fails", async (context) => {
   const { directory } = await temporaryStore(context);
   const fileSystem = {
@@ -259,6 +298,29 @@ test("persists a new owner-action transition before notifying and does not re-no
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[1].persisted, second);
   assert.notEqual(calls[0].transitionKey, calls[1].transitionKey);
+});
+
+test("publishing a blocker notifies once even when its reconciliation intent used the same timestamp", async (context) => {
+  const { store } = await temporaryStore(context);
+  let notifications = 0;
+  const intent = reconciliationState();
+  const blocker = recoverableState();
+
+  await store.persistSelfRevokeReconciliation(intent);
+  await store.persistNeedsOwnerAction(blocker, {
+    async notifyOwnerAction() {
+      notifications += 1;
+      return true;
+    },
+  });
+  await store.persistNeedsOwnerAction(blocker, {
+    async notifyOwnerAction() {
+      notifications += 1;
+      return true;
+    },
+  });
+
+  assert.equal(notifications, 1);
 });
 
 test("notification failure never rolls back or hides persisted owner-action state", async (context) => {

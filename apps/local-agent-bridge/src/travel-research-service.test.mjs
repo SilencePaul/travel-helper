@@ -229,6 +229,7 @@ function fakeStore(events, initialState, options = {}) {
       if (options.reconciliationPersistError) throw options.reconciliationPersistError;
       state = structuredClone(value);
       options.onReconciliationPersisted?.(structuredClone(value));
+      if (options.reconciliationPersistErrorAfterWrite) throw options.reconciliationPersistErrorAfterWrite;
       return structuredClone(state);
     },
     get state() { return state && structuredClone(state); },
@@ -664,6 +665,32 @@ test("execute publishes an exact admission before a delayed recovery load so lif
   assert.equal(cancelledStatus.phase, "cancelled");
   assert.equal(harness.runner.createCount, 0);
   assert.equal(harness.transport.claimedRun, undefined);
+});
+
+test("a failed prepare for another trip cannot replace the trip bound to the claimed capability", async () => {
+  const harness = createHarness({
+    scripts: [{ codexThreadId: "thread-prepare-binding", output: completedOutput(), activeDurationMs: 10 }],
+    transportFactory(events) {
+      const transport = fakeTransport(events, contextFixture());
+      const prepare = transport.prepare.bind(transport);
+      let attempts = 0;
+      transport.prepare = () => {
+        attempts += 1;
+        if (attempts === 2) throw Object.assign(new Error("busy"), { code: "BRIDGE_BUSY" });
+        return prepare();
+      };
+      return transport;
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare(request.tripId);
+  await harness.service.claim(request.agentRunId);
+
+  assert.throws(() => harness.service.prepare("trip-other"), { code: "BRIDGE_BUSY" });
+  const result = await harness.service.executeTravelResearch(request);
+
+  assert.equal(result.phase, "completed");
+  assert.equal(harness.runner.createCount, 1);
 });
 
 test("a real runtime releases an unbound claim when execute fails before creating a task", async () => {
@@ -3131,6 +3158,53 @@ test("an identical projection from another trip cannot resume or replace the bou
   assert.equal(completed.phase, "completed");
 });
 
+test("resume rejects a signed context for another trip without clearing the original blocker", async () => {
+  const request = await targetRequest();
+  const recovered = {
+    tripId: request.tripId,
+    researchTaskId: "research-task-context-trip-mismatch",
+    codexThreadId: "thread-context-trip-mismatch",
+    targetCategory: "hotel",
+    targetScopeId: request.targetScopeId,
+    disclosureFingerprint: request.disclosureFingerprint,
+    aliasSalt: "alias-salt-context-trip-mismatch",
+    blockedReason: "codex_auth_required",
+    blockedHostname: null,
+    activeRuntimeMs: 12_000,
+    phase: "needs_owner_action",
+    startedAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:01:00.000Z",
+  };
+  const mismatchedContext = contextFixture();
+  mismatchedContext.trip.id = "trip-other";
+  mismatchedContext.workspace.tripId = "trip-other";
+  const harness = createHarness({ context: mismatchedContext, initialState: recovered });
+  harness.service.prepare(request.tripId);
+  await harness.service.claim("agent-run-context-trip-mismatch");
+
+  await assert.rejects(harness.service.resumeTravelResearch({
+    tripId: request.tripId,
+    agentRunId: "agent-run-context-trip-mismatch",
+    operationId: "operation-context-trip-mismatch",
+    researchTaskId: recovered.researchTaskId,
+    resumeAction: "retry_codex_auth",
+  }), { code: "CODEX_RESEARCH_FAILED" });
+
+  assert.equal(harness.runner.createCount, 0);
+  assert.equal(harness.transport.submittedPayloads.length, 0);
+  assert.equal(harness.transport.claimedRun, undefined);
+  assert.deepEqual(harness.store.state, recovered);
+  assert.deepEqual(await harness.service.getResearchStatus(request.tripId), {
+    phase: "needs_owner_action",
+    tripId: request.tripId,
+    researchTaskId: recovered.researchTaskId,
+    ...RECOVERED_OPERATION_IDENTITY,
+    startedAt: recovered.startedAt,
+    updatedAt: recovered.updatedAt,
+    blockedReason: recovered.blockedReason,
+  });
+});
+
 test("a matching exact cancel wins while recovered self-revoke reconciliation is in flight", async () => {
   const request = await targetRequest();
   let releaseRevoke;
@@ -3168,6 +3242,44 @@ test("a matching exact cancel wins while recovered self-revoke reconciliation is
   assert.equal(harness.events.includes("notifier.notifyOwnerAction"), false);
 });
 
+test("one recovered cancel retries a transient store clear and finishes cancelled", async () => {
+  const request = await targetRequest();
+  let releaseRevoke;
+  let revokeStarted;
+  const revokeGate = new Promise((resolve) => { releaseRevoke = resolve; });
+  const observedRevoke = new Promise((resolve) => { revokeStarted = resolve; });
+  const harness = createHarness({
+    initialState: recoveredReconciliation(request),
+    storeOptions: { clearFailures: [1] },
+    transportFactory(events) {
+      const transport = fakeTransport(events, contextFixture());
+      transport.reconcileRevokeSelf = async () => {
+        events.push("transport.revokeSelf");
+        revokeStarted();
+        await revokeGate;
+        throw Object.assign(new Error("already revoked"), { code: "AGENT_RUN_INACTIVE" });
+      };
+      return transport;
+    },
+  });
+
+  const reconciling = await harness.service.getResearchStatus("trip-private");
+  await observedRevoke;
+  const cancellation = harness.service.cancelResearch({
+    tripId: reconciling.tripId,
+    researchTaskId: reconciling.researchTaskId,
+    agentRunId: reconciling.agentRunId,
+    operationId: reconciling.operationId,
+  });
+  releaseRevoke();
+
+  const cancelledStatus = await cancellation;
+  assert.equal(cancelledStatus.phase, "cancelled");
+  assert.equal(harness.events.filter((event) => event === "store.clear").length, 2);
+  assert.equal(harness.store.state, undefined);
+  assert.equal((await harness.service.getResearchStatus("trip-private")).phase, "cancelled");
+});
+
 test("a self-revoke intent persistence failure discards only the unsent runtime envelope", async () => {
   const harness = createHarness({
     scripts: [{ codexThreadId: "thread-persist-failure", output: ownerAction("codex_auth_required"), activeDurationMs: 10 }],
@@ -3182,6 +3294,28 @@ test("a self-revoke intent persistence failure discards only the unsent runtime 
   assert.equal(result.phase, "failed");
   assert.equal(harness.events.filter((event) => event === "transport.discardPreparedRevokeSelf").length, 1);
   assert.equal(harness.store.state, undefined);
+});
+
+test("a self-revoke intent published before a persistence error is read back and retained", async () => {
+  const harness = createHarness({
+    scripts: [{ codexThreadId: "thread-persist-read-back", output: ownerAction("codex_auth_required"), activeDurationMs: 10 }],
+    storeOptions: {
+      reconciliationPersistErrorAfterWrite: Object.assign(new Error("directory sync failed after rename"), {
+        code: "RESEARCH_STATE_UNAVAILABLE",
+      }),
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare("trip-private");
+  await harness.service.claim(request.agentRunId);
+
+  const result = await harness.service.executeTravelResearch(request);
+
+  assert.equal(result.reconciliationState, "self_revoke_reconciling");
+  assert.equal(harness.store.state?.recordType, "self_revoke_reconciliation");
+  assert.equal(harness.store.state?.tripId, request.tripId);
+  assert.equal(harness.store.state?.agentRunId, request.agentRunId);
+  assert.equal(harness.events.includes("transport.discardPreparedRevokeSelf"), false);
 });
 
 test("a persisted self-revoke responsibility survives definitive revoke and final blocker persistence failures", async () => {

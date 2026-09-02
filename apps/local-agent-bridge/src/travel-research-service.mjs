@@ -93,6 +93,18 @@ function baseStatus(value) {
   };
 }
 
+function sameReconciliationIntent(left, right) {
+  return left?.recordType === "self_revoke_reconciliation"
+    && left.tripId === right.tripId
+    && left.researchTaskId === right.researchTaskId
+    && left.agentRunId === right.agentRunId
+    && left.operationId === right.operationId
+    && left.revokeRequest?.agentRunId === right.revokeRequest.agentRunId
+    && left.revokeRequest?.expiresAt === right.revokeRequest.expiresAt
+    && left.revokeRequest?.firstSentAt === right.revokeRequest.firstSentAt
+    && left.revokeRequest?.body === right.revokeRequest.body;
+}
+
 export function safeResearchStatus(value) {
   if (!plainObject(value) || typeof value.phase !== "string") throw codedError("CODEX_RESEARCH_FAILED");
   if (value.phase === "idle") return Object.freeze({ phase: "idle" });
@@ -416,8 +428,9 @@ export class TravelResearchService {
 
   prepare(tripId) {
     if (!opaqueIdentifier(tripId)) throw codedError("CODEX_RESEARCH_FAILED");
+    const prepared = this.#transport.prepare();
     this.#preparedTripId = tripId;
-    return this.#transport.prepare();
+    return prepared;
   }
 
   async claim(agentRunId) {
@@ -747,6 +760,7 @@ export class TravelResearchService {
     const previousStatus = this.#status;
     let claimedValidated = false;
     let resumeValidated = false;
+    let contextTripRejected = false;
     try {
       const agentExpiresAt = this.#assertClaimed(input.agentRunId);
       claimedValidated = true;
@@ -792,7 +806,10 @@ export class TravelResearchService {
       this.#cancelRequested = false;
       this.#setStatus("resuming");
       const context = await this.#getDecisionContext();
-      if (context?.workspace?.tripId !== input.tripId) throw codedError("CODEX_RESEARCH_FAILED");
+      if (context?.workspace?.tripId !== input.tripId) {
+        contextTripRejected = true;
+        throw codedError("CODEX_RESEARCH_FAILED");
+      }
       let built;
       try {
         built = await this.#bounded(() => buildTravelResearchInput(context, {
@@ -833,7 +850,7 @@ export class TravelResearchService {
         this.#status = previousStatus;
         throw codedError(stableFailureCode(error));
       }
-      if (!resumeValidated && this.#task?.agentRunId === input.agentRunId) {
+      if ((!resumeValidated || contextTripRejected) && this.#task?.agentRunId === input.agentRunId) {
         try {
           await this.#revokeStrict({ cleanup: true });
         } catch (revokeError) {
@@ -1009,8 +1026,27 @@ export class TravelResearchService {
       try {
         await this.#store.persistSelfRevokeReconciliation(reconciliationRecord);
       } catch (error) {
-        this.#transport.discardPreparedRevokeSelf(revokeRequest);
-        throw error;
+        let observed;
+        let readBackCertain = true;
+        try {
+          observed = await this.#store.load();
+        } catch {
+          readBackCertain = false;
+        }
+        if (readBackCertain && observed === undefined) {
+          this.#transport.discardPreparedRevokeSelf(revokeRequest);
+          throw error;
+        }
+        this.#reconciliationRecord = readBackCertain && sameReconciliationIntent(observed, reconciliationRecord)
+          ? observed
+          : reconciliationRecord;
+        this.#task.selfRevokeReconciling = true;
+        this.#status = safeResearchStatus({
+          ...this.#status,
+          reconciliationState: "self_revoke_reconciling",
+          updatedAt: this.#now(),
+        });
+        return this.#status;
       }
       this.#reconciliationRecord = reconciliationRecord;
       this.#task.selfRevokeReconciling = true;
@@ -1227,9 +1263,18 @@ export class TravelResearchService {
         return this.#finishFailure(stableFailureCode(error), false);
       }
     }
-    try {
-      await this.#store.clear();
-    } catch {
+    let clearFailure;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await this.#store.clear();
+        clearFailure = undefined;
+        break;
+      } catch (error) {
+        clearFailure = error;
+      }
+    }
+    if (clearFailure) {
+      if (this.#reconciliationRecord) return safeResearchStatus(this.#status);
       return this.#finishFailure("CODEX_RESEARCH_FAILED", false);
     }
     this.#reconciliationRecord = undefined;

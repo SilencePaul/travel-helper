@@ -554,7 +554,7 @@ export class LocalAgentBridgeRuntime {
     } catch (error) {
       if (!error?.uncertain && ["INVALID_AGENT_CLAIM", "AGENT_RUN_EXPIRED"].includes(error?.code)) {
         this.#clearCapability();
-      } else if (!error?.uncertain) {
+      } else if (!error?.uncertain && !(allowPersistedRevoke && action === "revokeAgentRunSelf")) {
         this.#pendingCommand = undefined;
       }
       throw error;

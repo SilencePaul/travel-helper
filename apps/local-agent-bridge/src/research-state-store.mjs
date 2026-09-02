@@ -338,7 +338,7 @@ function transitionKey(state) {
 }
 
 function sameTransition(left, right) {
-  return Boolean(left && transitionKey(left) === transitionKey(right));
+  return Boolean(left && !Object.hasOwn(left, "recordType") && transitionKey(left) === transitionKey(right));
 }
 
 export function createResearchStateStore({
