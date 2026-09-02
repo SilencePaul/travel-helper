@@ -30,6 +30,20 @@ describe("browserDataMode", () => {
     expect(browserTestDecisionAgentEnabled(true, "?__testDecisionAgent=1")).toBe(true);
     expect(browserTestDecisionAgentEnabled(true, "?__testDecisionAgent=0")).toBe(false);
   });
+
+  it("rejects a pre-aborted dev Bridge request before calling its coordinator", async () => {
+    const module = await import("./BrowserRoot") as unknown as {
+      callActiveBrowserTestBridge?: <T>(signal: AbortSignal | undefined, send: () => Promise<T>) => Promise<T>;
+    };
+    expect(module.callActiveBrowserTestBridge).toBeTypeOf("function");
+    const send = vi.fn(async () => "unexpected");
+
+    await expect(module.callActiveBrowserTestBridge!(AbortSignal.abort(), send)).rejects.toMatchObject({
+      name: "LocalAgentBridgeError",
+      code: "AGENT_TRANSPORT_UNAVAILABLE",
+    });
+    expect(send).not.toHaveBeenCalled();
+  });
 });
 
 const { exchangeAuthenticationCode, getCurrentUser, recoverAuthenticatedMember, signInWithIssuedTicket } = vi.hoisted(() => ({

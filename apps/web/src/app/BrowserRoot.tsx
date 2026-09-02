@@ -68,6 +68,11 @@ export function readBrowserTestDecisionCoordinator(
   const coordinator = readCoordinator();
   return typeof coordinator === "function" ? coordinator as TestDecisionResearchCoordinator : undefined;
 }
+
+export function callActiveBrowserTestBridge<T>(signal: AbortSignal | undefined, send: () => Promise<T>): Promise<T> {
+  if (signal?.aborted) return Promise.reject(new LocalAgentBridgeError("AGENT_TRANSPORT_UNAVAILABLE"));
+  return send();
+}
 /* oxlint-enable react/only-export-components */
 
 function browserTestDecisionCoordinator(): TestDecisionResearchCoordinator | undefined {
@@ -279,19 +284,20 @@ function createBrowserTestAgentBridge(): LocalAgentBridge | undefined {
   if (!coordinator) return undefined;
   let requestSequence = 0;
   const callBridge = <T,>(operation: Extract<TestDecisionResearchCall["operation"], `bridge.${string}`>, input: unknown, options?: { signal?: AbortSignal }) => {
-    const requestId = `test-bridge-request-${++requestSequence}`;
     const signal = options?.signal;
-    const request = callTestDecisionBridge<T>(coordinator, {
-      operation,
-      input,
-      request: { requestId, aborted: signal?.aborted ?? false },
+    return callActiveBrowserTestBridge(signal, () => {
+      const requestId = `test-bridge-request-${++requestSequence}`;
+      const request = callTestDecisionBridge<T>(coordinator, {
+        operation,
+        input,
+        request: { requestId, aborted: false },
+      });
+      const abort = () => {
+        void callTestDecisionCoordinator(coordinator, { operation: "bridge.abort", input: { requestId } }).catch(() => undefined);
+      };
+      signal?.addEventListener("abort", abort, { once: true });
+      return request.finally(() => signal?.removeEventListener("abort", abort));
     });
-    const abort = () => {
-      void callTestDecisionCoordinator(coordinator, { operation: "bridge.abort", input: { requestId } }).catch(() => undefined);
-    };
-    if (signal?.aborted) abort();
-    else signal?.addEventListener("abort", abort, { once: true });
-    return request.finally(() => signal?.removeEventListener("abort", abort));
   };
   return {
     prepare: (options) => callBridge("bridge.prepare", undefined, options),

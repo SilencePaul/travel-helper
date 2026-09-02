@@ -107,6 +107,30 @@ test("completing a new category preserves existing shared decisions", async ({ p
   expect(after.evidence.filter((evidence) => existingCandidateIds.has(evidence.candidateId))).toEqual(before.evidence);
 });
 
+test("a completed task can start a new category with a new run and research task", async ({ page }) => {
+  const harness = new DecisionResearchHarness(page);
+  await harness.install();
+  await openDecisionResearch(page);
+  await selectResearchTarget(page, "hotel");
+  await page.getByRole("button", { name: "开始研究酒店候选" }).click();
+  await expect.poll(() => harness.count("bridge.execute")).toBe(1);
+  harness.complete();
+  await expect(page.getByRole("heading", { name: "海景行旅" })).toBeVisible();
+
+  await selectResearchTarget(page, "restaurant");
+  await page.getByRole("button", { name: "开始研究餐厅候选" }).click();
+  await expect.poll(() => harness.count("bridge.execute")).toBe(2);
+  await expect(page.getByText("research-task-e2e-2")).toBeVisible();
+  expect(harness.inputs("bridge.execute")).toEqual([
+    expect.objectContaining({ agentRunId: "agent-run-e2e-1", targetCategory: "hotel" }),
+    expect.objectContaining({ agentRunId: "agent-run-e2e-2", targetCategory: "restaurant" }),
+  ]);
+
+  harness.complete();
+  await expect(page.getByRole("heading", { name: "码头茶餐厅" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "海景行旅" })).toBeVisible();
+});
+
 test("a multi-city trip binds the exact selected segment into the disclosure and execute request", async ({ page }) => {
   const { buildResearchDisclosure, buildResearchTargetScopes, computeDisclosureFingerprint } = await loadDecisionResearchContracts();
   const harness = new DecisionResearchHarness(page);
@@ -276,7 +300,7 @@ test("repeated start activation is idempotent", async ({ page }) => {
   harness.beginResearching();
 });
 
-test("the fixture rejects repeated claims and mismatched task controls with safe errors", async ({ page }) => {
+test("the fixture replays the same active claim and rejects mismatched task controls with safe errors", async ({ page }) => {
   const harness = new DecisionResearchHarness(page);
   await harness.install();
   await openDecisionResearch(page);
@@ -284,18 +308,42 @@ test("the fixture rejects repeated claims and mismatched task controls with safe
   await page.getByRole("button", { name: "开始研究酒店候选" }).click();
   await expect.poll(() => harness.count("bridge.execute")).toBe(1);
 
-  const results = await page.evaluate(async () => {
+  const claimResults = await page.evaluate(async () => {
+    const coordinator = (window as typeof window & {
+      __decisionResearchHarnessCall: (call: unknown) => Promise<unknown>;
+    }).__decisionResearchHarnessCall;
+    const replay = await coordinator({ operation: "bridge.claim", input: { agentRunId: "agent-run-e2e-1" } });
+    await coordinator({
+      operation: "workspace.command",
+      input: { action: "createAgentRun", tripId: "trip-2026-gba", idempotencyKey: "second-run", scope: ["submitProposalBatch"] },
+    });
+    const different = await coordinator({ operation: "bridge.claim", input: { agentRunId: "agent-run-e2e-2" } });
+    await coordinator({ operation: "workspace.command", input: { action: "revokeAgentRun", agentRunId: "agent-run-e2e-1" } });
+    const revoked = await coordinator({ operation: "bridge.claim", input: { agentRunId: "agent-run-e2e-1" } });
+    await coordinator({
+      operation: "workspace.command",
+      input: { action: "createAgentRun", tripId: "trip-2026-gba", idempotencyKey: "expired-run", scope: ["submitProposalBatch"] },
+    });
+    return { replay, different, revoked };
+  });
+
+  expect(claimResults).toEqual({
+    replay: { ok: true, data: { agentRunId: "agent-run-e2e-1", status: "claimed" } },
+    different: { ok: false, error: "AGENT_RUN_INACTIVE" },
+    revoked: { ok: false, error: "AGENT_RUN_INACTIVE" },
+  });
+  harness.expireRun("agent-run-e2e-3");
+  const remainingResults = await page.evaluate(async () => {
     const coordinator = (window as typeof window & {
       __decisionResearchHarnessCall: (call: unknown) => Promise<unknown>;
     }).__decisionResearchHarnessCall;
     return Promise.all([
-      coordinator({ operation: "bridge.claim", input: { agentRunId: "agent-run-e2e-1" } }),
+      coordinator({ operation: "bridge.claim", input: { agentRunId: "agent-run-e2e-3" } }),
       coordinator({ operation: "bridge.resume", input: { agentRunId: "agent-run-e2e-1", researchTaskId: "wrong-task", resumeAction: "retry_codex_auth" } }),
       coordinator({ operation: "bridge.cancel", input: { researchTaskId: "wrong-task" } }),
     ]);
   });
-
-  expect(results).toEqual([
+  expect(remainingResults).toEqual([
     { ok: false, error: "AGENT_RUN_INACTIVE" },
     { ok: false, error: "AGENT_RUN_INACTIVE" },
     { ok: false, error: "AGENT_RUN_INACTIVE" },
@@ -316,6 +364,15 @@ test("stopping an active research task leaves no generated candidate", async ({ 
   await expect(page.getByRole("heading", { name: "海景行旅" })).toHaveCount(0);
   expect(harness.count("bridge.cancel")).toBe(1);
   expect(harness.inputs("bridge.cancel")).toEqual([{ researchTaskId: "research-task-e2e" }]);
+
+  await selectResearchTarget(page, "restaurant");
+  await page.getByRole("button", { name: "开始研究餐厅候选" }).click();
+  await expect.poll(() => harness.count("bridge.execute")).toBe(2);
+  await expect(page.getByText("research-task-e2e-2")).toBeVisible();
+  expect(harness.inputs("bridge.execute").at(-1)).toEqual(expect.objectContaining({
+    agentRunId: "agent-run-e2e-2",
+    targetCategory: "restaurant",
+  }));
 });
 
 test("Codex unavailability keeps existing shared decisions visible", async ({ page }) => {
@@ -335,6 +392,29 @@ test("Codex unavailability keeps existing shared decisions visible", async ({ pa
 test("the admin confirms the Codex scope and completes the signed local Bridge control loop", async ({ page, browserName }) => {
   test.skip(browserName !== "chromium", "Private Network Access is verified in Chromium");
   const { LocalAgentBridgeRuntime, canonicalJson, startLocalAgentBridge } = await loadBridgeModules();
+  const { buildResearchDisclosure, buildResearchTargetScopes, computeDisclosureFingerprint } = await loadDecisionResearchContracts();
+  const trip = {
+    version: seed.version,
+    days: seed.days.map(({ id, date, city }) => ({ id, date, city })),
+    travelerNames: seed.travelers.map(({ name }) => name),
+    travelerCount: seed.travelers.length,
+  };
+  const hongKongScope = buildResearchTargetScopes(trip).find((scope) => scope.city === "香港");
+  expect(hongKongScope).toBeDefined();
+  const disclosureFingerprint = await computeDisclosureFingerprint(await buildResearchDisclosure({
+    trip,
+    workspace: {
+      tripId: "trip-2026-gba",
+      preferences: [],
+      candidates: [],
+      placements: [],
+      evidence: [],
+      feedback: [],
+      confirmations: [],
+      workspaceCursor: "0",
+      fetchedAt: "2026-08-31T00:00:00.000Z",
+    },
+  }, { category: "hotel", targetScopeId: hongKongScope!.targetScopeId }));
   let createdRun: { agentRunId: string; publicKeyJwk: JsonWebKey; pairingCodeHash: string } | undefined;
   let pairingCode = "";
   const consoleMessages: string[] = [];
@@ -362,11 +442,13 @@ test("the admin confirms the Codex scope and completes the signed local Bridge c
   const taskStatus = { phase: "researching" as const, researchTaskId: "research-task-e2e", startedAt: "2026-08-31T00:00:00.000Z", updatedAt: "2026-08-31T00:00:00.000Z" };
   let serverStatus: { phase: "idle" } | typeof taskStatus = { phase: "idle" };
   let decisionContext: unknown;
+  let forwardedExecuteInput: unknown;
   const serverRuntime = {
     prepare: runtime.prepare.bind(runtime),
     claim: runtime.claim.bind(runtime),
     releaseUnboundClaim: runtime.releaseUnboundClaim.bind(runtime),
-    executeTravelResearch: async () => {
+    executeTravelResearch: async (input: unknown) => {
+      forwardedExecuteInput = structuredClone(input);
       decisionContext = await runtime.getDecisionContext();
       serverStatus = taskStatus;
       return taskStatus;
@@ -389,6 +471,12 @@ test("the admin confirms the Codex scope and completes the signed local Bridge c
     await expect(page.getByText("正在请 Codex 搜索候选与可核验来源")).toBeVisible();
     expect(createdRun).toBeDefined();
     await expect.poll(() => decisionContext).toMatchObject({ tripId: "trip-2026-gba" });
+    expect(forwardedExecuteInput).toEqual({
+      agentRunId: "agent-run-e2e",
+      targetCategory: "hotel",
+      targetScopeId: hongKongScope!.targetScopeId,
+      disclosureFingerprint,
+    });
     expect(consoleMessages.join("\n")).not.toContain(pairingCode);
   } finally {
     await bridge.close();

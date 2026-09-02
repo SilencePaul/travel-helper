@@ -842,8 +842,25 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
           const latest = await readAgentRunStatus(attached, attached.repository, attached.tripId, attached.agentRunId);
           if (controller.signal.aborted || lifecycleRef.current !== lifecycle) return;
           if (latest.status === "revoked" || latest.status === "expired") {
-            const current = statusRef.current;
-            if (current.phase === "idle") return;
+            let localAfterCloudRevocation: ResearchStatus | undefined;
+            try {
+              localAfterCloudRevocation = await bridge.getResearchStatus({ signal: controller.signal });
+              if (controller.signal.aborted || lifecycleRef.current !== lifecycle) return;
+            } catch {
+              if (controller.signal.aborted || lifecycleRef.current !== lifecycle) return;
+              throw new Error("LOCAL_RESEARCH_STATUS_UNCERTAIN");
+            }
+            if (localAfterCloudRevocation && bridgeSelfRevokedPhases.has(localAfterCloudRevocation.phase)) {
+              applyBridgeStatus(localAfterCloudRevocation);
+              setOperation("idle");
+              setOperationError(undefined);
+              return;
+            }
+            if (!localAfterCloudRevocation || !activePhases.has(localAfterCloudRevocation.phase)
+              || !("researchTaskId" in localAfterCloudRevocation)) {
+              throw new Error("LOCAL_RESEARCH_STATUS_UNCERTAIN");
+            }
+            const current = localAfterCloudRevocation;
             if (attachedCloudRunRef.current === attached) attachedCloudRunRef.current = undefined;
             setCloudCleanupRequired(false);
             const existingInvalidation = externallyInvalidatedTaskRef.current;

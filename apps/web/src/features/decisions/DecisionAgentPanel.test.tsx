@@ -951,10 +951,14 @@ describe("DecisionAgentPanel", () => {
 
   it("活跃期发现云端 run 已外部撤销时，只发一次 local cancel 并对账 Bridge 终态", async () => {
     let finishExecute!: (status: ResearchStatus) => void;
+    let localStatus: ResearchStatus = { phase: "idle" };
     const bridge = makeBridge({
       executeTravelResearch: vi.fn(() => new Promise<ResearchStatus>((resolve) => { finishExecute = resolve; })),
-      getResearchStatus: vi.fn().mockResolvedValueOnce({ phase: "idle" }).mockResolvedValue(cancelled),
-      cancelResearch: vi.fn().mockResolvedValue(cancelled),
+      getResearchStatus: vi.fn(async () => localStatus),
+      cancelResearch: vi.fn(async () => {
+        localStatus = cancelled;
+        return cancelled;
+      }),
     });
     const repository = makeRepository();
     vi.mocked(repository.getAgentRunStatus!).mockResolvedValue({
@@ -967,10 +971,105 @@ describe("DecisionAgentPanel", () => {
     await waitFor(() => expect(bridge.executeTravelResearch).toHaveBeenCalledTimes(1));
     vi.useFakeTimers();
     try {
-      await act(async () => finishExecute(researching));
+      await act(async () => {
+        localStatus = researching;
+        finishExecute(researching);
+      });
       await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
       expect(bridge.cancelResearch).toHaveBeenCalledTimes(1);
       expect(screen.getByText("Codex 研究已停止")).toBeVisible();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("云端 run 先撤销而本机随后发布认证阻断时，保留 blocker 且用新 run 继续同一 task", async () => {
+    const blocked = { phase: "needs_owner_action", ...timestamps, blockedReason: "codex_auth_required" as const } satisfies ResearchStatus;
+    const resuming = { phase: "resuming", ...timestamps, updatedAt: "2026-08-28T00:02:00.000Z" } satisfies ResearchStatus;
+    let localStatus: ResearchStatus = { phase: "idle" };
+    const command = vi.fn()
+      .mockResolvedValueOnce({ ok: true, action: "createAgentRun", data: { agentRunId: "agent-run-1", expiresAt: "2099-08-28T00:15:00.000Z" } })
+      .mockResolvedValueOnce({ ok: true, action: "createAgentRun", data: { agentRunId: "agent-run-2", expiresAt: "2099-08-28T00:15:00.000Z" } });
+    const bridge = makeBridge({
+      getResearchStatus: vi.fn(async () => localStatus),
+      executeTravelResearch: vi.fn(async () => {
+        localStatus = researching;
+        return researching;
+      }),
+      cancelResearch: vi.fn(async () => {
+        localStatus = cancelled;
+        return cancelled;
+      }),
+      resumeTravelResearch: vi.fn(async () => {
+        localStatus = resuming;
+        return resuming;
+      }),
+    });
+    const repository = makeRepository(command);
+    vi.mocked(repository.getAgentRunStatus!).mockResolvedValue({
+      agentRunId: "agent-run-1", tripId: trip.id, status: "revoked", scope: ["submitProposalBatch"], revision: 3, nextSequence: 1,
+      createdAt: "2026-08-28T00:00:00.000Z", claimedAt: "2026-08-28T00:01:00.000Z", expiresAt: "2099-08-28T00:15:00.000Z", revokedAt: "2026-08-28T00:02:00.000Z",
+    });
+    setup({ bridge, repository });
+    await prepareAndConfirm();
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        screen.getByRole("button", { name: "开始研究酒店候选" }).click();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(screen.getByText("正在请 Codex 搜索候选与可核验来源")).toBeVisible();
+      localStatus = blocked;
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+      expect(screen.getByRole("alert")).toHaveTextContent("请在 ChatGPT/Codex 中恢复登录");
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(bridge.cancelResearch).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "已恢复登录，继续研究" }));
+    await screen.findByText("Codex 正在继续研究");
+    expect(command.mock.calls.map(([input]) => input.action)).toEqual(["createAgentRun", "createAgentRun"]);
+    expect(bridge.resumeTravelResearch).toHaveBeenCalledWith({
+      agentRunId: "agent-run-2",
+      researchTaskId: "research-task-1",
+      resumeAction: "retry_codex_auth",
+    }, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  });
+
+  it("云端 run 已撤销但本机状态暂时不可读时不 cancel，后续读到 blocker 后恢复", async () => {
+    const blocked = { phase: "needs_owner_action", ...timestamps, blockedReason: "codex_auth_required" as const } satisfies ResearchStatus;
+    let finishExecute!: (status: ResearchStatus) => void;
+    let reads = 0;
+    const bridge = makeBridge({
+      executeTravelResearch: vi.fn(() => new Promise<ResearchStatus>((resolve) => { finishExecute = resolve; })),
+      getResearchStatus: vi.fn(async (): Promise<ResearchStatus> => {
+        reads += 1;
+        if (reads === 1) return { phase: "idle" };
+        if (reads === 2) throw new Error("temporary local status failure");
+        return blocked;
+      }),
+    });
+    const repository = makeRepository();
+    vi.mocked(repository.getAgentRunStatus!).mockResolvedValue({
+      agentRunId: "agent-run-1", tripId: trip.id, status: "revoked", scope: ["submitProposalBatch"], revision: 3, nextSequence: 1,
+      createdAt: "2026-08-28T00:00:00.000Z", claimedAt: "2026-08-28T00:01:00.000Z", expiresAt: "2099-08-28T00:15:00.000Z", revokedAt: "2026-08-28T00:02:00.000Z",
+    });
+    setup({ bridge, repository });
+    await prepareAndConfirm();
+    await userEvent.click(screen.getByRole("button", { name: "开始研究酒店候选" }));
+    await waitFor(() => expect(bridge.executeTravelResearch).toHaveBeenCalledTimes(1));
+
+    vi.useFakeTimers();
+    try {
+      await act(async () => finishExecute(researching));
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+      expect(bridge.cancelResearch).not.toHaveBeenCalled();
+      expect(screen.getByRole("alert")).toHaveTextContent("本机或云端研究状态暂时无法确认");
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+      expect(screen.getByRole("alert")).toHaveTextContent("请在 ChatGPT/Codex 中恢复登录");
+      expect(bridge.cancelResearch).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }

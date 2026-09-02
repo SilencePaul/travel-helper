@@ -39,7 +39,6 @@ type HarnessOptions = {
 
 const now = "2026-08-31T00:00:00.000Z";
 const taskBase = { researchTaskId: "research-task-e2e", startedAt: now, updatedAt: now };
-const researchTaskId = taskBase.researchTaskId;
 const candidateNames: Record<CandidateCategory, [string, string]> = {
   hotel: ["海景行旅", "湾畔酒店"],
   restaurant: ["码头茶餐厅", "巷里小馆"],
@@ -160,8 +159,8 @@ export class DecisionResearchHarness {
   private selectedCategory: CandidateCategory = "hotel";
   private currentResearchTaskId?: string;
   private currentClaimedRunId?: string;
-  private revokeClaimOnStatus = false;
   private nextRun = 1;
+  private nextResearchTask = 1;
   private readonly prepareError?: HarnessOptions["prepareError"];
   private readonly holdPrepare: boolean;
   private readonly pendingRequests = new Map<string, (result: HarnessResult) => void>();
@@ -195,6 +194,12 @@ export class DecisionResearchHarness {
     return run ? structuredClone(run) : undefined;
   }
 
+  expireRun(agentRunId: string) {
+    const run = this.runs.get(agentRunId);
+    if (!run) throw new Error("AGENT_RUN_NOT_FOUND");
+    this.runs.set(agentRunId, { ...run, expiresAt: "2020-01-01T00:00:00.000Z" });
+  }
+
   pendingRequestCount() {
     return this.pendingRequests.size;
   }
@@ -220,6 +225,7 @@ export class DecisionResearchHarness {
   }
 
   complete() {
+    const currentTask = this.currentTaskBase();
     const generated = workspace([this.selectedCategory]);
     this.currentWorkspace = {
       ...this.currentWorkspace,
@@ -228,23 +234,32 @@ export class DecisionResearchHarness {
       workspaceCursor: String(Number(this.currentWorkspace.workspaceCursor) + generated.candidates.length),
       fetchedAt: now,
     };
-    this.currentStatus = { phase: "completed", ...taskBase };
+    this.currentStatus = { phase: "completed", ...currentTask };
     this.revokeClaimedRuns();
-    this.revokeClaimOnStatus = false;
   }
 
   blockForAuth() {
-    this.currentStatus = { phase: "needs_owner_action", ...taskBase, blockedReason: "codex_auth_required" };
-    this.revokeClaimOnStatus = true;
+    this.currentStatus = { phase: "needs_owner_action", ...this.currentTaskBase(), blockedReason: "codex_auth_required" };
+    this.revokeClaimedRuns();
   }
 
   blockForSource(hostname = "booking.example.com") {
-    this.currentStatus = { phase: "needs_owner_action", ...taskBase, blockedReason: "source_captcha", blockedHostname: hostname };
-    this.revokeClaimOnStatus = true;
+    this.currentStatus = { phase: "needs_owner_action", ...this.currentTaskBase(), blockedReason: "source_captcha", blockedHostname: hostname };
+    this.revokeClaimedRuns();
   }
 
   beginResearching() {
-    this.currentStatus = { phase: "researching", ...taskBase };
+    this.currentStatus = { phase: "researching", ...this.currentTaskBase() };
+  }
+
+  private currentTaskBase() {
+    if (!this.currentResearchTaskId) throw new Error("NO_ACTIVE_RESEARCH_TASK");
+    return { ...taskBase, researchTaskId: this.currentResearchTaskId };
+  }
+
+  private allocateResearchTaskId() {
+    const sequence = this.nextResearchTask++;
+    return sequence === 1 ? taskBase.researchTaskId : `${taskBase.researchTaskId}-${sequence}`;
   }
 
   private revokeClaimedRuns() {
@@ -288,8 +303,13 @@ export class DecisionResearchHarness {
         const agentRunId = inputRecord(call.input)?.agentRunId;
         if (typeof agentRunId !== "string") return { ok: false, error: "AGENT_RUN_INACTIVE" };
         const run = this.runs.get(agentRunId);
-        if (!run || run.status !== "pending_claim" || Date.parse(run.expiresAt) <= Date.now()
-          || (this.currentClaimedRunId !== undefined && this.currentClaimedRunId !== agentRunId)) {
+        if (!run || Date.parse(run.expiresAt) <= Date.now()) {
+          return { ok: false, error: "AGENT_RUN_INACTIVE" };
+        }
+        if (run.status === "claimed" && this.currentClaimedRunId === agentRunId) {
+          return { ok: true, data: { agentRunId, status: "claimed" } };
+        }
+        if (run.status !== "pending_claim" || this.currentClaimedRunId !== undefined) {
           return { ok: false, error: "AGENT_RUN_INACTIVE" };
         }
         this.runs.set(agentRunId, { ...run, status: "claimed", revision: run.revision + 1, claimedAt: now, nextSequence: 2 });
@@ -299,23 +319,21 @@ export class DecisionResearchHarness {
       case "bridge.execute": {
         const input = inputRecord(call.input);
         const activeRun = this.activeClaimedRun();
-        if (!input || input.agentRunId !== activeRun?.agentRunId || this.currentResearchTaskId !== undefined) {
+        const canStartNewTask = this.currentResearchTaskId === undefined
+          || ["completed", "cancelled", "failed", "superseded"].includes(this.currentStatus.phase);
+        if (!input || input.agentRunId !== activeRun?.agentRunId || !canStartNewTask) {
           return { ok: false, error: "AGENT_RUN_INACTIVE" };
         }
         if (typeof input.targetCategory !== "string" || !Object.hasOwn(candidateNames, input.targetCategory)) {
           return { ok: false, error: "INVALID_RESEARCH_TARGET" };
         }
         this.selectedCategory = input.targetCategory as CandidateCategory;
-        this.currentResearchTaskId = researchTaskId;
-        const status = { phase: "researching", ...taskBase } satisfies ResearchStatus;
+        this.currentResearchTaskId = this.allocateResearchTaskId();
+        const status = { phase: "researching", ...this.currentTaskBase() } satisfies ResearchStatus;
         this.currentStatus = status;
         return { ok: true, data: status };
       }
       case "bridge.status": {
-        if (this.revokeClaimOnStatus) {
-          this.revokeClaimedRuns();
-          this.revokeClaimOnStatus = false;
-        }
         return { ok: true, data: structuredClone(this.currentStatus) };
       }
       case "bridge.resume": {
@@ -328,7 +346,7 @@ export class DecisionResearchHarness {
           || this.currentStatus.phase !== "needs_owner_action" || input.resumeAction !== expectedAction) {
           return { ok: false, error: "AGENT_RUN_INACTIVE" };
         }
-        const status = { phase: "resuming", ...taskBase } satisfies ResearchStatus;
+        const status = { phase: "resuming", ...this.currentTaskBase() } satisfies ResearchStatus;
         this.currentStatus = status;
         return { ok: true, data: status };
       }
@@ -340,7 +358,7 @@ export class DecisionResearchHarness {
         if (this.currentStatus.phase === "completed") {
           return { ok: true, data: structuredClone(this.currentStatus) };
         }
-        const status = { phase: "cancelled", ...taskBase, errorCode: "CODEX_RESEARCH_CANCELLED" } satisfies ResearchStatus;
+        const status = { phase: "cancelled", ...this.currentTaskBase(), errorCode: "CODEX_RESEARCH_CANCELLED" } satisfies ResearchStatus;
         this.currentStatus = status;
         this.revokeClaimedRuns();
         return { ok: true, data: status };
