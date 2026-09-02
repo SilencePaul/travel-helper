@@ -23,6 +23,26 @@ export const RECOVERY_STATE_FIELDS = Object.freeze([
   "startedAt",
   "updatedAt",
 ]);
+export const RECONCILIATION_STATE_FIELDS = Object.freeze([
+  "recordType",
+  "researchTaskId",
+  "agentRunId",
+  "operationId",
+  "reconciliationState",
+  "activePhase",
+  "revokeRequest",
+  "codexThreadId",
+  "targetCategory",
+  "targetScopeId",
+  "disclosureFingerprint",
+  "aliasSalt",
+  "blockedReason",
+  "blockedHostname",
+  "activeRuntimeMs",
+  "terminalPhase",
+  "startedAt",
+  "updatedAt",
+]);
 
 const STATE_FILE_NAME = "travel-research-state.json";
 const LOCK_FILE_NAME = ".travel-research-state.lock";
@@ -104,10 +124,10 @@ function plainObject(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
-function hasExactFields(value) {
+function hasExactFields(value, fields = RECOVERY_STATE_FIELDS) {
   return plainObject(value)
-    && Reflect.ownKeys(value).length === RECOVERY_STATE_FIELDS.length
-    && RECOVERY_STATE_FIELDS.every((field) => Object.hasOwn(value, field));
+    && Reflect.ownKeys(value).length === fields.length
+    && fields.every((field) => Object.hasOwn(value, field));
 }
 
 function opaqueIdentifier(value) {
@@ -178,7 +198,65 @@ function defaultIsProcessAlive(pid) {
   }
 }
 
+function validRevokeRequest(value, agentRunId) {
+  if (!plainObject(value)
+    || !hasExactFields(value, ["agentRunId", "expiresAt", "firstSentAt", "body"])
+    || value.agentRunId !== agentRunId
+    || !canonicalTimestamp(value.expiresAt)
+    || !Number.isSafeInteger(value.firstSentAt)
+    || typeof value.body !== "string" || Buffer.byteLength(value.body, "utf8") > 4_096) return false;
+  let envelope;
+  try {
+    envelope = JSON.parse(value.body);
+  } catch {
+    return false;
+  }
+  return hasExactFields(envelope, ["agentRunId", "sequence", "idempotencyKey", "action", "payload", "signature"])
+    && envelope.agentRunId === agentRunId
+    && Number.isSafeInteger(envelope.sequence) && envelope.sequence > 0
+    && opaqueIdentifier(envelope.idempotencyKey)
+    && envelope.action === "revokeAgentRunSelf"
+    && hasExactFields(envelope.payload, [])
+    && typeof envelope.signature === "string"
+    && /^[A-Za-z0-9_-]{86}$/u.test(envelope.signature);
+}
+
+function validateReconciliationShape(value) {
+  const valid = hasExactFields(value, RECONCILIATION_STATE_FIELDS)
+    && value.recordType === "self_revoke_reconciliation"
+    && opaqueIdentifier(value.researchTaskId)
+    && opaqueIdentifier(value.agentRunId)
+    && opaqueIdentifier(value.operationId)
+    && value.reconciliationState === "self_revoke_reconciling"
+    && ["researching", "resuming", "validating", "writing", "cancelling"].includes(value.activePhase)
+    && validRevokeRequest(value.revokeRequest, value.agentRunId)
+    && opaqueIdentifier(value.codexThreadId)
+    && TARGET_CATEGORIES.has(value.targetCategory)
+    && /^scope_[a-f0-9]{64}$/u.test(value.targetScopeId)
+    && /^[a-f0-9]{64}$/u.test(value.disclosureFingerprint)
+    && typeof value.aliasSalt === "string"
+    && Buffer.byteLength(value.aliasSalt, "utf8") >= 16
+    && Buffer.byteLength(value.aliasSalt, "utf8") <= 1_024
+    && /^[A-Za-z0-9_-]+$/u.test(value.aliasSalt)
+    && BLOCKED_REASONS.has(value.blockedReason)
+    && Number.isSafeInteger(value.activeRuntimeMs)
+    && value.activeRuntimeMs >= 0
+    && value.activeRuntimeMs <= 600_000
+    && value.terminalPhase === "needs_owner_action"
+    && canonicalTimestamp(value.startedAt)
+    && canonicalTimestamp(value.updatedAt)
+    && Date.parse(value.updatedAt) >= Date.parse(value.startedAt)
+    && (SOURCE_BLOCKED_REASONS.has(value.blockedReason)
+      ? safeHostname(value.blockedHostname)
+      : value.blockedHostname === null);
+  if (!valid) throw codedError("RESEARCH_STATE_INVALID");
+  return Object.freeze(Object.fromEntries(RECONCILIATION_STATE_FIELDS.map((field) => [field, value[field]])));
+}
+
 function validateStateShape(value) {
+  if (plainObject(value) && value.recordType === "self_revoke_reconciliation") {
+    return validateReconciliationShape(value);
+  }
   const valid = hasExactFields(value)
     && opaqueIdentifier(value.researchTaskId)
     && opaqueIdentifier(value.agentRunId)
@@ -851,6 +929,7 @@ export function createResearchStateStore({
 
   async function persistNeedsOwnerAction(value, notifier) {
     const state = await validateState(value);
+    if (Object.hasOwn(state, "recordType")) throw codedError("RESEARCH_STATE_INVALID");
     const lock = await acquireLock();
     let result;
     let failure;
@@ -881,11 +960,32 @@ export function createResearchStateStore({
     return result;
   }
 
+  async function persistSelfRevokeReconciliation(value) {
+    const state = await validateState(value);
+    if (state.recordType !== "self_revoke_reconciliation") throw codedError("RESEARCH_STATE_INVALID");
+    const lock = await acquireLock();
+    let result;
+    let failure;
+    try {
+      result = await writeState(state, lock);
+    } catch (error) {
+      failure = error;
+    }
+    try {
+      await releaseLock(lock);
+    } catch (error) {
+      failure ??= error;
+    }
+    if (failure) throw failure;
+    return result;
+  }
+
   return Object.freeze({
     filePath,
     load,
     save,
     clear,
     persistNeedsOwnerAction,
+    persistSelfRevokeReconciliation,
   });
 }

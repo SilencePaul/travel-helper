@@ -1,5 +1,6 @@
 import {
   CandidateCategorySchema,
+  OpaqueIdentifierSchema,
   ResearchErrorCodeSchema,
   ResearchResumeActionSchema,
   ResearchStatusSchema,
@@ -36,7 +37,6 @@ const ErrorResponseSchema = z.object({
   ok: z.literal(false),
   error: ResearchErrorCodeSchema,
 }).strict();
-const OpaqueIdentifierSchema = z.string().min(1).max(1_024);
 const ExecuteTravelResearchInputSchema = z.object({
   agentRunId: OpaqueIdentifierSchema,
   operationId: OpaqueIdentifierSchema,

@@ -99,6 +99,21 @@ test("prepare, claim and context use a real P-256 key without exposing secrets",
   assert.equal(requests[1].sequence, 1);
 });
 
+test("claim rejects an oversized opaque run id before sending it", async () => {
+  let fetchCalls = 0;
+  const runtime = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.example.test/api/agent",
+    fetch: async () => {
+      fetchCalls += 1;
+      throw new Error("must not send");
+    },
+  });
+  runtime.prepare();
+
+  await assert.rejects(runtime.claim("a".repeat(300)), /INVALID_REQUEST/);
+  assert.equal(fetchCalls, 0);
+});
+
 test("prepare always constrains caller input to submitProposalBatch", async () => {
   const actions = [];
   const runtime = new LocalAgentBridgeRuntime({
@@ -673,7 +688,7 @@ test("claim rejects impossible claim timing while retaining the envelope for rec
     ["claimedAt follows expiry", "2026-08-31T00:16:00.000Z", "2026-08-31T00:15:00.000Z"],
     ["expiry did not outlive first send", "2026-08-31T00:04:00.000Z", "2026-08-31T00:05:00.000Z"],
   ];
-  for (const [name, claimedAt, expiresAt] of cases) {
+  for (const [index, [name, claimedAt, expiresAt]] of cases.entries()) {
     const bodies = [];
     const runtime = new LocalAgentBridgeRuntime({
       agentEndpoint: "https://api.example.test/api/agent",
@@ -685,9 +700,10 @@ test("claim rejects impossible claim timing while retaining the envelope for rec
       },
     });
     runtime.prepare();
-    await assert.rejects(runtime.claim(`agent-run-${name}`), /INVALID_AGENT_RESPONSE/);
+    const agentRunId = `agent-run-impossible-timing-${index}`;
+    await assert.rejects(runtime.claim(agentRunId), /INVALID_AGENT_RESPONSE/, name);
     assert.throws(() => runtime.prepare(), /BRIDGE_BUSY/);
-    await assert.rejects(runtime.claim(`agent-run-${name}`), /INVALID_AGENT_RESPONSE/);
+    await assert.rejects(runtime.claim(agentRunId), /INVALID_AGENT_RESPONSE/, name);
     assert.equal(bodies[0], bodies[1]);
   }
 });
@@ -920,6 +936,90 @@ test("revokeSelf fixes action and payload and replays an uncertain envelope byte
   await assert.rejects(runtime.command("submitProposalBatch", {}), /BRIDGE_NOT_CLAIMED/);
   const nextPrepared = runtime.prepare();
   assert.notDeepEqual(nextPrepared, prepared);
+});
+
+test("a persisted signed self-revoke envelope can be reconciled by a fresh runtime without the private key", async () => {
+  const bodies = [];
+  const first = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.example.test/api/agent",
+    now: () => new Date("2026-08-31T00:05:00.000Z"),
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.action === "claimAgentRun") {
+        return Response.json({ ok: true, data: claimedData(body.agentRunId, 7) });
+      }
+      throw new Error("the first process crashes before sending revoke");
+    },
+  });
+  first.prepare();
+  await first.claim("agent-run-restart-revoke");
+  const persisted = first.prepareRevokeSelf();
+
+  const restarted = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.example.test/api/agent",
+    now: () => new Date("2026-08-31T00:05:01.000Z"),
+    fetch: async (_url, init) => {
+      bodies.push(init.body);
+      const body = JSON.parse(init.body);
+      return Response.json({
+        ok: true,
+        action: "revokeAgentRunSelf",
+        data: { agentRunId: body.agentRunId, revokedAt: "2026-08-31T00:05:01.000Z" },
+        replayed: true,
+      });
+    },
+  });
+
+  await assert.doesNotReject(restarted.reconcileRevokeSelf(persisted));
+  assert.equal(bodies.length, 1);
+  assert.equal(bodies[0], persisted.body);
+  assert.equal(JSON.parse(persisted.body).action, "revokeAgentRunSelf");
+  assert.deepEqual(JSON.parse(persisted.body).payload, {});
+  assert.equal(restarted.claimedRun, undefined);
+});
+
+test("a persisted self-revoke can retry its exact envelope after a definitive response failure", async () => {
+  const first = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.example.test/api/agent",
+    now: () => new Date("2026-08-31T00:05:00.000Z"),
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.action === "claimAgentRun") {
+        return Response.json({ ok: true, data: claimedData(body.agentRunId, 7) });
+      }
+      throw new Error("the first process crashes before sending revoke");
+    },
+  });
+  first.prepare();
+  await first.claim("agent-run-restart-revoke-retry");
+  const persisted = first.prepareRevokeSelf();
+
+  const bodies = [];
+  let attempts = 0;
+  const restarted = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.example.test/api/agent",
+    now: () => new Date("2026-08-31T00:05:01.000Z"),
+    fetch: async (_url, init) => {
+      bodies.push(init.body);
+      attempts += 1;
+      if (attempts === 1) {
+        return Response.json({ ok: false, error: "INVALID_REQUEST" }, { status: 400 });
+      }
+      return Response.json({
+        ok: true,
+        action: "revokeAgentRunSelf",
+        data: {
+          agentRunId: persisted.agentRunId,
+          revokedAt: "2026-08-31T00:05:02.000Z",
+        },
+      });
+    },
+  });
+
+  await assert.rejects(restarted.reconcileRevokeSelf(persisted), /INVALID_REQUEST/);
+  await assert.doesNotReject(restarted.reconcileRevokeSelf(persisted));
+  assert.deepEqual(bodies, [persisted.body, persisted.body]);
+  assert.equal(restarted.claimedRun, undefined);
 });
 
 test("a definitive self-revoke failure clears its pending envelope", async () => {

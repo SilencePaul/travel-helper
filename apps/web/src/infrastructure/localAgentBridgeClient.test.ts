@@ -104,6 +104,19 @@ describe("LocalAgentBridgeClient", () => {
     expect(JSON.parse(String(init.body))).toEqual({ agentRunId: "agent-run-1" });
   });
 
+  it("rejects oversized opaque identifiers before any loopback request", async () => {
+    const fetch = vi.fn();
+    const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch });
+    const oversizedId = "a".repeat(300);
+
+    await expect(client.claim(oversizedId)).rejects.toBeDefined();
+    await expect(client.executeTravelResearch({
+      ...executeInput,
+      agentRunId: oversizedId,
+    })).rejects.toBeDefined();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("sends no scope while honoring the prepare abort signal", async () => {
     let requestSignal: AbortSignal | undefined;
     const fetch = vi.fn((_url: string, init?: RequestInit) => {

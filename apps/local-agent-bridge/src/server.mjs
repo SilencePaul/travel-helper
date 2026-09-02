@@ -43,7 +43,10 @@ function exactKeys(value, keys) {
 }
 
 function opaqueIdentifier(value) {
-  return typeof value === "string" && value.length > 0 && value.length <= 1_024;
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 256
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value);
 }
 
 function validAppUrl(value, allowInsecureLoopbackApp = false) {

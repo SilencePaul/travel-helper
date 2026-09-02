@@ -233,7 +233,8 @@ export class DecisionResearchHarness {
 
   complete() {
     const currentTask = this.currentTaskBase();
-    const generated = workspace([this.selectedCategory], this.currentResearchRound);
+    const completedRound = this.currentResearchRound + 1;
+    const generated = workspace([this.selectedCategory], completedRound);
     const mergedCandidates = mergeById(this.currentWorkspace.candidates, generated.candidates);
     const mergedEvidence = mergeById(this.currentWorkspace.evidence, generated.evidence);
     const addedCandidateCount = mergedCandidates.length - this.currentWorkspace.candidates.length;
@@ -244,6 +245,7 @@ export class DecisionResearchHarness {
       workspaceCursor: String(Number(this.currentWorkspace.workspaceCursor) + addedCandidateCount),
       fetchedAt: now,
     };
+    this.currentResearchRound = completedRound;
     this.currentStatus = { phase: "completed", ...currentTask };
     this.revokeClaimedRuns();
   }
@@ -349,7 +351,6 @@ export class DecisionResearchHarness {
         if (typeof input.operationId !== "string" || input.operationId.length === 0) {
           return { ok: false, error: "AGENT_RUN_INACTIVE" };
         }
-        this.currentResearchRound += 1;
         this.currentResearchTaskId = this.allocateResearchTaskId();
         this.currentResearchAgentRunId = activeRun.agentRunId;
         this.currentResearchOperationId = input.operationId;

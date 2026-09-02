@@ -131,6 +131,45 @@ function nonEmptyString(value) {
   return typeof value === "string" && value.length > 0;
 }
 
+function opaqueIdentifier(value) {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 256
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value);
+}
+
+function safeRevokeSnapshot(value) {
+  if (!hasExactOwnKeys(value, ["agentRunId", "expiresAt", "firstSentAt", "body"])
+    || !opaqueIdentifier(value.agentRunId)
+    || !Number.isSafeInteger(value.firstSentAt)
+    || !Number.isFinite(utcDateTimeMilliseconds(value.expiresAt))
+    || typeof value.body !== "string" || Buffer.byteLength(value.body, "utf8") > 4_096) {
+    throw codedError("INVALID_REQUEST");
+  }
+  let envelope;
+  try {
+    envelope = JSON.parse(value.body);
+  } catch {
+    throw codedError("INVALID_REQUEST");
+  }
+  if (!hasExactOwnKeys(envelope, ["agentRunId", "sequence", "idempotencyKey", "action", "payload", "signature"])
+    || envelope.agentRunId !== value.agentRunId
+    || !Number.isSafeInteger(envelope.sequence) || envelope.sequence < 1
+    || !opaqueIdentifier(envelope.idempotencyKey)
+    || envelope.action !== "revokeAgentRunSelf"
+    || !hasExactOwnKeys(envelope.payload, [])
+    || typeof envelope.signature !== "string" || !/^[A-Za-z0-9_-]{86}$/u.test(envelope.signature)) {
+    throw codedError("INVALID_REQUEST");
+  }
+  return Object.freeze({
+    agentRunId: value.agentRunId,
+    expiresAt: value.expiresAt,
+    firstSentAt: value.firstSentAt,
+    body: value.body,
+    sequence: envelope.sequence,
+  });
+}
+
 function validDate(value) {
   const match = typeof value === "string" ? /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value) : undefined;
   if (!match) return false;
@@ -376,7 +415,8 @@ export class LocalAgentBridgeRuntime {
   }
 
   async claim(agentRunId) {
-    if (!this.#prepared || typeof agentRunId !== "string" || !agentRunId) throw codedError("BRIDGE_NOT_PREPARED");
+    if (!this.#prepared) throw codedError("BRIDGE_NOT_PREPARED");
+    if (!opaqueIdentifier(agentRunId)) throw codedError("INVALID_REQUEST");
     if (this.#busy) throw codedError("BRIDGE_BUSY");
     if (this.#claimed) {
       if (this.#claimed.agentRunId !== agentRunId) throw codedError("AGENT_RUN_MISMATCH");
@@ -437,8 +477,8 @@ export class LocalAgentBridgeRuntime {
     return this.#executeCommand(action, payload);
   }
 
-  async #executeCommand(action, payload) {
-    if (!this.#prepared || !this.#claimed) throw codedError("BRIDGE_NOT_CLAIMED");
+  async #executeCommand(action, payload, allowPersistedRevoke = false) {
+    if ((!this.#prepared && !allowPersistedRevoke) || !this.#claimed) throw codedError("BRIDGE_NOT_CLAIMED");
     if (this.#busy) throw codedError("BRIDGE_BUSY");
     if (!CONTROL_ACTIONS.has(action) && !this.#prepared.scope.includes(action)) throw codedError("ACTION_NOT_ALLOWED");
     const { payload: safePayload, requested } = requestSnapshot(action, payload);
@@ -533,6 +573,80 @@ export class LocalAgentBridgeRuntime {
 
   async revokeSelf() {
     return this.#executeCommand("revokeAgentRunSelf", {});
+  }
+
+  prepareRevokeSelf() {
+    if (!this.#prepared || !this.#claimed) throw codedError("BRIDGE_NOT_CLAIMED");
+    if (this.#busy) throw codedError("BRIDGE_BUSY");
+    const { payload, requested } = requestSnapshot("revokeAgentRunSelf", {});
+    if (!this.#pendingCommand) {
+      const firstSentAt = currentTime(this.#now);
+      if (!activeAgentRun(this.#claimed.expiresAt, firstSentAt)) {
+        this.#clearCapability();
+        throw codedError("AGENT_RUN_EXPIRED");
+      }
+      if (!Number.isSafeInteger(this.#claimed.nextSequence) || this.#claimed.nextSequence >= Number.MAX_SAFE_INTEGER) {
+        throw codedError("SEQUENCE_EXHAUSTED");
+      }
+      const signed = {
+        agentRunId: this.#claimed.agentRunId,
+        sequence: this.#claimed.nextSequence,
+        idempotencyKey: randomUUID(),
+        action: "revokeAgentRunSelf",
+        payload,
+      };
+      this.#pendingCommand = {
+        action: "revokeAgentRunSelf",
+        requested,
+        firstSentAt,
+        body: JSON.stringify({ ...signed, signature: signature(this.#prepared.privateKey, signed) }),
+      };
+    } else if (this.#pendingCommand.requested !== requested) {
+      throw codedError("COMMAND_RETRY_REQUIRED");
+    }
+    return Object.freeze({
+      agentRunId: this.#claimed.agentRunId,
+      expiresAt: this.#claimed.expiresAt,
+      firstSentAt: this.#pendingCommand.firstSentAt,
+      body: this.#pendingCommand.body,
+    });
+  }
+
+  async reconcileRevokeSelf(value) {
+    const snapshot = safeRevokeSnapshot(value);
+    if (this.#busy) throw codedError("BRIDGE_BUSY");
+    const requested = canonicalJson({ action: "revokeAgentRunSelf", payload: {} });
+    if (this.#pendingCommand) {
+      if (!this.#claimed || this.#claimed.agentRunId !== snapshot.agentRunId
+        || this.#pendingCommand.requested !== requested
+        || this.#pendingCommand.firstSentAt !== snapshot.firstSentAt
+        || this.#pendingCommand.body !== snapshot.body) {
+        throw codedError("COMMAND_RETRY_REQUIRED");
+      }
+    } else {
+      if (this.#prepared
+        || (this.#claimed && (
+          this.#claimed.agentRunId !== snapshot.agentRunId
+          || this.#claimed.expiresAt !== snapshot.expiresAt
+          || this.#claimed.nextSequence !== snapshot.sequence
+          || this.#claimed.firstSentAt !== snapshot.firstSentAt
+        ))) {
+        throw codedError("COMMAND_RETRY_REQUIRED");
+      }
+      this.#claimed ??= {
+        agentRunId: snapshot.agentRunId,
+        expiresAt: snapshot.expiresAt,
+        nextSequence: snapshot.sequence,
+        firstSentAt: snapshot.firstSentAt,
+      };
+      this.#pendingCommand = {
+        action: "revokeAgentRunSelf",
+        requested,
+        firstSentAt: snapshot.firstSentAt,
+        body: snapshot.body,
+      };
+    }
+    return this.#executeCommand("revokeAgentRunSelf", {}, true);
   }
 
   releaseExpiredReadOnlyPending() {

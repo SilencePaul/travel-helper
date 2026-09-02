@@ -201,6 +201,8 @@ function fakeStore(events, initialState, options = {}) {
     async load() {
       events.push("store.load");
       if (options.loadError) throw options.loadError;
+      options.onLoadStarted?.();
+      if (options.loadGate) await options.loadGate;
       return state && structuredClone({ ...RECOVERED_OPERATION_IDENTITY, ...state });
     },
     async clear() {
@@ -220,6 +222,12 @@ function fakeStore(events, initialState, options = {}) {
       await notifier?.notifyOwnerAction("transition-key");
       return structuredClone(state);
     },
+    async persistSelfRevokeReconciliation(value) {
+      events.push("store.persistSelfRevokeReconciliation");
+      state = structuredClone(value);
+      options.onReconciliationPersisted?.(structuredClone(value));
+      return structuredClone(state);
+    },
     get state() { return state && structuredClone(state); },
   };
 }
@@ -230,6 +238,39 @@ function fakeTransport(events, context, options = {}) {
   let submitAttempts = 0;
   let revokeAttempts = 0;
   const submittedPayloads = [];
+  const prepareRevokeSelf = () => {
+    if (!claimed) throw Object.assign(new Error("not claimed"), { code: "AGENT_RUN_INACTIVE" });
+    const envelope = {
+      agentRunId: claimed.agentRunId,
+      sequence: claimed.nextSequence,
+      idempotencyKey: "revoke-operation-test",
+      action: "revokeAgentRunSelf",
+      payload: {},
+      signature: "s".repeat(86),
+    };
+    return {
+      agentRunId: claimed.agentRunId,
+      expiresAt: claimed.expiresAt,
+      firstSentAt: Date.parse("2026-09-01T00:00:00.000Z"),
+      body: JSON.stringify(envelope),
+    };
+  };
+  const reconcileRevokeSelf = async (snapshot) => {
+    events.push("transport.revokeSelf");
+    revokeAttempts += 1;
+    if (options.revokeGate) await options.revokeGate;
+    if (options.uncertainRevoke || revokeAttempts <= (options.uncertainRevokeCount ?? 0)) {
+      throw Object.assign(new Error("private revoke detail"), {
+        code: "AGENT_TRANSPORT_UNAVAILABLE",
+        uncertain: true,
+      });
+    }
+    if (snapshot.agentRunId !== claimed?.agentRunId) {
+      throw Object.assign(new Error("inactive"), { code: "AGENT_RUN_INACTIVE" });
+    }
+    claimed = undefined;
+    return { ok: true };
+  };
   return {
     prepare() { events.push("transport.prepare"); return { publicKeyJwk: { kty: "EC" } }; },
     async claim(agentRunId) {
@@ -278,19 +319,9 @@ function fakeTransport(events, context, options = {}) {
       }
       return { ok: true, action: "submitProposalBatch", data: { count: payload.candidates.length } };
     },
-    async revokeSelf() {
-      events.push("transport.revokeSelf");
-      revokeAttempts += 1;
-      if (options.revokeGate) await options.revokeGate;
-      if (options.uncertainRevoke || revokeAttempts <= (options.uncertainRevokeCount ?? 0)) {
-        throw Object.assign(new Error("private revoke detail"), {
-          code: "AGENT_TRANSPORT_UNAVAILABLE",
-          uncertain: true,
-        });
-      }
-      claimed = undefined;
-      return { ok: true };
-    },
+    prepareRevokeSelf,
+    reconcileRevokeSelf,
+    async revokeSelf() { return reconcileRevokeSelf(prepareRevokeSelf()); },
     submittedPayloads,
   };
 }
@@ -385,7 +416,11 @@ function createHarness({
     ? transportFactory(events, clock)
     : fakeTransport(events, context, transportOptions);
   const runner = runnerFactory ? runnerFactory(events) : fakeRunner(events, [...scripts]);
-  const generated = ["research-task-1", "alias-salt-1234567890"];
+  const generated = [
+    "research-task-1", "alias-salt-1234567890",
+    "research-task-2", "alias-salt-2234567890",
+    "research-task-3", "alias-salt-3234567890",
+  ];
   const service = new TravelResearchService({
     transport,
     runner,
@@ -539,6 +574,46 @@ test("execute fails closed when recovery state cannot be loaded", async () => {
   assert.equal(harness.events.includes("transport.getDecisionContext"), false);
   assert.equal(harness.events.includes("store.clear"), false);
   assert.equal(harness.events.filter((event) => event === "store.load").length, 2);
+});
+
+test("execute publishes an exact admission before a delayed recovery load so lifecycle cleanup can cancel it", async () => {
+  let releaseLoad;
+  let loadStarted;
+  const loadGate = new Promise((resolve) => { releaseLoad = resolve; });
+  const observedLoad = new Promise((resolve) => { loadStarted = resolve; });
+  const harness = createHarness({
+    storeOptions: { loadGate, onLoadStarted: loadStarted },
+    scripts: [{ codexThreadId: "must-not-start", output: completedOutput(), activeDurationMs: 1 }],
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+
+  const execution = harness.service.executeTravelResearch(request);
+  await observedLoad;
+  const observedStatus = await harness.service.getResearchStatus();
+
+  assert.deepEqual(observedStatus, {
+    phase: "researching",
+    researchTaskId: "research-task-1",
+    agentRunId: request.agentRunId,
+    operationId: request.operationId,
+    reconciliationState: "active",
+    startedAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:00:00.000Z",
+  });
+  const cancellation = harness.service.cancelResearch({
+    researchTaskId: observedStatus.researchTaskId,
+    agentRunId: observedStatus.agentRunId,
+    operationId: observedStatus.operationId,
+  });
+  releaseLoad();
+
+  const [executed, cancelledStatus] = await Promise.all([execution, cancellation]);
+  assert.equal(executed.phase, "cancelled");
+  assert.equal(cancelledStatus.phase, "cancelled");
+  assert.equal(harness.runner.createCount, 0);
+  assert.equal(harness.transport.claimedRun, undefined);
 });
 
 test("a real runtime releases an unbound claim when execute fails before creating a task", async () => {
@@ -2864,6 +2939,122 @@ test("an expired uncertain resume context releases the run without deleting bloc
   assert.deepEqual(harness.store.state, recovered);
   assert.equal(harness.runner.createCount, 0);
   assert.equal(harness.transport.claimedRun, undefined);
+});
+
+test("restart resume fallback preserves the recovered operation identity so exact cancellation still works", async () => {
+  const request = await targetRequest();
+  const recovered = {
+    researchTaskId: "research-task-restart-fallback",
+    codexThreadId: "thread-restart-fallback",
+    targetCategory: "hotel",
+    targetScopeId: request.targetScopeId,
+    disclosureFingerprint: request.disclosureFingerprint,
+    aliasSalt: "alias-salt-restart-fallback",
+    blockedReason: "codex_auth_required",
+    blockedHostname: null,
+    activeRuntimeMs: 12_000,
+    phase: "needs_owner_action",
+    startedAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:01:00.000Z",
+  };
+  const harness = createHarness({
+    initialState: recovered,
+    transportFactory(events) {
+      const transport = fakeTransport(events, contextFixture());
+      transport.getDecisionContext = async () => {
+        events.push("transport.getDecisionContext");
+        throw Object.assign(new Error("run expired after resume admission"), { code: "AGENT_RUN_INACTIVE" });
+      };
+      return transport;
+    },
+  });
+  harness.service.prepare();
+  await harness.service.claim("agent-run-restart-fallback");
+
+  const fallback = await harness.service.resumeTravelResearch({
+    agentRunId: "agent-run-restart-fallback",
+    operationId: "operation-restart-fallback",
+    researchTaskId: recovered.researchTaskId,
+    resumeAction: "retry_codex_auth",
+  });
+
+  assert.deepEqual(fallback, {
+    phase: "needs_owner_action",
+    researchTaskId: recovered.researchTaskId,
+    ...RECOVERED_OPERATION_IDENTITY,
+    startedAt: recovered.startedAt,
+    updatedAt: recovered.updatedAt,
+    blockedReason: recovered.blockedReason,
+  });
+  const cancelled = await harness.service.cancelResearch({
+    researchTaskId: fallback.researchTaskId,
+    agentRunId: fallback.agentRunId,
+    operationId: fallback.operationId,
+  });
+  assert.equal(cancelled.phase, "cancelled");
+});
+
+test("a persisted self-revoke intent survives a committed-response crash and converges to the blocker after restart", async () => {
+  let releaseOriginalRevoke;
+  let originalRevokeStarted;
+  const originalRevokeGate = new Promise((resolve) => { releaseOriginalRevoke = resolve; });
+  const observedOriginalRevoke = new Promise((resolve) => { originalRevokeStarted = resolve; });
+  const original = createHarness({
+    scripts: [{ codexThreadId: "thread-crash-recovery", output: ownerAction("codex_auth_required"), activeDurationMs: 10 }],
+    transportOptions: { revokeGate: originalRevokeGate },
+  });
+  const originalReconcile = original.transport.reconcileRevokeSelf.bind(original.transport);
+  original.transport.reconcileRevokeSelf = async (snapshot) => {
+    originalRevokeStarted();
+    return originalReconcile(snapshot);
+  };
+  const request = await targetRequest();
+  original.service.prepare();
+  await original.service.claim(request.agentRunId);
+  const originalExecution = original.service.executeTravelResearch(request);
+  await observedOriginalRevoke;
+
+  const persistedIntent = original.store.state;
+  assert.equal(persistedIntent.recordType, "self_revoke_reconciliation");
+  assert.equal(persistedIntent.agentRunId, request.agentRunId);
+  assert.equal(persistedIntent.operationId, request.operationId);
+  assert.equal(persistedIntent.reconciliationState, "self_revoke_reconciling");
+
+  let releaseRestartRevoke;
+  let restartRevokeStarted;
+  const restartRevokeGate = new Promise((resolve) => { releaseRestartRevoke = resolve; });
+  const observedRestartRevoke = new Promise((resolve) => { restartRevokeStarted = resolve; });
+  const restarted = createHarness({
+    initialState: persistedIntent,
+    transportFactory(events) {
+      const transport = fakeTransport(events, contextFixture());
+      transport.reconcileRevokeSelf = async () => {
+        events.push("transport.revokeSelf");
+        restartRevokeStarted();
+        await restartRevokeGate;
+        throw Object.assign(new Error("revoke already committed"), { code: "AGENT_RUN_INACTIVE" });
+      };
+      return transport;
+    },
+  });
+
+  const reconciling = await restarted.service.getResearchStatus();
+  assert.equal(reconciling.phase, "validating");
+  assert.equal(reconciling.reconciliationState, "self_revoke_reconciling");
+  await observedRestartRevoke;
+  releaseRestartRevoke();
+  await new Promise((resolve) => setImmediate(resolve));
+  const blocked = await restarted.service.getResearchStatus();
+  assert.equal(blocked.phase, "needs_owner_action");
+  assert.equal(blocked.researchTaskId, persistedIntent.researchTaskId);
+  assert.equal(blocked.agentRunId, request.agentRunId);
+  assert.equal(blocked.operationId, request.operationId);
+  assert.equal(blocked.reconciliationState, "active");
+  assert.equal(restarted.runner.createCount, 0);
+  assert.equal(restarted.store.state.phase, "needs_owner_action");
+
+  releaseOriginalRevoke();
+  assert.equal((await originalExecution).phase, "needs_owner_action");
 });
 
 test("an expired uncertain cleanup revoke releases capability before persisting owner action", async () => {

@@ -51,6 +51,13 @@ function exactKeys(value, keys) {
     && keys.every((key) => Object.hasOwn(value, key));
 }
 
+function opaqueIdentifier(value) {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 256
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value);
+}
+
 function canonicalTimestamp(value) {
   if (typeof value !== "string") return false;
   const time = Date.parse(value);
@@ -66,9 +73,9 @@ function safeHostname(value) {
 }
 
 function baseStatus(value) {
-  if (typeof value.researchTaskId !== "string" || value.researchTaskId.length === 0
-    || typeof value.agentRunId !== "string" || value.agentRunId.length === 0
-    || typeof value.operationId !== "string" || value.operationId.length === 0
+  if (!opaqueIdentifier(value.researchTaskId)
+    || !opaqueIdentifier(value.agentRunId)
+    || !opaqueIdentifier(value.operationId)
     || !["active", "self_revoke_reconciling"].includes(value.reconciliationState)
     || !canonicalTimestamp(value.startedAt) || !canonicalTimestamp(value.updatedAt)) {
     throw codedError("CODEX_RESEARCH_FAILED");
@@ -88,7 +95,9 @@ export function safeResearchStatus(value) {
   if (!plainObject(value) || typeof value.phase !== "string") throw codedError("CODEX_RESEARCH_FAILED");
   if (value.phase === "idle") return Object.freeze({ phase: "idle" });
   const result = baseStatus(value);
-  if (ACTIVE_PHASES.has(value.phase) || value.phase === "completed") return Object.freeze(result);
+  if (ACTIVE_PHASES.has(value.phase)) return Object.freeze(result);
+  if (value.reconciliationState !== "active") throw codedError("CODEX_RESEARCH_FAILED");
+  if (value.phase === "completed") return Object.freeze(result);
   if (value.phase === "needs_owner_action") {
     if (value.blockedReason === "codex_auth_required") {
       return Object.freeze({ ...result, blockedReason: value.blockedReason });
@@ -170,6 +179,7 @@ export class TravelResearchService {
   #operationKey;
   #operationAgentRunId;
   #claimHandoffLease;
+  #reconciliationRecord;
   #restored = false;
   #cancelRequested = false;
   #lastSeenTime;
@@ -182,10 +192,13 @@ export class TravelResearchService {
       || typeof transport.getDecisionContext !== "function" || typeof transport.revokeSelf !== "function"
       || typeof transport.releaseUnboundClaim !== "function"
       || typeof transport.expireUnboundClaim !== "function"
+      || typeof transport.prepareRevokeSelf !== "function"
+      || typeof transport.reconcileRevokeSelf !== "function"
       || (typeof transport.submitProposalBatch !== "function" && typeof transport.command !== "function")
       || !runner || typeof runner.create !== "function"
       || !store || typeof store.load !== "function" || typeof store.clear !== "function"
       || typeof store.persistNeedsOwnerAction !== "function"
+      || typeof store.persistSelfRevokeReconciliation !== "function"
       || !notifier || typeof notifier.notifyOwnerAction !== "function"
       || typeof clock !== "function" || typeof idGenerator !== "function") {
       throw codedError("CODEX_RESEARCH_FAILED");
@@ -245,6 +258,43 @@ export class TravelResearchService {
     return this.#setStatus(phase, extras);
   }
 
+  #restoreRecoveredState(recovered) {
+    const reconciling = recovered.recordType === "self_revoke_reconciliation";
+    this.#reconciliationRecord = reconciling ? recovered : undefined;
+    this.#task = {
+      researchTaskId: recovered.researchTaskId,
+      agentRunId: recovered.agentRunId,
+      operationId: recovered.operationId,
+      aliasSalt: recovered.aliasSalt,
+      targetCategory: recovered.targetCategory,
+      targetScopeId: recovered.targetScopeId,
+      disclosureFingerprint: recovered.disclosureFingerprint,
+      codexThreadId: recovered.codexThreadId,
+      activeRuntimeMs: recovered.activeRuntimeMs,
+      runnerRuntimeMs: recovered.activeRuntimeMs,
+      serviceRuntimeMs: 0,
+      startedAt: recovered.startedAt,
+      ...(reconciling ? {
+        agentExpiresAt: Date.parse(recovered.revokeRequest.expiresAt),
+        terminalStarted: true,
+        pendingSignedAction: "revokeAgentRunSelf",
+        selfRevokeReconciling: true,
+      } : {}),
+    };
+    this.#status = reconciling
+      ? safeResearchStatus({
+          phase: recovered.activePhase,
+          researchTaskId: recovered.researchTaskId,
+          agentRunId: recovered.agentRunId,
+          operationId: recovered.operationId,
+          reconciliationState: "self_revoke_reconciling",
+          startedAt: recovered.startedAt,
+          updatedAt: recovered.updatedAt,
+        })
+      : safeResearchStatus(recovered);
+    return this.#status;
+  }
+
   #assertClaimed(agentRunId) {
     const claimed = this.#transport.claimedRun;
     const expiry = Date.parse(claimed?.expiresAt);
@@ -261,7 +311,7 @@ export class TravelResearchService {
     } catch {
       throw codedError("CODEX_RESEARCH_FAILED");
     }
-    if (typeof value !== "string" || value.length === 0 || value.length > 1_024 || !/^[A-Za-z0-9._:-]+$/u.test(value)) {
+    if (!opaqueIdentifier(value)) {
       throw codedError("CODEX_RESEARCH_FAILED");
     }
     return value;
@@ -362,7 +412,7 @@ export class TravelResearchService {
   }
 
   async claim(agentRunId) {
-    if (typeof agentRunId !== "string" || agentRunId.length === 0) throw codedError("AGENT_RUN_INACTIVE");
+    if (!opaqueIdentifier(agentRunId)) throw codedError("AGENT_RUN_INACTIVE");
     try {
       const claimed = await this.#transport.claim(agentRunId);
       this.#startClaimHandoffLease(agentRunId);
@@ -378,7 +428,7 @@ export class TravelResearchService {
   }
 
   releaseUnboundClaim(agentRunId) {
-    if (typeof agentRunId !== "string" || agentRunId.length === 0) return false;
+    if (!opaqueIdentifier(agentRunId)) return false;
     return this.#releaseRejectedOperation(agentRunId);
   }
 
@@ -424,8 +474,8 @@ export class TravelResearchService {
 
   executeTravelResearch(input) {
     if (!exactKeys(input, ["agentRunId", "operationId", "targetCategory", "targetScopeId", "disclosureFingerprint"])
-      || typeof input.agentRunId !== "string" || input.agentRunId.length === 0
-      || typeof input.operationId !== "string" || input.operationId.length === 0
+      || !opaqueIdentifier(input.agentRunId)
+      || !opaqueIdentifier(input.operationId)
       || !CATEGORIES.has(input.targetCategory)
       || typeof input.targetScopeId !== "string" || !/^scope_[a-f0-9]{64}$/u.test(input.targetScopeId)
       || typeof input.disclosureFingerprint !== "string" || !/^[a-f0-9]{64}$/u.test(input.disclosureFingerprint)) {
@@ -464,10 +514,10 @@ export class TravelResearchService {
   async #execute(input, operationKey) {
     let created = false;
     try {
-      const existing = await this.getResearchStatus();
-      if (existing.phase !== "idle" && !TERMINAL_PHASES.has(existing.phase)) {
+      if (this.#status.phase !== "idle" && !TERMINAL_PHASES.has(this.#status.phase)) {
         throw codedError("CODEX_RESEARCH_FAILED");
       }
+      const shouldRestore = this.#status.phase === "idle" && !this.#restored;
       const startedAt = this.#now();
       this.#task = {
         researchTaskId: this.#newIdentifier(),
@@ -483,10 +533,30 @@ export class TravelResearchService {
         runnerRuntimeMs: 0,
         serviceRuntimeMs: 0,
       };
-      created = true;
       this.#cancelRequested = false;
+      created = true;
       this.#task.agentExpiresAt = this.#assertClaimed(input.agentRunId);
       this.#setStatus("researching");
+      if (shouldRestore) {
+        let recovered;
+        try {
+          recovered = await this.#store.load();
+        } catch (error) {
+          this.#task = undefined;
+          this.#status = Object.freeze({ phase: "idle" });
+          this.#transport.releaseUnboundClaim(input.agentRunId);
+          created = false;
+          throw error;
+        }
+        this.#restored = true;
+        if (recovered) {
+          this.#transport.releaseUnboundClaim(input.agentRunId);
+          this.#restoreRecoveredState(recovered);
+          created = false;
+          throw codedError("CODEX_RESEARCH_FAILED");
+        }
+      }
+      if (this.#cancelRequested) return this.#finishCancelled();
       const context = await this.#getDecisionContext();
       if (this.#cancelRequested) return this.#finishCancelled();
       const built = await this.#bounded(() => buildTravelResearchInput(context, {
@@ -508,6 +578,24 @@ export class TravelResearchService {
       );
       return await this.#consume(result, "researching");
     } catch (error) {
+      if (created && this.#status.phase === "idle" && !this.#restored
+        && stableFailureCode(error) === "AGENT_RUN_INACTIVE") {
+        let recovered;
+        try {
+          recovered = await this.#store.load();
+        } catch {
+          this.#task = undefined;
+          this.#status = Object.freeze({ phase: "idle" });
+          created = false;
+          throw codedError("CODEX_RESEARCH_FAILED");
+        }
+        this.#restored = true;
+        if (recovered) {
+          this.#restoreRecoveredState(recovered);
+          created = false;
+          throw codedError("CODEX_RESEARCH_FAILED");
+        }
+      }
       if (!created) {
         if (this.#task?.agentRunId !== input.agentRunId) {
           try {
@@ -529,7 +617,10 @@ export class TravelResearchService {
   }
 
   async getResearchStatus() {
-    if (this.#status.phase !== "idle" || this.#restored) return safeResearchStatus(this.#status);
+    if (this.#status.phase !== "idle" || this.#restored) {
+      if (this.#reconciliationRecord && !this.#inflight) this.#startRecoveredSelfRevoke();
+      return safeResearchStatus(this.#status);
+    }
     let recovered;
     try {
       recovered = await this.#store.load();
@@ -538,29 +629,57 @@ export class TravelResearchService {
     }
     this.#restored = true;
     if (!recovered) return this.#status;
-    this.#task = {
-      researchTaskId: recovered.researchTaskId,
-      agentRunId: recovered.agentRunId,
-      operationId: recovered.operationId,
-      aliasSalt: recovered.aliasSalt,
-      targetCategory: recovered.targetCategory,
-      targetScopeId: recovered.targetScopeId,
-      disclosureFingerprint: recovered.disclosureFingerprint,
-      codexThreadId: recovered.codexThreadId,
-      activeRuntimeMs: recovered.activeRuntimeMs,
-      runnerRuntimeMs: recovered.activeRuntimeMs,
-      serviceRuntimeMs: 0,
-      startedAt: recovered.startedAt,
+    this.#restoreRecoveredState(recovered);
+    if (recovered.recordType === "self_revoke_reconciliation") this.#startRecoveredSelfRevoke();
+    return this.#status;
+  }
+
+  #startRecoveredSelfRevoke() {
+    if (!this.#reconciliationRecord || this.#inflight) return;
+    const record = this.#reconciliationRecord;
+    let operation;
+    operation = this.#finishRecoveredSelfRevoke(record).finally(() => {
+      if (this.#inflight === operation) this.#inflight = undefined;
+    });
+    this.#inflight = operation;
+    void operation.catch(() => undefined);
+  }
+
+  async #finishRecoveredSelfRevoke(record) {
+    try {
+      await this.#revokeStrict({ cleanup: true, revokeRequest: record.revokeRequest });
+    } catch (error) {
+      if (stableFailureCode(error) !== "AGENT_RUN_INACTIVE") throw error;
+    }
+    const finalRecord = {
+      researchTaskId: record.researchTaskId,
+      agentRunId: record.agentRunId,
+      operationId: record.operationId,
+      reconciliationState: "active",
+      codexThreadId: record.codexThreadId,
+      targetCategory: record.targetCategory,
+      targetScopeId: record.targetScopeId,
+      disclosureFingerprint: record.disclosureFingerprint,
+      aliasSalt: record.aliasSalt,
+      blockedReason: record.blockedReason,
+      blockedHostname: record.blockedHostname,
+      activeRuntimeMs: record.activeRuntimeMs,
+      phase: "needs_owner_action",
+      startedAt: record.startedAt,
+      updatedAt: this.#now(),
     };
-    this.#status = safeResearchStatus(recovered);
+    await this.#store.persistNeedsOwnerAction(finalRecord, this.#guardedNotifier);
+    this.#reconciliationRecord = undefined;
+    this.#task.selfRevokeReconciling = false;
+    this.#status = safeResearchStatus(finalRecord);
     return this.#status;
   }
 
   resumeTravelResearch(input) {
     if (!exactKeys(input, ["agentRunId", "operationId", "researchTaskId", "resumeAction"])
-      || typeof input.agentRunId !== "string" || input.agentRunId.length === 0
-      || typeof input.operationId !== "string" || input.operationId.length === 0
-      || typeof input.researchTaskId !== "string" || input.researchTaskId.length === 0
+      || !opaqueIdentifier(input.agentRunId)
+      || !opaqueIdentifier(input.operationId)
+      || !opaqueIdentifier(input.researchTaskId)
       || !RESUME_ACTIONS.has(input.resumeAction)) {
       if (typeof input?.agentRunId === "string") this.#releaseRejectedOperation(input.agentRunId);
       return Promise.reject(codedError("CODEX_RESEARCH_FAILED"));
@@ -708,6 +827,8 @@ export class TravelResearchService {
           activeRuntimeMs: recovered.activeRuntimeMs,
           runnerRuntimeMs: recovered.activeRuntimeMs,
           serviceRuntimeMs: 0,
+          agentRunId: recovered.agentRunId,
+          operationId: recovered.operationId,
           startedAt: recovered.startedAt,
         };
         this.#status = previousStatus.phase === "needs_owner_action"
@@ -814,8 +935,6 @@ export class TravelResearchService {
   async #block(blocked) {
     try {
       if (!this.#task.codexThreadId) throw codedError("CODEX_RESEARCH_FAILED");
-      await this.#revokeStrict({ cleanup: true });
-      if (this.#cancelRequested) return this.#finishCancelled();
       const updatedAt = this.#now();
       const record = {
         researchTaskId: this.#task.researchTaskId,
@@ -834,6 +953,29 @@ export class TravelResearchService {
         startedAt: this.#task.startedAt,
         updatedAt,
       };
+      const revokeRequest = this.#transport.prepareRevokeSelf();
+      await this.#store.persistSelfRevokeReconciliation({
+        recordType: "self_revoke_reconciliation",
+        researchTaskId: record.researchTaskId,
+        agentRunId: record.agentRunId,
+        operationId: record.operationId,
+        reconciliationState: "self_revoke_reconciling",
+        activePhase: ACTIVE_PHASES.has(this.#status.phase) ? this.#status.phase : "validating",
+        revokeRequest,
+        codexThreadId: record.codexThreadId,
+        targetCategory: record.targetCategory,
+        targetScopeId: record.targetScopeId,
+        disclosureFingerprint: record.disclosureFingerprint,
+        aliasSalt: record.aliasSalt,
+        blockedReason: record.blockedReason,
+        blockedHostname: record.blockedHostname,
+        activeRuntimeMs: record.activeRuntimeMs,
+        terminalPhase: "needs_owner_action",
+        startedAt: record.startedAt,
+        updatedAt: record.updatedAt,
+      });
+      await this.#revokeStrict({ cleanup: true, revokeRequest });
+      if (this.#cancelRequested) return this.#finishCancelled();
       await this.#store.persistNeedsOwnerAction(record, this.#guardedNotifier);
       if (this.#cancelRequested) return this.#finishCancelled();
       this.#status = safeResearchStatus(record);
@@ -850,11 +992,13 @@ export class TravelResearchService {
     return this.#reconcileSigned("submitProposalBatch", submit, { terminal: true });
   }
 
-  async #revokeStrict({ cleanup = false } = {}) {
+  async #revokeStrict({ cleanup = false, revokeRequest } = {}) {
     try {
       return await this.#reconcileSigned(
         "revokeAgentRunSelf",
-        () => this.#transport.revokeSelf(),
+        () => revokeRequest
+          ? this.#transport.reconcileRevokeSelf(revokeRequest)
+          : this.#transport.revokeSelf(),
         { terminal: true, cleanup },
       );
     } catch (error) {
@@ -1041,9 +1185,9 @@ export class TravelResearchService {
 
   async cancelResearch(input) {
     if (!exactKeys(input, ["researchTaskId", "agentRunId", "operationId"])
-      || typeof input.researchTaskId !== "string" || input.researchTaskId.length === 0
-      || typeof input.agentRunId !== "string" || input.agentRunId.length === 0
-      || typeof input.operationId !== "string" || input.operationId.length === 0) {
+      || !opaqueIdentifier(input.researchTaskId)
+      || !opaqueIdentifier(input.agentRunId)
+      || !opaqueIdentifier(input.operationId)) {
       throw codedError("CODEX_RESEARCH_FAILED");
     }
     await this.getResearchStatus();

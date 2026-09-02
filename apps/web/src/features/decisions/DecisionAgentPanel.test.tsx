@@ -1357,9 +1357,10 @@ describe("DecisionAgentPanel", () => {
 
   it("不同 trip id 即使日期城市和成员投影相同也会清理旧任务后再初始化", async () => {
     const blocked = { phase: "needs_owner_action", ...timestamps, blockedReason: "codex_auth_required" as const } satisfies ResearchStatus;
-    let status: ResearchStatus = blocked;
+    let status: ResearchStatus = { phase: "idle" };
     const bridge = makeBridge({
       getResearchStatus: vi.fn(async () => status),
+      executeTravelResearch: vi.fn(async () => { status = blocked; return blocked; }),
       cancelResearch: vi.fn(async () => {
         status = cancelled;
         return cancelled;
@@ -1367,6 +1368,8 @@ describe("DecisionAgentPanel", () => {
     });
     const repository = makeRepository();
     const view = setup({ bridge, repository });
+    await prepareAndConfirm();
+    await userEvent.click(screen.getByRole("button", { name: "开始研究酒店候选" }));
     await screen.findByRole("button", { name: "已恢复登录，继续研究" });
     const otherTrip = { ...trip, id: "trip-other-with-same-safe-projection" };
 
@@ -1514,6 +1517,34 @@ describe("DecisionAgentPanel", () => {
     expect(screen.getByRole("group", { name: "选择行程段" })).toBeEnabled();
   });
 
+  it("只观察到他页 active 任务时切换 trip 不会把精确三元组误当成本页 ownership", async () => {
+    const observed = {
+      phase: "researching",
+      ...timestamps,
+      researchTaskId: "research-task-other-tab",
+      agentRunId: "agent-run-other-tab",
+      operationId: "operation-other-tab",
+    } satisfies ResearchStatus;
+    const bridge = makeBridge({ getResearchStatus: vi.fn(async () => observed) });
+    const repository = makeRepository();
+    const view = setup({ bridge, repository });
+    await screen.findByText("正在请 Codex 搜索候选与可核验来源");
+
+    view.rerender(<DecisionAgentPanel
+      repository={repository}
+      bridge={bridge}
+      trip={{ ...trip, id: "trip-after-observed-task" }}
+      workspace={workspace}
+      onResearchCompleted={vi.fn()}
+      newIdempotencyKey={() => "observed-trip-change"}
+    />);
+
+    await waitFor(() => expect(bridge.getResearchStatus).toHaveBeenCalledTimes(2));
+    expect(bridge.cancelResearch).not.toHaveBeenCalled();
+    expect(repository.command).not.toHaveBeenCalled();
+    expect(await screen.findByText("正在请 Codex 搜索候选与可核验来源")).toBeVisible();
+  });
+
   it("同 trip 替换 Repository 时 failed 任务只由源 Repository 撤销后才重新初始化", async () => {
     const failed = { phase: "failed", ...timestamps, errorCode: "AGENT_TRANSPORT_UNAVAILABLE" } satisfies ResearchStatus;
     let sourceStatus: ResearchStatus = { phase: "idle" };
@@ -1594,12 +1625,13 @@ describe("DecisionAgentPanel", () => {
 
   it.each(["bridge", "repository"] as const)("trip cleanup 未完成时 %s 变化只更新恢复目标，不中止源清理", async (change) => {
     const blocked = { phase: "needs_owner_action", ...timestamps, blockedReason: "codex_auth_required" as const } satisfies ResearchStatus;
-    let sourceStatus: ResearchStatus = blocked;
+    let sourceStatus: ResearchStatus = { phase: "idle" };
     let releaseCancel!: () => void;
     const cancelGate = new Promise<void>((resolve) => { releaseCancel = resolve; });
     let sourceCleanupSignal: AbortSignal | undefined;
     const sourceBridge = makeBridge({
       getResearchStatus: vi.fn(async () => sourceStatus),
+      executeTravelResearch: vi.fn(async () => { sourceStatus = blocked; return blocked; }),
       cancelResearch: vi.fn(async (_input, options) => {
         sourceCleanupSignal = options?.signal;
         await cancelGate;
@@ -1611,6 +1643,8 @@ describe("DecisionAgentPanel", () => {
     const sourceRepository = makeRepository();
     const targetRepository = makeRepository();
     const view = setup({ bridge: sourceBridge, repository: sourceRepository });
+    await prepareAndConfirm();
+    await userEvent.click(screen.getByRole("button", { name: "开始研究酒店候选" }));
     await screen.findByRole("button", { name: "已恢复登录，继续研究" });
     const targetTrip = { ...trip, id: `trip-cleanup-target-${change}` };
 
@@ -1632,10 +1666,11 @@ describe("DecisionAgentPanel", () => {
 
   it("trip cleanup 首次失败后即使 Bridge/Repository 更新，仍用源端重试并在成功后恢复最新目标", async () => {
     const blocked = { phase: "needs_owner_action", ...timestamps, blockedReason: "codex_auth_required" as const } satisfies ResearchStatus;
-    let status: ResearchStatus = blocked;
+    let status: ResearchStatus = { phase: "idle" };
     let cancelAttempts = 0;
     const bridge = makeBridge({
       getResearchStatus: vi.fn(async () => status),
+      executeTravelResearch: vi.fn(async () => { status = blocked; return blocked; }),
       cancelResearch: vi.fn(async () => {
         cancelAttempts += 1;
         if (cancelAttempts > 1) status = cancelled;
@@ -1646,6 +1681,8 @@ describe("DecisionAgentPanel", () => {
     const targetBridge = makeBridge();
     const targetRepository = makeRepository();
     const view = setup({ bridge, repository });
+    await prepareAndConfirm();
+    await userEvent.click(screen.getByRole("button", { name: "开始研究酒店候选" }));
     await screen.findByRole("button", { name: "已恢复登录，继续研究" });
 
     const targetTrip = { ...trip, id: "trip-retry-cleanup" };
@@ -1707,19 +1744,23 @@ describe("DecisionAgentPanel", () => {
 
   it("blocked 任务遇到 trip 城市变化时，必须 cancel 并对账后才初始化新行程", async () => {
     const blocked = { phase: "needs_owner_action", ...timestamps, blockedReason: "codex_auth_required" as const } satisfies ResearchStatus;
-    let status: ResearchStatus = blocked;
+    let status: ResearchStatus = { phase: "idle" };
     let releaseCancel!: () => void;
     const cancelGate = new Promise<void>((resolve) => { releaseCancel = resolve; });
     const bridge = makeBridge({
       getResearchStatus: vi.fn(async () => status),
+      executeTravelResearch: vi.fn(async () => { status = blocked; return blocked; }),
       cancelResearch: vi.fn(async () => {
         await cancelGate;
         status = cancelled;
         return cancelled;
       }),
     });
-    const repository = makeRepository();
+    const command = makeCreateAndRevokeCommand();
+    const repository = makeRepository(command);
     const view = setup({ bridge, repository });
+    await prepareAndConfirm();
+    await userEvent.click(screen.getByRole("button", { name: "开始研究酒店候选" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("恢复登录");
     const changedTrip = {
       ...trip,
@@ -1735,12 +1776,12 @@ describe("DecisionAgentPanel", () => {
       operationId: blocked.operationId,
     }, expect.anything()));
     expect(screen.getByRole("group", { name: "选择行程段" })).toBeDisabled();
-    expect(repository.command).not.toHaveBeenCalled();
+    expect(command.mock.calls.map(([input]) => input.action)).toEqual(["createAgentRun"]);
     releaseCancel();
 
     await waitFor(() => expect(screen.getByRole("radio", { name: /九龙/ })).toBeEnabled());
     expect(bridge.getResearchStatus).toHaveBeenCalledTimes(3);
-    expect(repository.command).not.toHaveBeenCalled();
+    expect(command.mock.calls.map(([input]) => input.action)).toEqual(["createAgentRun"]);
   });
 
   it("trip 变化与在途 resume 竞态先重放确认 task，再按 local cancel → status → cloud revoke 清理", async () => {

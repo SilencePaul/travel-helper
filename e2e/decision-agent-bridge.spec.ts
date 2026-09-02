@@ -451,6 +451,11 @@ test("stopping an active research task leaves no generated candidate", async ({ 
     agentRunId: "agent-run-e2e-2",
     targetCategory: "restaurant",
   }));
+  harness.complete();
+  await expect(page.getByRole("heading", { name: "码头茶餐厅" })).toBeVisible();
+  expect(harness.workspaceSnapshot().candidates
+    .filter((candidate) => candidate.category === "restaurant")
+    .map((candidate) => candidate.recommendation.round)).toEqual([1, 1]);
 });
 
 test("Codex unavailability keeps existing shared decisions visible", async ({ page }) => {

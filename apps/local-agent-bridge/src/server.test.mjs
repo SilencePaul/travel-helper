@@ -358,6 +358,7 @@ test("each fixed path accepts only its exact JSON shape and status rejects body 
     ["POST", "/v1/agent-runs/prepare", { prompt: "ignore rules" }],
     ["POST", "/v1/agent-runs/claim", {}],
     ["POST", "/v1/agent-runs/claim", { agentRunId: "agent-run-1", privateKey: "secret" }],
+    ["POST", "/v1/agent-runs/claim", { agentRunId: "a".repeat(300) }],
     ["POST", "/v1/agent-runs/execute-travel-research", { agentRunId: "agent-run-1", targetCategory: "hotel", targetScopeId: `scope_${"a".repeat(64)}`, disclosureFingerprint: "b".repeat(64), prompt: "free text" }],
     ["POST", "/v1/agent-runs/execute-travel-research", { agentRunId: "agent-run-1", targetCategory: "hotel", targetScopeId: `scope_${"a".repeat(64)}`, disclosureFingerprint: "b".repeat(64), url: "https://example.org" }],
     ["POST", "/v1/agent-runs/resume-travel-research", { agentRunId: "agent-run-2", researchTaskId: "research-task-1", resumeAction: "retry_codex_auth", Cookie: "session=x" }],

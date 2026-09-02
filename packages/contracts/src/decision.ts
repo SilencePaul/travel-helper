@@ -1,6 +1,12 @@
 import { z } from "zod";
 import type { Trip } from "./trip";
 
+export const OPAQUE_IDENTIFIER_MAX_LENGTH = 256;
+export const OpaqueIdentifierSchema = z.string()
+  .min(1)
+  .max(OPAQUE_IDENTIFIER_MAX_LENGTH)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
+
 export const CandidateCategorySchema = z.enum(["hotel", "restaurant", "attraction"]);
 export const SummaryStatusSchema = z.enum(["ready", "outdated"]);
 export const VerificationStateSchema = z.enum(["candidate", "web_verified", "needs_takeover", "stale"]);
@@ -252,17 +258,22 @@ export const AgentDecisionContextSchema = z.object({
 }).strict();
 
 const ResearchTaskStatusBase = {
-  researchTaskId: z.string().min(1),
-  agentRunId: z.string().min(1),
-  operationId: z.string().min(1),
-  reconciliationState: z.enum(["active", "self_revoke_reconciling"]),
+  researchTaskId: OpaqueIdentifierSchema,
+  agentRunId: OpaqueIdentifierSchema,
+  operationId: OpaqueIdentifierSchema,
+  reconciliationState: z.literal("active"),
   startedAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 };
 
+const ActiveResearchTaskStatusBase = {
+  ...ResearchTaskStatusBase,
+  reconciliationState: z.enum(["active", "self_revoke_reconciling"]),
+};
+
 const activeResearchStatus = <Phase extends "researching" | "resuming" | "validating" | "writing" | "cancelling">(phase: Phase) => z.object({
   phase: z.literal(phase),
-  ...ResearchTaskStatusBase,
+  ...ActiveResearchTaskStatusBase,
 }).strict();
 
 export const ResearchStatusSchema = z.discriminatedUnion("phase", [

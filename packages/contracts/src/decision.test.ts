@@ -20,6 +20,7 @@ import {
   DecisionWorkspaceSchema,
   EvidenceSnapshotSchema,
   PreferenceProfileSchema,
+  OpaqueIdentifierSchema,
   ResearchBlockReasonSchema,
   ResearchErrorCodeSchema,
   ResearchPhaseSchema,
@@ -229,6 +230,38 @@ describe("decision contracts", () => {
       };
       delete (complete as Partial<typeof complete>)[missingField];
       expect(ResearchStatusSchema.safeParse(complete).success).toBe(false);
+    }
+  });
+
+  it("uses one bounded opaque identifier contract at the public protocol edge", () => {
+    expect(OpaqueIdentifierSchema.parse("agent-run_1:resume.2")).toBe("agent-run_1:resume.2");
+    expect(OpaqueIdentifierSchema.safeParse(`a${"b".repeat(255)}`).success).toBe(true);
+    expect(OpaqueIdentifierSchema.safeParse(`a${"b".repeat(256)}`).success).toBe(false);
+    expect(OpaqueIdentifierSchema.safeParse("-leading-dash").success).toBe(false);
+    expect(OpaqueIdentifierSchema.safeParse("contains space").success).toBe(false);
+  });
+
+  it("exposes self-revoke reconciliation only while an operation is active", () => {
+    const base = {
+      researchTaskId: "research-1",
+      agentRunId: "agent-run-1",
+      operationId: "operation-1",
+      reconciliationState: "self_revoke_reconciling",
+      startedAt: "2026-08-28T00:00:00.000Z",
+      updatedAt: "2026-08-28T00:01:00.000Z",
+    } as const;
+
+    for (const phase of ["researching", "resuming", "validating", "writing", "cancelling"] as const) {
+      expect(ResearchStatusSchema.safeParse({ phase, ...base }).success).toBe(true);
+    }
+    for (const terminal of [
+      { phase: "completed" },
+      { phase: "failed", errorCode: "CODEX_RESEARCH_FAILED" },
+      { phase: "cancelled", errorCode: "CODEX_RESEARCH_CANCELLED" },
+      { phase: "superseded", errorCode: "DISCLOSURE_CONTEXT_CHANGED" },
+      { phase: "needs_owner_action", blockedReason: "codex_auth_required" },
+    ] as const) {
+      expect(ResearchStatusSchema.safeParse({ ...terminal, ...base }).success).toBe(false);
     }
   });
 

@@ -7,6 +7,7 @@ import test from "node:test";
 
 import {
   RECOVERY_STATE_FIELDS,
+  RECONCILIATION_STATE_FIELDS,
   createResearchStateStore,
 } from "./research-state-store.mjs";
 import { createMacosNotifier } from "./macos-notifier.mjs";
@@ -34,6 +35,43 @@ function recoverableState(overrides = {}) {
     blockedHostname: "booking.example.org",
     activeRuntimeMs: 12_345,
     phase: "needs_owner_action",
+    startedAt: "2026-09-01T01:02:03.000Z",
+    updatedAt: "2026-09-01T01:04:05.000Z",
+    ...overrides,
+  };
+}
+
+function reconciliationState(overrides = {}) {
+  const agentRunId = "agent-run-1";
+  return {
+    recordType: "self_revoke_reconciliation",
+    researchTaskId: "research-task-1",
+    agentRunId,
+    operationId: "operation-1",
+    reconciliationState: "self_revoke_reconciling",
+    activePhase: "validating",
+    revokeRequest: {
+      agentRunId,
+      expiresAt: "2026-09-01T01:15:00.000Z",
+      firstSentAt: Date.parse("2026-09-01T01:03:00.000Z"),
+      body: JSON.stringify({
+        agentRunId,
+        sequence: 4,
+        idempotencyKey: "revoke-operation-1",
+        action: "revokeAgentRunSelf",
+        payload: {},
+        signature: "s".repeat(86),
+      }),
+    },
+    codexThreadId: "0198f29d-45df-7ce0-8f84-140b19c5ca21",
+    targetCategory: "hotel",
+    targetScopeId: `scope_${"a".repeat(64)}`,
+    disclosureFingerprint: "b".repeat(64),
+    aliasSalt: "safe-alias-salt-1234",
+    blockedReason: "source_login_required",
+    blockedHostname: "booking.example.org",
+    activeRuntimeMs: 12_345,
+    terminalPhase: "needs_owner_action",
     startedAt: "2026-09-01T01:02:03.000Z",
     updatedAt: "2026-09-01T01:04:05.000Z",
     ...overrides,
@@ -68,6 +106,20 @@ test("persists one strict recovery record with owner-only permissions", async (c
     "prompt", "output", "uid", "credential", "privateKey", "pairingCode",
     "深圳", "2026-10-03", "一鸣", "网页原始输出",
   ]) {
+    assert.equal(serialized.includes(forbidden), false, forbidden);
+  }
+});
+
+test("persists only the fixed signed self-revoke replay record before terminal publication", async (context) => {
+  const { filePath, store } = await temporaryStore(context);
+  const state = reconciliationState();
+
+  await store.persistSelfRevokeReconciliation(state);
+
+  assert.deepEqual(await store.load(), state);
+  const serialized = await readFile(filePath, "utf8");
+  assert.deepEqual(Object.keys(JSON.parse(serialized)), RECONCILIATION_STATE_FIELDS);
+  for (const forbidden of ["privateKey", "pairingCode", "travelerName", "prompt", "output", "cookie"]) {
     assert.equal(serialized.includes(forbidden), false, forbidden);
   }
 });

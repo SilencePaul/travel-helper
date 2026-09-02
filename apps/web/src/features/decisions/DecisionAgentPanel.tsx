@@ -84,6 +84,7 @@ type CloudRunHandle = {
   reconcilePromise?: Promise<boolean>;
 };
 type AttachedCloudRun = CloudRunHandle & { researchTaskId: string; operationId: string };
+type ResearchOperationIdentity = { researchTaskId: string; agentRunId: string; operationId: string };
 type LifecycleContext = { tripSafetyKey: string; bridge?: LocalAgentBridge; repository: DecisionWorkspaceRepository };
 type TripCleanupTransition = {
   lifecycle: number;
@@ -272,6 +273,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
   const inFlightRef = useRef(false);
   const statusRef = useRef<ResearchStatus>({ phase: "idle" });
   const lastBridgeObservedStatusRef = useRef<ResearchStatus | undefined>(undefined);
+  const ownedResearchIdentityRef = useRef<ResearchOperationIdentity | undefined>(undefined);
   const taskFingerprintRef = useRef<string | undefined>(undefined);
   const confirmedFingerprintRef = useRef<string | undefined>(undefined);
   const disclosureRequestRef = useRef(0);
@@ -339,6 +341,11 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       agentRunId: attempt.agentRunId,
       revokeIdempotencyKey: attempt.revokeIdempotencyKey,
       researchTaskId: status.researchTaskId,
+      operationId: status.operationId,
+    };
+    ownedResearchIdentityRef.current = {
+      researchTaskId: status.researchTaskId,
+      agentRunId: status.agentRunId,
       operationId: status.operationId,
     };
     setCloudCleanupRequired(false);
@@ -674,6 +681,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       pendingAttemptRef.current = undefined;
       attachedCloudRunRef.current = undefined;
       blockedCleanupAttemptRef.current = undefined;
+      ownedResearchIdentityRef.current = undefined;
     }
     taskFingerprintRef.current = undefined;
     confirmedFingerprintRef.current = undefined;
@@ -796,6 +804,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
     const previousStatus = lastBridgeObservedStatusRef.current ?? statusRef.current;
     const previousPending = pendingAttemptRef.current;
     const previousAttached = attachedCloudRunRef.current;
+    const previousOwned = ownedResearchIdentityRef.current;
     const sourceContextChanged = Boolean(previousContext && (
       previousContext.tripSafetyKey !== tripSafetyKey
       || previousContext.bridge !== bridge
@@ -812,8 +821,13 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
     setOperationError(undefined);
     const controller = new AbortController();
     const tripChanged = previousContext?.tripSafetyKey !== tripSafetyKey;
+    const ownsPreviousStatus = previousStatus.phase !== "idle"
+      && previousOwned?.researchTaskId === previousStatus.researchTaskId
+      && previousOwned.agentRunId === previousStatus.agentRunId
+      && previousOwned.operationId === previousStatus.operationId;
     const previousContextNeedsCleanup = Boolean(previousPending || previousAttached)
-      || Boolean(tripChanged && (activePhases.has(previousStatus.phase) || previousStatus.phase === "needs_owner_action"));
+      || Boolean(tripChanged && ownsPreviousStatus
+        && (activePhases.has(previousStatus.phase) || previousStatus.phase === "needs_owner_action"));
     if (sourceContextChanged && previousContext?.bridge && previousContextNeedsCleanup) {
       tripCleanupAbortRef.current = controller;
       const transition: TripCleanupTransition = {
