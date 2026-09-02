@@ -47,6 +47,11 @@ function formatDate(date: string) {
 
 export function TravelPassHero({ trip, member, selectedDayId }: TravelPassHeroProps) {
   const day = selectedRouteLeg(trip, selectedDayId);
+  const activeStops = routeStops(day.city).filter((stop) => cityCodes[stop]);
+  const routeDescription = "北京出发，经深圳、香港、澳门、珠海，返回北京的路线";
+  const routeAriaLabel = activeStops.length > 0
+    ? `${routeDescription}；当前 D${day.dayNumber}，${activeStops.join("、")}已高亮`
+    : routeDescription;
   const departureCode = cityCodes[day.departure] ?? "PEK";
   const destinationCode = cityCodes[day.arrival] ?? fallbackStop.code;
   const departureCaption = `${day.departure}出发`;
@@ -70,7 +75,7 @@ export function TravelPassHero({ trip, member, selectedDayId }: TravelPassHeroPr
           className="travel-pass-hero__route"
           viewBox="0 0 768 320"
           role="img"
-          aria-label="北京出发，经深圳、香港、澳门、珠海，返回北京的路线"
+          aria-label={routeAriaLabel}
         >
           <path
             data-testid="travel-route-wave"
@@ -85,23 +90,23 @@ export function TravelPassHero({ trip, member, selectedDayId }: TravelPassHeroPr
             <circle r="10" fill="#fffaf2" stroke="#d85535" strokeWidth="3" />
             <text y="-18" textAnchor="middle">PEK 北京</text>
           </g>
-          <g data-station="SZX 深圳" className="travel-pass-hero__station travel-pass-hero__station--stop" transform="translate(215 220)">
+          <g data-station="SZX 深圳" data-active={activeStops.includes("深圳") || undefined} className="travel-pass-hero__station travel-pass-hero__station--stop" transform="translate(215 220)">
             <circle r="7" fill="#1f5a43" />
             <text y="25" textAnchor="middle">SZX 深圳</text>
           </g>
-          <g data-station="HKG 香港" className="travel-pass-hero__station travel-pass-hero__station--stop" transform="translate(320 140)">
+          <g data-station="HKG 香港" data-active={activeStops.includes("香港") || undefined} className="travel-pass-hero__station travel-pass-hero__station--stop" transform="translate(320 140)">
             <circle r="7" fill="#1f5a43" />
             <text y="-18" textAnchor="middle">HKG 香港</text>
           </g>
-          <g data-station="MFM 澳门" className="travel-pass-hero__station travel-pass-hero__station--stop" transform="translate(414 252)">
+          <g data-station="MFM 澳门" data-active={activeStops.includes("澳门") || undefined} className="travel-pass-hero__station travel-pass-hero__station--stop" transform="translate(414 252)">
             <circle r="7" fill="#1f5a43" />
             <text y="25" textAnchor="middle">MFM 澳门</text>
           </g>
-          <g data-station="ZUH 珠海" className="travel-pass-hero__station travel-pass-hero__station--stop" transform="translate(505 224)">
+          <g data-station="ZUH 珠海" data-active={activeStops.includes("珠海") || undefined} className="travel-pass-hero__station travel-pass-hero__station--stop" transform="translate(505 224)">
             <circle r="7" fill="#1f5a43" />
             <text y="25" textAnchor="middle">ZUH 珠海</text>
           </g>
-          <g data-station="PEK 北京" className="travel-pass-hero__station travel-pass-hero__station--endpoint" transform="translate(720 102)">
+          <g data-station="PEK 北京" data-active={activeStops.includes("北京") || undefined} className="travel-pass-hero__station travel-pass-hero__station--endpoint" transform="translate(720 102)">
             <circle r="10" fill="#fffaf2" stroke="#d85535" strokeWidth="3" />
             <text y="-18" textAnchor="middle">PEK 北京</text>
           </g>
