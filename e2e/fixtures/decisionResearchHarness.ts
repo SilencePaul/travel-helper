@@ -161,7 +161,7 @@ export class DecisionResearchHarness {
   private currentClaimedRunId?: string;
   private nextRun = 1;
   private nextResearchTask = 1;
-  private currentResearchRound = 0;
+  private readonly researchRoundByCategory: Partial<Record<CandidateCategory, number>> = {};
   private readonly prepareError?: HarnessOptions["prepareError"];
   private readonly holdPrepare: boolean;
   private readonly pendingRequests = new Map<string, (result: HarnessResult) => void>();
@@ -170,6 +170,12 @@ export class DecisionResearchHarness {
     this.currentWorkspace = options.existingSharedDecision
       ? workspaceWithExistingSharedDecision()
       : workspace(options.initialCandidates);
+    for (const item of this.currentWorkspace.candidates) {
+      this.researchRoundByCategory[item.category] = Math.max(
+        this.researchRoundByCategory[item.category] ?? 0,
+        item.recommendation.round,
+      );
+    }
     this.prepareError = options.prepareError;
     this.holdPrepare = options.holdPrepare ?? false;
   }
@@ -227,7 +233,7 @@ export class DecisionResearchHarness {
 
   complete() {
     const currentTask = this.currentTaskBase();
-    const generated = workspace([this.selectedCategory], this.currentResearchRound);
+    const generated = workspace([this.selectedCategory], this.researchRoundByCategory[this.selectedCategory] ?? 1);
     const mergedCandidates = mergeById(this.currentWorkspace.candidates, generated.candidates);
     const mergedEvidence = mergeById(this.currentWorkspace.evidence, generated.evidence);
     const addedCandidateCount = mergedCandidates.length - this.currentWorkspace.candidates.length;
@@ -332,7 +338,7 @@ export class DecisionResearchHarness {
           return { ok: false, error: "INVALID_RESEARCH_TARGET" };
         }
         this.selectedCategory = input.targetCategory as CandidateCategory;
-        this.currentResearchRound += 1;
+        this.researchRoundByCategory[this.selectedCategory] = (this.researchRoundByCategory[this.selectedCategory] ?? 0) + 1;
         this.currentResearchTaskId = this.allocateResearchTaskId();
         const status = { phase: "researching", ...this.currentTaskBase() } satisfies ResearchStatus;
         this.currentStatus = status;

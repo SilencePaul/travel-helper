@@ -159,6 +159,29 @@ test("two completed rounds for the same category append new candidates without r
   await expect(page.getByRole("heading", { name: "湾畔酒店" })).toHaveCount(2);
 });
 
+test("a seeded category continues at its next recommendation round and advances cursor only for additions", async ({ page }) => {
+  const harness = new DecisionResearchHarness(page, { initialCandidates: ["hotel"] });
+  await harness.install();
+  await openDecisionResearch(page);
+  const before = harness.workspaceSnapshot();
+  const seededIds = before.candidates.map((candidate) => candidate.id);
+  const seededEvidenceIds = before.evidence.map((evidence) => evidence.id);
+  const initialCursor = Number(before.workspaceCursor);
+
+  await selectResearchTarget(page, "hotel");
+  await page.getByRole("button", { name: "开始研究酒店候选" }).click();
+  await expect.poll(() => harness.count("bridge.execute")).toBe(1);
+  harness.complete();
+
+  const after = harness.workspaceSnapshot();
+  expect(after.candidates.filter((candidate) => seededIds.includes(candidate.id))).toEqual(before.candidates);
+  expect(after.evidence.filter((evidence) => seededEvidenceIds.includes(evidence.id))).toEqual(before.evidence);
+  expect(after.candidates.filter((candidate) => !seededIds.includes(candidate.id)).map((candidate) => candidate.recommendation.round)).toEqual([2, 2]);
+  expect(Number(after.workspaceCursor) - initialCursor).toBe(2);
+  await expect(page.getByRole("heading", { name: "海景行旅" })).toHaveCount(2);
+  await expect(page.getByRole("heading", { name: "湾畔酒店" })).toHaveCount(2);
+});
+
 test("a multi-city trip binds the exact selected segment into the disclosure and execute request", async ({ page }) => {
   const { buildResearchDisclosure, buildResearchTargetScopes, computeDisclosureFingerprint } = await loadDecisionResearchContracts();
   const harness = new DecisionResearchHarness(page);
@@ -506,8 +529,11 @@ test("the admin confirms the Codex scope and completes the signed local Bridge c
     });
     expect(consoleMessages.join("\n")).not.toContain(pairingCode);
   } finally {
-    if (!page.isClosed()) await page.goto("about:blank");
-    await bridge.close();
+    try {
+      if (!page.isClosed()) await page.goto("about:blank");
+    } finally {
+      await bridge.close();
+    }
   }
 });
 
@@ -550,8 +576,11 @@ test("a mismatched Origin cannot prepare or create an Agent authorization", asyn
     expect(prepareCalls).toBe(0);
     expect(createCalls).toBe(0);
   } finally {
-    if (!page.isClosed()) await page.goto("about:blank");
-    await bridge.close();
+    try {
+      if (!page.isClosed()) await page.goto("about:blank");
+    } finally {
+      await bridge.close();
+    }
   }
 });
 

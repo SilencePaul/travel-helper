@@ -112,6 +112,8 @@ const bridgeSelfRevokedPhases = new Set<ResearchStatus["phase"]>(["needs_owner_a
 const cloudRevokedSafePhases = new Set<ResearchStatus["phase"]>([...bridgeSelfRevokedPhases, "failed"]);
 const pollDelayMs = 2_000;
 const lifecycleStatusTimeoutMs = 2_000;
+// 7s state-lock wait + 5s notifier timeout + two 250ms termination waits, with a small scheduling margin.
+const cloudSelfRevocationGraceMs = 13_000;
 
 function tripProjection(trip: Trip) {
   return {
@@ -278,7 +280,11 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
   const pendingCancellationRef = useRef<string | undefined>(undefined);
   const finalizingCancellationRef = useRef(false);
   const externallyInvalidatedTaskRef = useRef<{ agentRunId: string; researchTaskId: string } | undefined>(undefined);
-  const revokedRunActiveObservationRef = useRef<{ agentRunId: string; researchTaskId: string } | undefined>(undefined);
+  const revokedRunActiveObservationRef = useRef<{
+    agentRunId: string;
+    researchTaskId: string;
+    firstObservedAtMs: number;
+  } | undefined>(undefined);
   const lifecycleContextRef = useRef<LifecycleContext | undefined>(undefined);
   const tripCleanupTransitionRef = useRef<TripCleanupTransition | undefined>(undefined);
   const blockedCleanupAttemptRef = useRef<PendingCloudAttempt | undefined>(undefined);
@@ -545,14 +551,26 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
         return reconciled;
       };
 
+      if (transition.pending?.stage === "bridgeOperationStarted") {
+        const settlement = await settlePendingAttempt(transition.pending);
+        if (settlement.status) observed = settlement.status;
+        if (settlement.kind === "uncertain") throw new Error("PENDING_RUN_UNCERTAIN");
+        if (settlement.kind === "attached") {
+          attached = attachedRunForAttempt(transition.pending);
+        } else {
+          cloudAlreadyCleaned = true;
+          attached = undefined;
+        }
+      }
+
       if (observed.phase !== "idle") {
         observed = await cancelAndReadTerminal(observed);
-        if (transition.pending) {
+        if (transition.pending && !cloudAlreadyCleaned) {
           if (!await reconcileCloudAttempt(transition.pending)) throw new Error("RUN_RECONCILIATION_UNCERTAIN");
           cloudAlreadyCleaned = true;
           attached = undefined;
         }
-      } else if (transition.pending) {
+      } else if (transition.pending && transition.pending.stage !== "bridgeOperationStarted") {
         const settlement = await settlePendingAttempt(transition.pending);
         if (settlement.status) observed = settlement.status;
         if (settlement.kind === "uncertain") throw new Error("PENDING_RUN_UNCERTAIN");
@@ -761,7 +779,11 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
     const previousStatus = lastBridgeObservedStatusRef.current ?? statusRef.current;
     const previousPending = pendingAttemptRef.current;
     const previousAttached = attachedCloudRunRef.current;
-    const tripChanged = Boolean(previousContext && previousContext.tripSafetyKey !== tripSafetyKey);
+    const sourceContextChanged = Boolean(previousContext && (
+      previousContext.tripSafetyKey !== tripSafetyKey
+      || previousContext.bridge !== bridge
+      || previousContext.repository !== repository
+    ));
     lifecycleContextRef.current = { tripSafetyKey, bridge, repository };
     lifecycleRef.current += 1;
     const lifecycle = lifecycleRef.current;
@@ -772,8 +794,10 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
     setBridgeStatusReady(false);
     setOperationError(undefined);
     const controller = new AbortController();
-    if (tripChanged && previousContext?.bridge
-      && (previousStatus.phase !== "idle" || previousPending || previousAttached)) {
+    const previousContextNeedsCleanup = activePhases.has(previousStatus.phase)
+      || previousStatus.phase === "needs_owner_action"
+      || Boolean(previousPending || previousAttached);
+    if (sourceContextChanged && previousContext?.bridge && previousContextNeedsCleanup) {
       tripCleanupAbortRef.current = controller;
       const transition: TripCleanupTransition = {
         lifecycle,
@@ -895,7 +919,15 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
               revokedRunActiveObservationRef.current = {
                 agentRunId: attached.agentRunId,
                 researchTaskId: current.researchTaskId,
+                firstObservedAtMs: Date.now(),
               };
+              applyBridgeStatus(current);
+              setOperation("error");
+              setOperationError("云端授权已撤销，本机正在完成安全暂停；正在继续对账。");
+              schedule();
+              return;
+            }
+            if (Math.max(0, Date.now() - previousObservation.firstObservedAtMs) < cloudSelfRevocationGraceMs) {
               applyBridgeStatus(current);
               setOperation("error");
               setOperationError("云端授权已撤销，本机正在完成安全暂停；正在继续对账。");
