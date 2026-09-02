@@ -532,7 +532,7 @@ test("the admin confirms the Codex scope and completes the signed local Bridge c
     try {
       if (!page.isClosed()) await page.goto("about:blank");
     } finally {
-      await bridge.close();
+      await bridge.close({ terminateConnections: true });
     }
   }
 });
@@ -579,7 +579,7 @@ test("a mismatched Origin cannot prepare or create an Agent authorization", asyn
     try {
       if (!page.isClosed()) await page.goto("about:blank");
     } finally {
-      await bridge.close();
+      await bridge.close({ terminateConnections: true });
     }
   }
 });

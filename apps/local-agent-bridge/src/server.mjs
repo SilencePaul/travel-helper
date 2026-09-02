@@ -428,11 +428,15 @@ export async function startLocalAgentBridge({
     port: actualPort,
     origin,
     connectionUrl: buildConnectionUrl(app.toString(), origin, { allowInsecureLoopbackApp }),
-    close: () => {
-      if (closePromise) return closePromise;
+    close: ({ terminateConnections = false } = {}) => {
+      if (closePromise) {
+        if (terminateConnections) server.closeAllConnections();
+        return closePromise;
+      }
       const serverClose = server.listening
         ? new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
         : Promise.resolve();
+      if (terminateConnections) server.closeAllConnections();
       const cleanup = Promise.resolve()
         .then(() => runtime.close?.())
         .then(() => onClose?.());

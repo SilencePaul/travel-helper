@@ -73,6 +73,31 @@ function slowRequest(port) {
   });
 }
 
+function beginSlowPrepareRequest(port) {
+  const socket = connect({ host: "127.0.0.1", port });
+  const connected = new Promise((resolve, reject) => {
+    socket.once("connect", () => {
+      socket.write([
+        "POST /v1/agent-runs/prepare HTTP/1.1",
+        `Host: 127.0.0.1:${port}`,
+        `Origin: ${APP_ORIGIN}`,
+        "Content-Type: application/json",
+        "Content-Length: 2",
+        "Connection: keep-alive",
+        "",
+        "{",
+      ].join("\r\n"));
+      resolve();
+    });
+    socket.once("error", reject);
+  });
+  const settled = new Promise((resolve) => {
+    socket.once("close", resolve);
+    socket.once("error", resolve);
+  });
+  return { connected, settled, destroy: () => socket.resetAndDestroy() };
+}
+
 function rawSocketRequest(port, source) {
   return new Promise((resolve, reject) => {
     const socket = connect({ host: "127.0.0.1", port });
@@ -616,6 +641,25 @@ test("startup rejects unsafe settings and close tears down runtime exactly once"
   const bridge = await startLocalAgentBridge({ appUrl: APP_ORIGIN, runtime });
   await Promise.all([bridge.close(), bridge.close(), bridge.close()]);
   assert.equal(closeCalls, 1);
+});
+
+test("forced close terminates an active keep-alive connection after stopping the listener", async () => {
+  const bridge = await startLocalAgentBridge({
+    appUrl: APP_ORIGIN,
+    runtime: fakeRuntime(),
+    bodyTimeoutMs: 60_000,
+  });
+  const request = beginSlowPrepareRequest(bridge.port);
+  await request.connected;
+  const closePromise = bridge.close({ terminateConnections: true });
+  const result = await Promise.race([
+    closePromise.then(() => "closed"),
+    new Promise((resolve) => setTimeout(() => resolve("timeout"), 100)),
+  ]);
+  request.destroy();
+  await closePromise;
+  await request.settled;
+  assert.equal(result, "closed");
 });
 
 test("a rejected close is not cached and retries cleanup after the server has stopped listening", async () => {
