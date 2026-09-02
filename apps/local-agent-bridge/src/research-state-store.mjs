@@ -641,7 +641,7 @@ export function createResearchStateStore({
     }
   }
 
-  async function load() {
+  async function readState(validator) {
     await ensureDirectory();
     let handle;
     try {
@@ -655,7 +655,7 @@ export function createResearchStateStore({
       if (Buffer.byteLength(serialized, "utf8") > MAX_STATE_BYTES) {
         throw codedError("RESEARCH_STATE_INVALID");
       }
-      return await validateState(JSON.parse(serialized));
+      return await validator(JSON.parse(serialized));
     } catch (error) {
       if (error?.code === "ENOENT") return undefined;
       if (error?.code === "RESEARCH_STATE_INVALID") throw error;
@@ -668,6 +668,21 @@ export function createResearchStateStore({
           // Reads already fail closed above; close has no recovery data to expose.
         }
       }
+    }
+  }
+
+  async function load() {
+    return readState(validateState);
+  }
+
+  async function loadForComparison() {
+    try {
+      return await load();
+    } catch (error) {
+      if (error?.code !== "RESEARCH_STATE_INVALID") throw error;
+      // A previously accepted source hostname may later fail DNS. CAS still compares
+      // the exact strict record, without treating dynamic resolution as new trust.
+      return readState(validateStateShape);
     }
   }
 
@@ -822,16 +837,28 @@ export function createResearchStateStore({
   }
 
   async function compareAndPersist(state, expectedState, lock) {
-    const current = await load();
+    const current = await loadForComparison();
     if (isDeepStrictEqual(current, state)) return { state, previous: current, changed: false };
     if (!isDeepStrictEqual(current, expectedState)) throw codedError("RESEARCH_STATE_CONFLICT");
     await writeState(state, lock);
     return { state, previous: current, changed: true };
   }
 
+  async function reconcileMutationFailure(failure, expectedState, successorState) {
+    let current;
+    try {
+      current = await loadForComparison();
+    } catch {
+      throw failure;
+    }
+    if (isDeepStrictEqual(current, successorState)) return true;
+    if (isDeepStrictEqual(current, expectedState)) throw failure;
+    throw codedError("RESEARCH_STATE_CONFLICT");
+  }
+
   async function save(value, expected) {
     const state = await validateState(value);
-    const expectedState = expected === undefined ? undefined : await validateState(expected);
+    const expectedState = expected === undefined ? undefined : validateStateShape(expected);
     const lock = await acquireLock();
     let result;
     let failure;
@@ -845,17 +872,20 @@ export function createResearchStateStore({
     } catch (error) {
       failure ??= error;
     }
-    if (failure) throw failure;
+    if (failure) {
+      await reconcileMutationFailure(failure, expectedState, state);
+      result = state;
+    }
     return result;
   }
 
   async function clear(expected) {
-    const expectedState = expected === undefined ? undefined : await validateState(expected);
+    const expectedState = expected === undefined ? undefined : validateStateShape(expected);
     const lock = await acquireLock();
     let result;
     let failure;
     try {
-      const current = await load();
+      const current = await loadForComparison();
       if (current !== undefined && !isDeepStrictEqual(current, expectedState)) {
         throw codedError("RESEARCH_STATE_CONFLICT");
       }
@@ -877,7 +907,10 @@ export function createResearchStateStore({
     } catch (error) {
       failure ??= error;
     }
-    if (failure) throw failure;
+    if (failure) {
+      await reconcileMutationFailure(failure, expectedState, undefined);
+      result = true;
+    }
     return result;
   }
 
@@ -1210,17 +1243,21 @@ export function createResearchStateStore({
   async function persistNeedsOwnerAction(value, notifier, expected) {
     const state = await validateState(value);
     if (Object.hasOwn(state, "recordType")) throw codedError("RESEARCH_STATE_INVALID");
-    const expectedState = expected === undefined ? undefined : await validateState(expected);
+    const expectedState = expected === undefined ? undefined : validateStateShape(expected);
     const lock = await acquireLock();
     let result;
     let failure;
+    let notificationNeeded;
+    let notificationAttempted = false;
     try {
       const persisted = await compareAndPersist(state, expectedState, lock);
       const isNewTransition = persisted.changed && !sameTransition(persisted.previous, state);
+      notificationNeeded = isNewTransition;
       if (!await ownsLock(lock, OWNERSHIP_CHECK_ATTEMPTS)) {
         throw codedError("RESEARCH_STATE_UNAVAILABLE");
       }
       if (isNewTransition && notifier && typeof notifier.notifyOwnerAction === "function") {
+        notificationAttempted = true;
         try {
           await notifier.notifyOwnerAction(transitionKey(state));
         } catch {
@@ -1236,14 +1273,26 @@ export function createResearchStateStore({
     } catch (error) {
       failure ??= error;
     }
-    if (failure) throw failure;
+    if (failure) {
+      await reconcileMutationFailure(failure, expectedState, state);
+      result = state;
+      notificationNeeded ??= !sameTransition(expectedState, state);
+    }
+    if (notificationNeeded && !notificationAttempted
+      && notifier && typeof notifier.notifyOwnerAction === "function") {
+      try {
+        await notifier.notifyOwnerAction(transitionKey(state));
+      } catch {
+        // Notification is best-effort; the reconciled state is the source of truth.
+      }
+    }
     return result;
   }
 
   async function persistSelfRevokeReconciliation(value, expected) {
     const state = await validateState(value);
     if (state.recordType !== "self_revoke_reconciliation") throw codedError("RESEARCH_STATE_INVALID");
-    const expectedState = expected === undefined ? undefined : await validateState(expected);
+    const expectedState = expected === undefined ? undefined : validateStateShape(expected);
     const lock = await acquireLock();
     let result;
     let failure;
@@ -1257,14 +1306,17 @@ export function createResearchStateStore({
     } catch (error) {
       failure ??= error;
     }
-    if (failure) throw failure;
+    if (failure) {
+      await reconcileMutationFailure(failure, expectedState, state);
+      result = state;
+    }
     return result;
   }
 
   async function persistProposalReconciliation(value, expected) {
     const state = await validateState(value);
     if (state.recordType !== "proposal_submit_reconciliation") throw codedError("RESEARCH_STATE_INVALID");
-    const expectedState = expected === undefined ? undefined : await validateState(expected);
+    const expectedState = expected === undefined ? undefined : validateStateShape(expected);
     const lock = await acquireLock();
     let result;
     let failure;
@@ -1278,7 +1330,10 @@ export function createResearchStateStore({
     } catch (error) {
       failure ??= error;
     }
-    if (failure) throw failure;
+    if (failure) {
+      await reconcileMutationFailure(failure, expectedState, state);
+      result = state;
+    }
     return result;
   }
 

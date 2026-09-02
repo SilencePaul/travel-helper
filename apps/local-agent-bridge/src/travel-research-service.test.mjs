@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
 import { EventEmitter } from "node:events";
+import * as fs from "node:fs/promises";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -3834,6 +3835,63 @@ test("a final owner-action CAS conflict prevents a recovered intent from revokin
 
   assert.equal(harness.events.filter((event) => event === "transport.revokeSelf").length, 1);
   assert.equal(harness.store.state.recordType, "proposal_submit_reconciliation");
+});
+
+test("a recovered revoke adopts an owner-action successor committed before a store error", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "travel-owner-action-readback-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const directory = join(root, "application-data");
+  const stateFilePath = join(directory, "travel-research-state.json");
+  let injectFault = false;
+  let failDirectorySync = false;
+  const fileSystem = {
+    ...fs,
+    async open(path, flags, mode) {
+      const handle = await fs.open(path, flags, mode);
+      if (path !== directory || !failDirectorySync) return handle;
+      return {
+        async stat(...args) { return handle.stat(...args); },
+        async sync() {
+          failDirectorySync = false;
+          throw new Error("directory sync failed after owner action publish");
+        },
+        async close() { return handle.close(); },
+      };
+    },
+    async rename(from, to) {
+      const result = await fs.rename(from, to);
+      if (injectFault && to === stateFilePath) failDirectorySync = true;
+      return result;
+    },
+  };
+  const store = createResearchStateStore({ directory, fileSystem, resolveHostname: PUBLIC_RESOLVER });
+  const request = await targetRequest();
+  const recovered = recoveredReconciliation(request);
+  await store.persistSelfRevokeReconciliation(recovered);
+  injectFault = true;
+  const events = [];
+  let notifications = 0;
+  const service = new TravelResearchService({
+    transport: fakeTransport(events, contextFixture()),
+    runner: fakeRunner(events, []),
+    store,
+    notifier: { async notifyOwnerAction() { notifications += 1; return true; } },
+    clock: createClock(),
+    idGenerator: () => "unused-recovery-id",
+  });
+
+  let status = await service.getResearchStatus(request.tripId);
+  for (let attempt = 0; attempt < 100 && status.phase !== "needs_owner_action"; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    status = await service.getResearchStatus(request.tripId);
+  }
+
+  assert.equal(status.phase, "needs_owner_action");
+  assert.equal(events.filter((event) => event === "transport.revokeSelf").length, 1);
+  assert.equal(notifications, 1);
+  assert.equal((await store.load()).recordType, undefined);
+  await service.getResearchStatus(request.tripId);
+  assert.equal(events.filter((event) => event === "transport.revokeSelf").length, 1);
 });
 
 test("an identical projection from another trip cannot resume or replace the bound blocker", async () => {

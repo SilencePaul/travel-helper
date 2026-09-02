@@ -359,6 +359,66 @@ test("a stale owner-action writer cannot replace a newer proposal responsibility
   assert.deepEqual(await current.load(), proposal);
 });
 
+test("an exact expected record remains comparable after persisted source DNS becomes unavailable", async (context) => {
+  for (const blockedReason of ["source_login_required", "source_captcha", "source_risk_control"]) {
+    await context.test(`${blockedReason} clear`, async (subcontext) => {
+      let resolverAvailable = true;
+      const resolveHostname = async () => {
+        if (!resolverAvailable) throw new Error("resolver unavailable");
+        return PUBLIC_RESOLVER();
+      };
+      const { store } = await temporaryStore(subcontext, { resolveHostname });
+      const state = recoverableState({ blockedReason });
+      await store.save(state);
+      resolverAvailable = false;
+
+      await assert.doesNotReject(store.clear(state));
+      assert.equal(await store.load(), undefined);
+    });
+
+    await context.test(`${blockedReason} transition`, async (subcontext) => {
+      let resolverAvailable = true;
+      const resolveHostname = async () => {
+        if (!resolverAvailable) throw new Error("resolver unavailable");
+        return PUBLIC_RESOLVER();
+      };
+      const { store } = await temporaryStore(subcontext, { resolveHostname });
+      const state = recoverableState({ blockedReason });
+      const successor = proposalReconciliationState();
+      await store.save(state);
+      resolverAvailable = false;
+
+      await assert.doesNotReject(store.persistProposalReconciliation(successor, state));
+      assert.deepEqual(await store.load(), successor);
+    });
+  }
+});
+
+test("a static expected record cannot bypass exact CAS or strict validation", async (context) => {
+  let resolverAvailable = true;
+  const resolveHostname = async () => {
+    if (!resolverAvailable) throw new Error("resolver unavailable");
+    return PUBLIC_RESOLVER();
+  };
+  const { store } = await temporaryStore(context, { resolveHostname });
+  const state = recoverableState();
+  await store.save(state);
+  resolverAvailable = false;
+
+  await assert.rejects(store.clear({
+    ...state,
+    researchTaskId: "forged-research-task",
+  }), { code: "RESEARCH_STATE_CONFLICT" });
+  await assert.rejects(store.clear({
+    ...state,
+    memberName: "一鸣",
+  }), { code: "RESEARCH_STATE_INVALID" });
+  await assert.rejects(store.persistNeedsOwnerAction({
+    ...state,
+    updatedAt: "2026-09-01T01:05:06.000Z",
+  }, { async notifyOwnerAction() { return true; } }, state), { code: "RESEARCH_STATE_INVALID" });
+});
+
 test("persists and reloads a bounded proposal envelope near the legal payload limit", async (context) => {
   const { store } = await temporaryStore(context);
   const state = proposalReconciliationState();
@@ -541,10 +601,84 @@ test("writes through a same-directory temporary file and atomic rename", async (
   assert.equal(synced.includes(directory), true);
 });
 
-test("a post-rename directory sync failure reports uncertainty while preserving the exact reconciliation record", async (context) => {
+test("post-publish directory sync failure adopts the exact successor for every CAS mutator", async (context) => {
+  const cases = [
+    {
+      name: "save",
+      target: recoverableState({ blockedReason: "codex_auth_required", blockedHostname: null }),
+      invoke: (store, target) => store.save(target),
+    },
+    {
+      name: "self revoke",
+      target: reconciliationState({ blockedReason: "codex_auth_required", blockedHostname: null }),
+      invoke: (store, target) => store.persistSelfRevokeReconciliation(target),
+    },
+    {
+      name: "proposal",
+      target: proposalReconciliationState(),
+      invoke: (store, target) => store.persistProposalReconciliation(target),
+    },
+    {
+      name: "owner action transition",
+      expected: reconciliationState({ blockedReason: "codex_auth_required", blockedHostname: null }),
+      target: recoverableState({ blockedReason: "codex_auth_required", blockedHostname: null }),
+      invoke: (store, target, expected, notifier) => store.persistNeedsOwnerAction(target, notifier, expected),
+    },
+  ];
+
+  for (const item of cases) {
+    await context.test(item.name, async (subcontext) => {
+      let stateDirectory;
+      let stateFilePath;
+      let published = false;
+      let injectFault = false;
+      let failDirectorySync = false;
+      let notifications = 0;
+      const fileSystem = {
+        ...fs,
+        async open(path, flags, mode) {
+          const handle = await fs.open(path, flags, mode);
+          if (path !== stateDirectory || !failDirectorySync) return handle;
+          return {
+            async stat(...args) { return handle.stat(...args); },
+            async sync() {
+              failDirectorySync = false;
+              throw new Error("directory sync failed after publish");
+            },
+            async close() { return handle.close(); },
+          };
+        },
+        async rename(from, to) {
+          const result = await fs.rename(from, to);
+          if (injectFault && to === stateFilePath) {
+            published = true;
+            failDirectorySync = true;
+          }
+          return result;
+        },
+      };
+      const created = await temporaryStore(subcontext, { fileSystem });
+      stateDirectory = created.directory;
+      stateFilePath = created.filePath;
+      if (item.expected) await created.store.persistSelfRevokeReconciliation(item.expected);
+      injectFault = true;
+
+      const persisted = await item.invoke(created.store, item.target, item.expected, {
+        async notifyOwnerAction() { notifications += 1; },
+      });
+
+      assert.equal(published, true);
+      assert.deepEqual(persisted, item.target);
+      assert.deepEqual(await created.store.load(), item.target);
+      if (item.name === "owner action transition") assert.equal(notifications, 1);
+    });
+  }
+});
+
+test("a post-unlink directory sync failure adopts the exact cleared successor", async (context) => {
   let stateDirectory;
   let stateFilePath;
-  let published = false;
+  let injectFault = false;
   let failDirectorySync = false;
   const fileSystem = {
     ...fs,
@@ -555,29 +689,54 @@ test("a post-rename directory sync failure reports uncertainty while preserving 
         async stat(...args) { return handle.stat(...args); },
         async sync() {
           failDirectorySync = false;
-          throw new Error("directory sync failed after publish");
+          throw new Error("directory sync failed after unlink");
         },
         async close() { return handle.close(); },
       };
     },
-    async rename(from, to) {
-      const result = await fs.rename(from, to);
-      if (to === stateFilePath) {
-        published = true;
-        failDirectorySync = true;
-      }
+    async unlink(path) {
+      const result = await fs.unlink(path);
+      if (injectFault && path === stateFilePath) failDirectorySync = true;
       return result;
     },
   };
   const created = await temporaryStore(context, { fileSystem });
   stateDirectory = created.directory;
   stateFilePath = created.filePath;
-  const state = reconciliationState();
+  const state = proposalReconciliationState();
+  await created.store.persistProposalReconciliation(state);
+  injectFault = true;
 
-  await assert.rejects(created.store.persistSelfRevokeReconciliation(state), { code: "RESEARCH_STATE_UNAVAILABLE" });
+  assert.equal(await created.store.clear(state), true);
+  assert.equal(await created.store.load(), undefined);
+});
 
-  assert.equal(published, true);
-  assert.deepEqual(await created.store.load(), state);
+test("post-publish readback rejects a different complete record", async (context) => {
+  let stateFilePath;
+  let injectFault = false;
+  const competing = proposalReconciliationState({
+    researchTaskId: "research-task-competing-readback",
+    operationId: "operation-competing-readback",
+  });
+  const fileSystem = {
+    ...fs,
+    async rename(from, to) {
+      const result = await fs.rename(from, to);
+      if (injectFault && to === stateFilePath) {
+        await fs.writeFile(to, `${JSON.stringify(competing)}\n`, { mode: 0o600 });
+        throw new Error("publish result replaced before readback");
+      }
+      return result;
+    },
+  };
+  const created = await temporaryStore(context, { fileSystem });
+  stateFilePath = created.filePath;
+  injectFault = true;
+
+  await assert.rejects(created.store.persistProposalReconciliation(proposalReconciliationState()), {
+    code: "RESEARCH_STATE_CONFLICT",
+  });
+  assert.deepEqual(await created.store.load(), competing);
 });
 
 test("cleans an exclusively-created temporary file when writing fails", async (context) => {
@@ -1057,7 +1216,7 @@ test("an active PID lock is never stolen during a slow write", async (context) =
   assert.equal(notifications, 1);
 });
 
-test("an old owner never removes a replacement lock it does not own", async (context) => {
+test("a committed successor remains successful when an old owner cannot remove a replacement lock", async (context) => {
   const { directory, store } = await temporaryStore(context);
   const lockPath = join(directory, LOCK_FILE);
   const notifier = {
@@ -1069,10 +1228,7 @@ test("an old owner never removes a replacement lock it does not own", async (con
     },
   };
 
-  await assert.rejects(
-    store.persistNeedsOwnerAction(recoverableState(), notifier),
-    { code: "RESEARCH_STATE_UNAVAILABLE" },
-  );
+  await assert.doesNotReject(store.persistNeedsOwnerAction(recoverableState(), notifier));
   assert.equal((await stat(lockPath)).isFile(), true);
 });
 
@@ -1115,7 +1271,7 @@ test("a replaced owner cannot publish over the replacement owner's state", async
 
   await assert.rejects(
     store.persistNeedsOwnerAction(recoverableState(), { notifyOwnerAction: async () => true }),
-    { code: "RESEARCH_STATE_UNAVAILABLE" },
+    { code: "RESEARCH_STATE_CONFLICT" },
   );
   assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), replacement);
   assert.equal(await readFile(lockPath, "utf8"), lockOwner(process.pid, "replacement-owner-nonce-5678"));
@@ -1166,7 +1322,7 @@ test("direct save also owns and rechecks the lock before publishing", async (con
   };
   const store = createResearchStateStore({ directory, fileSystem, resolveHostname: PUBLIC_RESOLVER });
 
-  await assert.rejects(store.save(recoverableState()), { code: "RESEARCH_STATE_UNAVAILABLE" });
+  await assert.rejects(store.save(recoverableState()), { code: "RESEARCH_STATE_CONFLICT" });
   assert.equal(foundLock, true);
   assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), replacement);
 });
@@ -1242,7 +1398,7 @@ test("publish rollback never deletes a state inode installed after the old owner
   };
   const store = createResearchStateStore({ directory, fileSystem, resolveHostname: PUBLIC_RESOLVER });
 
-  await assert.rejects(store.save(recoverableState()), { code: "RESEARCH_STATE_UNAVAILABLE" });
+  await assert.rejects(store.save(recoverableState()), { code: "RESEARCH_STATE_CONFLICT" });
   assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), replacement);
   assert.equal(await readFile(lockPath, "utf8"), lockOwner(process.pid, "post-publish-lock-1234"));
 });
@@ -1274,7 +1430,7 @@ test("release retries one transient ownership stat failure and removes its own l
   await assert.rejects(stat(lockPath), { code: "ENOENT" });
 });
 
-test("a same-process nonce marked orphaned after persistent release failure is recoverable", async (context) => {
+test("a committed successor survives persistent release failure and its orphaned lock is recoverable", async (context) => {
   const { directory } = await temporaryStore(context);
   const lockPath = join(directory, LOCK_FILE);
   let failReleaseChecks = false;
@@ -1291,12 +1447,12 @@ test("a same-process nonce marked orphaned after persistent release failure is r
     resolveHostname: PUBLIC_RESOLVER,
   });
 
-  await assert.rejects(first.persistNeedsOwnerAction(recoverableState(), {
+  await assert.doesNotReject(first.persistNeedsOwnerAction(recoverableState(), {
     async notifyOwnerAction() {
       failReleaseChecks = true;
       return true;
     },
-  }), { code: "RESEARCH_STATE_UNAVAILABLE" });
+  }));
   assert.equal((await stat(lockPath)).isFile(), true);
 
   const second = createResearchStateStore({
