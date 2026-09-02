@@ -2,8 +2,16 @@
   "name": "travel-planner",
   "private": true,
   "packageManager": "pnpm@11.0.5",
+  "engines": {
+    "node": ">=22.22.0 <23"
+  },
   "scripts": {
     "dev": "pnpm --dir apps/web dev",
+    "build:web:cloudflare": "node scripts/build-web-cloudflare.mjs",
+    "briefing:prepare": "node scripts/publish-briefing.mjs",
+    "briefing:verify": "node scripts/verify-briefing.mjs",
+    "briefing:publish": "bash scripts/publish-briefing.sh",
+    "test:briefing": "node --test scripts/publish-briefing.test.mjs scripts/build-web-cloudflare.test.mjs scripts/verify-briefing.test.mjs",
     "build": "pnpm -r build",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",
