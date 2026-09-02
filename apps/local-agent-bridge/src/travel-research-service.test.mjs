@@ -2889,6 +2889,38 @@ test("an uncertain orphan revoke keeps the claim and reports failed instead of c
   assert.equal(harness.events.filter((event) => event === "transport.revokeSelf").length, 1);
 });
 
+test("a failed trip with an uncertain retained claim cannot initialize another trip", async () => {
+  const request = await targetRequest();
+  const recovered = {
+    researchTaskId: "research-task-uncertain-trip-handoff",
+    codexThreadId: "thread-uncertain-trip-handoff",
+    targetCategory: "hotel",
+    targetScopeId: request.targetScopeId,
+    disclosureFingerprint: request.disclosureFingerprint,
+    aliasSalt: "alias-salt-uncertain-trip-handoff",
+    blockedReason: "codex_auth_required",
+    blockedHostname: null,
+    activeRuntimeMs: 12_000,
+    phase: "needs_owner_action",
+    startedAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:01:00.000Z",
+  };
+  const harness = createHarness({ initialState: recovered, transportOptions: { uncertainRevoke: true } });
+  await harness.service.getResearchStatus("trip-private");
+  harness.service.prepare("trip-private");
+  await harness.service.claim("agent-run-uncertain-trip-handoff");
+  const failed = await cancelCurrentResearch(harness.service);
+  const eventCount = harness.events.length;
+
+  assert.equal(failed.phase, "failed");
+  assert.equal(failed.errorCode, "AGENT_TRANSPORT_UNAVAILABLE");
+  await assert.rejects(harness.service.getResearchStatus("trip-next"), { code: "AGENT_RUN_INACTIVE" });
+  assert.equal(harness.events.length, eventCount);
+  assert.equal(harness.transport.claimedRun?.agentRunId, "agent-run-uncertain-trip-handoff");
+  assert.equal(harness.runner.createCount, 0);
+  assert.equal(harness.transport.submittedPayloads.length, 0);
+});
+
 test("cancelling an active task revokes its matching claim exactly once", async () => {
   let releaseContext;
   let contextStarted;

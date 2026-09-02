@@ -613,7 +613,7 @@ export class TravelResearchService {
       }));
       if (built.disclosureFingerprint !== input.disclosureFingerprint) {
         await this.#revokeStrict({ cleanup: true });
-        await this.#store.clear();
+        await this.#clearRecovery();
         return this.#finishStatus("superseded", { errorCode: "DISCLOSURE_CONTEXT_CHANGED" });
       }
       if (this.#cancelRequested) return this.#finishCancelled();
@@ -663,11 +663,30 @@ export class TravelResearchService {
     }
   }
 
+  async #clearRecovery() {
+    await this.#store.clear();
+    this.#task.recoveryCleared = true;
+  }
+
+  #terminalCleanupConfirmed() {
+    if (!TERMINAL_PHASES.has(this.#status.phase)
+      || this.#task?.recoveryCleared !== true
+      || this.#task?.pendingSignedAction
+      || this.#task?.selfRevokeReconciling
+      || this.#reconciliationRecord
+      || this.#inflight) return false;
+    try {
+      return this.#transport.claimedRun === undefined;
+    } catch {
+      return false;
+    }
+  }
+
   async getResearchStatus(tripId) {
     if (tripId !== undefined && !opaqueIdentifier(tripId)) throw codedError("CODEX_RESEARCH_FAILED");
     if (this.#status.phase !== "idle" || this.#restored) {
       if (tripId !== undefined && this.#task && this.#task.tripId !== tripId) {
-        if (TERMINAL_PHASES.has(this.#status.phase)) return safeResearchStatus({ phase: "idle" });
+        if (this.#terminalCleanupConfirmed()) return safeResearchStatus({ phase: "idle" });
         throw codedError("AGENT_RUN_INACTIVE");
       }
       if (this.#reconciliationRecord && !this.#inflight) this.#startRecoveredSelfRevoke();
@@ -682,10 +701,7 @@ export class TravelResearchService {
     this.#restored = true;
     if (!recovered) return this.#status;
     this.#restoreRecoveredState(recovered);
-    if (tripId !== undefined && recovered.tripId !== tripId) {
-      if (TERMINAL_PHASES.has(this.#status.phase)) return safeResearchStatus({ phase: "idle" });
-      throw codedError("AGENT_RUN_INACTIVE");
-    }
+    if (tripId !== undefined && recovered.tripId !== tripId) throw codedError("AGENT_RUN_INACTIVE");
     if (recovered.recordType === "self_revoke_reconciliation") this.#startRecoveredSelfRevoke();
     return this.#status;
   }
@@ -929,7 +945,7 @@ export class TravelResearchService {
     } catch {
       return this.#finishFailure("AGENT_TRANSPORT_UNAVAILABLE", false);
     }
-    await this.#store.clear();
+    await this.#clearRecovery();
     this.#finishStatus("superseded", { errorCode: "DISCLOSURE_CONTEXT_CHANGED" });
     return this.#status;
   }
@@ -983,7 +999,7 @@ export class TravelResearchService {
         this.#assertClaimed(this.#task.agentRunId);
         this.#setStatus("writing");
         if (this.#cancelRequested) return this.#finishCancelled();
-        await this.#bounded(() => this.#store.clear());
+        await this.#bounded(() => this.#clearRecovery());
         if (this.#cancelRequested) return this.#finishCancelled();
         await this.#submitWithRetry(validated.payload);
         try {
@@ -1264,7 +1280,7 @@ export class TravelResearchService {
       }
     }
     try {
-      await this.#store.clear();
+      await this.#clearRecovery();
     } catch {
       finalCode = "CODEX_RESEARCH_FAILED";
     }
@@ -1298,7 +1314,7 @@ export class TravelResearchService {
     let clearFailure;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        await this.#store.clear();
+        await this.#clearRecovery();
         clearFailure = undefined;
         break;
       } catch (error) {
