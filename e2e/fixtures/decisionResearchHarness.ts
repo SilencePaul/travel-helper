@@ -45,9 +45,9 @@ const candidateNames: Record<CandidateCategory, [string, string]> = {
   attraction: ["海港博物馆", "山顶花园"],
 };
 
-function candidate(category: CandidateCategory, index: number) {
-  const id = `candidate-${category}-${index + 1}`;
-  const evidenceId = `evidence-${category}-${index + 1}`;
+function candidate(category: CandidateCategory, index: number, round = 1) {
+  const id = `candidate-${category}-r${round}-${index + 1}`;
+  const evidenceId = `evidence-${category}-r${round}-${index + 1}`;
   const evidence = {
     id: evidenceId,
     tripId: "trip-2026-gba",
@@ -77,7 +77,7 @@ function candidate(category: CandidateCategory, index: number) {
       category,
       entity: { name: candidateNames[category][index], address: "香港测试地址" },
       applicability: { dates: { start: "2026-10-04", end: "2026-10-05" }, travelers: 2 },
-      recommendation: { round: 1, reason: `专注${category}类别的测试候选`, preferenceRevisionIds: [], feedbackIds: [] },
+      recommendation: { round, reason: `专注${category}类别的测试候选`, preferenceRevisionIds: [], feedbackIds: [] },
       verificationState: "web_verified" as const,
       decisionState: "none" as const,
       currentEvidenceId: evidenceId,
@@ -89,8 +89,8 @@ function candidate(category: CandidateCategory, index: number) {
   };
 }
 
-function workspace(categories: CandidateCategory[] = []): DecisionWorkspace {
-  const pairs = categories.flatMap((category) => [candidate(category, 0), candidate(category, 1)]);
+function workspace(categories: CandidateCategory[] = [], round = 1): DecisionWorkspace {
+  const pairs = categories.flatMap((category) => [candidate(category, 0, round), candidate(category, 1, round)]);
   return {
     tripId: "trip-2026-gba",
     preferences: [],
@@ -161,6 +161,7 @@ export class DecisionResearchHarness {
   private currentClaimedRunId?: string;
   private nextRun = 1;
   private nextResearchTask = 1;
+  private currentResearchRound = 0;
   private readonly prepareError?: HarnessOptions["prepareError"];
   private readonly holdPrepare: boolean;
   private readonly pendingRequests = new Map<string, (result: HarnessResult) => void>();
@@ -226,12 +227,15 @@ export class DecisionResearchHarness {
 
   complete() {
     const currentTask = this.currentTaskBase();
-    const generated = workspace([this.selectedCategory]);
+    const generated = workspace([this.selectedCategory], this.currentResearchRound);
+    const mergedCandidates = mergeById(this.currentWorkspace.candidates, generated.candidates);
+    const mergedEvidence = mergeById(this.currentWorkspace.evidence, generated.evidence);
+    const addedCandidateCount = mergedCandidates.length - this.currentWorkspace.candidates.length;
     this.currentWorkspace = {
       ...this.currentWorkspace,
-      candidates: mergeById(this.currentWorkspace.candidates, generated.candidates),
-      evidence: mergeById(this.currentWorkspace.evidence, generated.evidence),
-      workspaceCursor: String(Number(this.currentWorkspace.workspaceCursor) + generated.candidates.length),
+      candidates: mergedCandidates,
+      evidence: mergedEvidence,
+      workspaceCursor: String(Number(this.currentWorkspace.workspaceCursor) + addedCandidateCount),
       fetchedAt: now,
     };
     this.currentStatus = { phase: "completed", ...currentTask };
@@ -328,6 +332,7 @@ export class DecisionResearchHarness {
           return { ok: false, error: "INVALID_RESEARCH_TARGET" };
         }
         this.selectedCategory = input.targetCategory as CandidateCategory;
+        this.currentResearchRound += 1;
         this.currentResearchTaskId = this.allocateResearchTaskId();
         const status = { phase: "researching", ...this.currentTaskBase() } satisfies ResearchStatus;
         this.currentStatus = status;

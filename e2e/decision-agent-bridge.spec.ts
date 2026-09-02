@@ -131,6 +131,34 @@ test("a completed task can start a new category with a new run and research task
   await expect(page.getByRole("heading", { name: "海景行旅" })).toBeVisible();
 });
 
+test("two completed rounds for the same category append new candidates without replacing the first round", async ({ page }) => {
+  const harness = new DecisionResearchHarness(page);
+  await harness.install();
+  await openDecisionResearch(page);
+  await selectResearchTarget(page, "hotel");
+  await page.getByRole("button", { name: "开始研究酒店候选" }).click();
+  await expect.poll(() => harness.count("bridge.execute")).toBe(1);
+  harness.complete();
+  await expect(page.getByRole("heading", { name: "海景行旅" })).toBeVisible();
+  const afterFirstRound = harness.workspaceSnapshot();
+  const firstRoundIds = afterFirstRound.candidates.map((candidate) => candidate.id);
+  const firstCursor = Number(afterFirstRound.workspaceCursor);
+
+  await selectResearchTarget(page, "hotel");
+  await page.getByRole("button", { name: "开始研究酒店候选" }).click();
+  await expect.poll(() => harness.count("bridge.execute")).toBe(2);
+  harness.complete();
+
+  const afterSecondRound = harness.workspaceSnapshot();
+  expect(afterSecondRound.candidates).toHaveLength(4);
+  expect(afterSecondRound.candidates.filter((candidate) => firstRoundIds.includes(candidate.id))).toEqual(afterFirstRound.candidates);
+  expect(afterSecondRound.candidates.filter((candidate) => !firstRoundIds.includes(candidate.id)).map((candidate) => candidate.recommendation.round)).toEqual([2, 2]);
+  expect(new Set(afterSecondRound.evidence.map((evidence) => evidence.id)).size).toBe(afterSecondRound.evidence.length);
+  expect(Number(afterSecondRound.workspaceCursor) - firstCursor).toBe(2);
+  await expect(page.getByRole("heading", { name: "海景行旅" })).toHaveCount(2);
+  await expect(page.getByRole("heading", { name: "湾畔酒店" })).toHaveCount(2);
+});
+
 test("a multi-city trip binds the exact selected segment into the disclosure and execute request", async ({ page }) => {
   const { buildResearchDisclosure, buildResearchTargetScopes, computeDisclosureFingerprint } = await loadDecisionResearchContracts();
   const harness = new DecisionResearchHarness(page);
@@ -261,7 +289,6 @@ test("a blocked external source exposes only the hostname and a fixed skip actio
     resumeAction: "skip_blocked_source",
   }]);
   expect(harness.count("workspace.command")).toBe(2);
-  expect(harness.count("bridge.claim")).toBe(2);
   expect(harness.inputs("bridge.claim")).toEqual([
     { agentRunId: "agent-run-e2e-1" },
     { agentRunId: "agent-run-e2e-2" },
@@ -479,6 +506,7 @@ test("the admin confirms the Codex scope and completes the signed local Bridge c
     });
     expect(consoleMessages.join("\n")).not.toContain(pairingCode);
   } finally {
+    if (!page.isClosed()) await page.goto("about:blank");
     await bridge.close();
   }
 });
@@ -522,6 +550,7 @@ test("a mismatched Origin cannot prepare or create an Agent authorization", asyn
     expect(prepareCalls).toBe(0);
     expect(createCalls).toBe(0);
   } finally {
+    if (!page.isClosed()) await page.goto("about:blank");
     await bridge.close();
   }
 });
