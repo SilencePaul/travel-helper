@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 
 import { RECONCILIATION_STATE_FIELDS } from "./research-state-store.mjs";
@@ -50,6 +51,19 @@ function exactKeys(value, keys) {
   return plainObject(value)
     && Reflect.ownKeys(value).length === keys.length
     && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function preparedCapabilityIdentity(value) {
+  const key = plainObject(value?.publicKeyJwk) ? value.publicKeyJwk : {};
+  const publicFields = [
+    key.kty,
+    key.crv,
+    key.x,
+    key.y,
+    value?.pairingCodeHash,
+    value?.pairingCodeFingerprint,
+  ].map((field) => typeof field === "string" ? field : null);
+  return createHash("sha256").update(JSON.stringify(publicFields)).digest("base64url");
 }
 
 function opaqueIdentifier(value) {
@@ -195,6 +209,7 @@ export class TravelResearchService {
   #claimHandoffLease;
   #reconciliationRecord;
   #preparedTripId;
+  #preparedCapabilityIdentity;
   #restored = false;
   #cancelRequested = false;
   #lastSeenTime;
@@ -429,7 +444,13 @@ export class TravelResearchService {
   prepare(tripId) {
     if (!opaqueIdentifier(tripId)) throw codedError("CODEX_RESEARCH_FAILED");
     const prepared = this.#transport.prepare();
+    const capabilityIdentity = preparedCapabilityIdentity(prepared);
+    if (this.#preparedTripId !== undefined && this.#preparedTripId !== tripId
+      && this.#preparedCapabilityIdentity === capabilityIdentity) {
+      throw codedError("CODEX_RESEARCH_FAILED");
+    }
     this.#preparedTripId = tripId;
+    this.#preparedCapabilityIdentity = capabilityIdentity;
     return prepared;
   }
 
@@ -1201,7 +1222,11 @@ export class TravelResearchService {
     }
     if (action === "revokeAgentRunSelf" && !this.#task.selfRevokeReconciling) {
       this.#task.selfRevokeReconciling = true;
-      if (this.#status.phase !== "idle") {
+      if (this.#status.phase !== "idle"
+        && this.#status.tripId === this.#task.tripId
+        && this.#status.researchTaskId === this.#task.researchTaskId
+        && this.#status.agentRunId === this.#task.agentRunId
+        && this.#status.operationId === this.#task.operationId) {
         this.#status = safeResearchStatus({
           ...this.#status,
           updatedAt: this.#now(),

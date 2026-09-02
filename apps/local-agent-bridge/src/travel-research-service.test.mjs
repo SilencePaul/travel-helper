@@ -241,6 +241,8 @@ function fakeStore(events, initialState, options = {}) {
 
 function fakeTransport(events, context, options = {}) {
   let claimed;
+  let preparedMaterial;
+  let preparationGeneration = 0;
   let contextAttempts = 0;
   let submitAttempts = 0;
   let revokeAttempts = 0;
@@ -276,10 +278,15 @@ function fakeTransport(events, context, options = {}) {
       throw Object.assign(new Error("inactive"), { code: "AGENT_RUN_INACTIVE" });
     }
     claimed = undefined;
+    preparedMaterial = undefined;
     return { ok: true };
   };
   return {
-    prepare() { events.push("transport.prepare"); return { publicKeyJwk: { kty: "EC" } }; },
+    prepare() {
+      events.push("transport.prepare");
+      preparedMaterial ??= { publicKeyJwk: { kty: "EC", x: `generation-${++preparationGeneration}` } };
+      return structuredClone(preparedMaterial);
+    },
     async claim(agentRunId) {
       events.push(`transport.claim:${agentRunId}`);
       claimed = options.clearClaimAfterClaim ? undefined : {
@@ -293,11 +300,13 @@ function fakeTransport(events, context, options = {}) {
     releaseUnboundClaim(agentRunId) {
       if (claimed?.agentRunId !== agentRunId) return false;
       claimed = undefined;
+      preparedMaterial = undefined;
       return true;
     },
     expireUnboundClaim(agentRunId) {
       if (claimed?.agentRunId !== agentRunId) return false;
       claimed = undefined;
+      preparedMaterial = undefined;
       return true;
     },
     async getDecisionContext() {
@@ -329,7 +338,10 @@ function fakeTransport(events, context, options = {}) {
     prepareRevokeSelf,
     discardPreparedRevokeSelf(snapshot) {
       events.push("transport.discardPreparedRevokeSelf");
-      return snapshot?.agentRunId === claimed?.agentRunId;
+      if (snapshot?.agentRunId !== claimed?.agentRunId) return false;
+      claimed = undefined;
+      preparedMaterial = undefined;
+      return true;
     },
     reconcileRevokeSelf,
     async revokeSelf() { return reconcileRevokeSelf(prepareRevokeSelf()); },
@@ -694,6 +706,65 @@ test("a failed prepare for another trip cannot replace the trip bound to the cla
 
   assert.equal(result.phase, "completed");
   assert.equal(harness.runner.createCount, 1);
+});
+
+test("a reused unclaimed capability cannot move from its prepared trip to another trip", async () => {
+  const actions = [];
+  const harness = createHarness({
+    scripts: [{ codexThreadId: "thread-prepare-capability", output: completedOutput(), activeDurationMs: 10 }],
+    transportFactory(events, runtimeClock) {
+      const runtime = new LocalAgentBridgeRuntime({
+        agentEndpoint: "https://api.public.org/api/agent",
+        now: runtimeClock,
+        fetch: async (_url, init) => {
+          const body = JSON.parse(init.body);
+          actions.push(body.action);
+          if (body.action === "claimAgentRun") {
+            return Response.json({ ok: true, data: {
+              agentRunId: body.agentRunId,
+              claimedAt: "2026-09-01T00:00:00.000Z",
+              expiresAt: "2026-09-01T00:15:00.000Z",
+              nextSequence: 1,
+            } });
+          }
+          if (body.action === "getDecisionContext") {
+            return Response.json({ ok: true, action: body.action, data: contextFixture() });
+          }
+          if (body.action === "submitProposalBatch") {
+            return Response.json({ ok: true, action: body.action, data: candidateBatchData() });
+          }
+          assert.equal(body.action, "revokeAgentRunSelf");
+          return Response.json({ ok: true, action: body.action, data: {
+            agentRunId: body.agentRunId,
+            revokedAt: runtimeClock().toISOString(),
+          } });
+        },
+      });
+      const release = runtime.releaseUnboundClaim.bind(runtime);
+      runtime.releaseUnboundClaim = (agentRunId) => {
+        events.push("transport.releaseUnboundClaim");
+        return release(agentRunId);
+      };
+      return runtime;
+    },
+  });
+  const request = await targetRequest();
+  const material = harness.service.prepare(request.tripId);
+
+  assert.throws(() => harness.service.prepare("trip-other"), { code: "CODEX_RESEARCH_FAILED" });
+  assert.deepEqual(harness.transport.prepare(), material);
+  await harness.service.claim(request.agentRunId);
+  const result = await harness.service.executeTravelResearch(request);
+
+  assert.equal(result.phase, "completed");
+  assert.equal(harness.runner.createCount, 1);
+  assert.equal(harness.events.includes("transport.releaseUnboundClaim"), false);
+  assert.deepEqual(actions, [
+    "claimAgentRun",
+    "getDecisionContext",
+    "submitProposalBatch",
+    "revokeAgentRunSelf",
+  ]);
 });
 
 test("a real runtime releases an unbound claim when execute fails before creating a task", async () => {
@@ -3148,6 +3219,8 @@ test("an identical projection from another trip cannot resume or replace the bou
   assert.equal(harness.runner.createCount, 0);
   assert.equal(harness.transport.submittedPayloads.length, 0);
   assert.deepEqual(harness.store.state, recovered);
+  assert.equal(harness.transport.claimedRun, undefined);
+  assert.equal(harness.transport.prepare().publicKeyJwk.x, "generation-2");
 
   harness.service.prepare("trip-private");
   await harness.service.claim("agent-run-trip-owner");
