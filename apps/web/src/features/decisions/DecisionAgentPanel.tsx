@@ -36,6 +36,7 @@ type Operation = "idle" | "restoring" | "preparing" | "starting" | "resuming" | 
 type CreateAgentRunCommand = Extract<DecisionCommand, { action: "createAgentRun" }>;
 type AttemptStage = "create" | "claim" | "execute" | "resume";
 type PendingCloudStage = "create" | "claimed" | "bridgeOperationStarted";
+type PendingClaimState = "notStarted" | "uncertain" | "confirmed";
 type PendingBridgeRequest =
   | { operation: "execute"; input: ExecuteTravelResearchInput }
   | { operation: "resume"; input: ResumeTravelResearchInput };
@@ -54,6 +55,7 @@ type BridgeFailureReconciliation =
 type PendingCloudAttempt = {
   kind: "start" | "resume";
   stage: PendingCloudStage;
+  claimState: PendingClaimState;
   repository: DecisionWorkspaceRepository;
   bridge: LocalAgentBridge;
   tripId: string;
@@ -81,14 +83,19 @@ type AttachedCloudRun = {
   statusPromise?: Promise<AgentRun>;
   reconcilePromise?: Promise<boolean>;
 };
-type LifecycleContext = { tripSafetyKey: string; bridge?: LocalAgentBridge };
+type LifecycleContext = { tripSafetyKey: string; bridge?: LocalAgentBridge; repository: DecisionWorkspaceRepository };
 type TripCleanupTransition = {
   lifecycle: number;
+  controller: AbortController;
+  sourceTripSafetyKey: string;
   bridge: LocalAgentBridge;
+  repository: DecisionWorkspaceRepository;
   status: ResearchStatus;
   pending?: PendingCloudAttempt;
   attached?: AttachedCloudRun;
+  targetTripSafetyKey: string;
   targetBridge?: LocalAgentBridge;
+  targetRepository: DecisionWorkspaceRepository;
   targetScopeId?: string;
   cleanupPromise?: Promise<ResearchStatus | undefined>;
 };
@@ -348,6 +355,26 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       return await attempt.createPromise;
     } finally {
       attempt.createPromise = undefined;
+    }
+  }, []);
+
+  const claimPendingAttempt = useCallback(async (attempt: PendingCloudAttempt, signal: AbortSignal) => {
+    if (!attempt.agentRunId) throw new Error("AGENT_RUN_NOT_READY");
+    if (attempt.claimState === "confirmed") return;
+    for (let replay = 0; replay < 2; replay += 1) {
+      try {
+        await attempt.bridge.claim(attempt.agentRunId, { signal });
+        attempt.claimState = "confirmed";
+        return;
+      } catch (error) {
+        if (error instanceof LocalAgentBridgeError && error.code === "BRIDGE_UNAVAILABLE") {
+          attempt.claimState = "uncertain";
+          if (replay === 0 && !signal.aborted) continue;
+        } else {
+          attempt.claimState = "notStarted";
+        }
+        throw error;
+      }
     }
   }, []);
 
@@ -706,12 +733,23 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
   }, [category, safeTripProjection, targetScopeId, workspace]);
 
   useEffect(() => {
+    const activeTransition = tripCleanupTransitionRef.current;
+    if (activeTransition) {
+      lifecycleContextRef.current = { tripSafetyKey, bridge, repository };
+      activeTransition.targetTripSafetyKey = tripSafetyKey;
+      activeTransition.targetBridge = bridge;
+      activeTransition.targetRepository = repository;
+      activeTransition.targetScopeId = scopes.length === 1 ? scopes[0]?.targetScopeId : undefined;
+      setBridgeStatusReady(false);
+      setTripCleanupRequired(true);
+      return;
+    }
     const previousContext = lifecycleContextRef.current;
     const previousStatus = lastBridgeObservedStatusRef.current ?? statusRef.current;
     const previousPending = pendingAttemptRef.current;
     const previousAttached = attachedCloudRunRef.current;
     const tripChanged = Boolean(previousContext && previousContext.tripSafetyKey !== tripSafetyKey);
-    lifecycleContextRef.current = { tripSafetyKey, bridge };
+    lifecycleContextRef.current = { tripSafetyKey, bridge, repository };
     lifecycleRef.current += 1;
     const lifecycle = lifecycleRef.current;
     operationAbortRef.current?.abort();
@@ -726,11 +764,16 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       tripCleanupAbortRef.current = controller;
       const transition: TripCleanupTransition = {
         lifecycle,
+        controller,
+        sourceTripSafetyKey: previousContext.tripSafetyKey,
         bridge: previousContext.bridge,
+        repository: previousContext.repository,
         status: previousStatus,
         pending: previousPending,
         attached: previousAttached,
+        targetTripSafetyKey: tripSafetyKey,
         targetBridge: bridge,
+        targetRepository: repository,
         targetScopeId: scopes.length === 1 ? scopes[0]?.targetScopeId : undefined,
       };
       tripCleanupTransitionRef.current = transition;
@@ -758,6 +801,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       );
     }
     return () => {
+      if (tripCleanupTransitionRef.current) return;
       controller.abort();
       operationAbortRef.current?.abort();
       tripCleanupAbortRef.current?.abort();
@@ -768,6 +812,15 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       if (pending) settlePendingAfterLifecycle(pending);
     };
   }, [bridge, repository, scopes, settlePendingAfterLifecycle, tripSafetyKey]);
+
+  useEffect(() => () => {
+    tripCleanupTransitionRef.current?.controller.abort();
+    operationAbortRef.current?.abort();
+    tripCleanupAbortRef.current?.abort();
+    lifecycleRef.current += 1;
+    operationGenerationRef.current += 1;
+    inFlightRef.current = false;
+  }, []);
 
   useEffect(() => {
     if (!bridge || !bridgeStatusReady || !activePhases.has(researchStatus.phase)) return;
@@ -921,6 +974,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
     operationAbortRef.current?.abort();
     tripCleanupAbortRef.current?.abort();
     const controller = new AbortController();
+    transition.controller = controller;
     tripCleanupAbortRef.current = controller;
     operationGenerationRef.current += 1;
     const generation = operationGenerationRef.current;
@@ -1075,7 +1129,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
     let attempt = pendingAttemptRef.current;
     let stage: AttemptStage = "create";
     try {
-      if (attempt && (attempt.kind !== "start" || attempt.agentRunId
+      if (attempt && (attempt.kind !== "start" || (attempt.agentRunId && attempt.claimState !== "uncertain")
         || attempt.repository !== repository || attempt.bridge !== bridge || attempt.tripId !== trip.id
         || attempt.disclosureFingerprint !== disclosureFingerprint
         || attempt.targetCategory !== category || attempt.targetScopeId !== targetScopeId)) {
@@ -1103,6 +1157,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
         attempt = {
           kind: "start",
           stage: "create",
+          claimState: "notStarted",
           repository,
           bridge,
           tripId: trip.id,
@@ -1123,7 +1178,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       stage = "claim";
       attempt = { ...attempt, stage: "claimed" };
       pendingAttemptRef.current = attempt;
-      await attempt.bridge.claim(agentRunId, { signal: controller.signal });
+      await claimPendingAttempt(attempt, controller.signal);
       if (!isCurrent(generation, lifecycle)) {
         settlePendingAfterLifecycle(attempt);
         return;
@@ -1176,6 +1231,10 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
         setConfirmed(false);
         setPrepared(undefined);
         setOperation("idle");
+      } else if (stage === "claim" && attempt.claimState === "uncertain"
+        && error instanceof LocalAgentBridgeError && error.code === "BRIDGE_UNAVAILABLE") {
+        setOperation("error");
+        setOperationError("本机 claim 响应尚未确认；重试会继续同一云端授权，不会新建任务。");
       } else if (stage === "create") {
         if (attempt.createDefinitivelyFailed) clearPendingAttempt(attempt);
         setOperation("error");
@@ -1230,7 +1289,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
     let attempt = pendingAttemptRef.current;
     let stage: AttemptStage = "create";
     try {
-      if (attempt && (attempt.kind !== "resume" || attempt.agentRunId
+      if (attempt && (attempt.kind !== "resume" || (attempt.agentRunId && attempt.claimState !== "uncertain")
         || attempt.repository !== repository || attempt.bridge !== bridge || attempt.tripId !== trip.id
         || attempt.researchTaskId !== blocked.researchTaskId || attempt.resumeAction !== resumeAction)) {
         const settlement = await settlePendingAttempt(attempt);
@@ -1253,6 +1312,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
         attempt = {
           kind: "resume",
           stage: "create",
+          claimState: "notStarted",
           repository,
           bridge,
           tripId: trip.id,
@@ -1272,7 +1332,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       stage = "claim";
       attempt = { ...attempt, stage: "claimed" };
       pendingAttemptRef.current = attempt;
-      await attempt.bridge.claim(agentRunId, { signal: controller.signal });
+      await claimPendingAttempt(attempt, controller.signal);
       if (!isCurrent(generation, lifecycle)) {
         settlePendingAfterLifecycle(attempt);
         return;
@@ -1321,6 +1381,10 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
         setConfirmed(false);
         setPrepared(undefined);
         setOperation("idle");
+      } else if (stage === "claim" && attempt.claimState === "uncertain"
+        && error instanceof LocalAgentBridgeError && error.code === "BRIDGE_UNAVAILABLE") {
+        setOperation("error");
+        setOperationError("本机 claim 响应尚未确认；再次继续会重放同一授权，不会新建任务。");
       } else if (stage === "create") {
         if (attempt.createDefinitivelyFailed) clearPendingAttempt(attempt);
         setOperation("error");

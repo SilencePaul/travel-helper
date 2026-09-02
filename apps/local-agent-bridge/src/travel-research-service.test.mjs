@@ -134,6 +134,7 @@ function createControlledClock(start = "2026-09-01T00:00:00.000Z") {
   let time = Date.parse(start);
   let nextTimerId = 1;
   const timers = new Map();
+  const clearedTimers = [];
   const clock = () => new Date(time);
   clock.advance = (milliseconds) => { time += milliseconds; };
   clock.setTimeout = (callback, delay) => {
@@ -142,7 +143,11 @@ function createControlledClock(start = "2026-09-01T00:00:00.000Z") {
     timers.set(timerId, { callback, delay });
     return timerId;
   };
-  clock.clearTimeout = (timerId) => { timers.delete(timerId); };
+  clock.clearTimeout = (timerId) => {
+    const timer = timers.get(timerId);
+    if (timer) clearedTimers.push(timer);
+    timers.delete(timerId);
+  };
   clock.fireNext = () => {
     const next = [...timers.entries()].sort((left, right) => left[1].delay - right[1].delay)[0];
     if (!next) return false;
@@ -153,16 +158,24 @@ function createControlledClock(start = "2026-09-01T00:00:00.000Z") {
     return true;
   };
   clock.pendingTimers = () => timers.size;
+  clock.scheduledTimers = () => nextTimerId - 1;
   clock.nextDelay = () => [...timers.values()].sort((left, right) => left.delay - right.delay)[0]?.delay;
+  clock.fireLastCleared = () => {
+    const timer = clearedTimers.pop();
+    if (!timer) return false;
+    timer.callback();
+    return true;
+  };
   return clock;
 }
 
-function createAutoAdvanceClock(start = "2026-09-01T00:00:00.000Z") {
+function createAutoAdvanceClock(start = "2026-09-01T00:00:00.000Z", { parkedDelays = [] } = {}) {
   let time = Date.parse(start);
   const delays = [];
   const clock = () => new Date(time);
   clock.setTimeout = (callback, delay) => {
     const timer = { cancelled: false };
+    if (parkedDelays.includes(delay)) return timer;
     delays.push(delay);
     queueMicrotask(() => {
       if (timer.cancelled) return;
@@ -1209,6 +1222,99 @@ test("a different execute operation releases its newly claimed unbound runtime c
   ]);
 });
 
+test("an unbound successful claim has one bounded handoff lease that releases local capability", async () => {
+  const clock = createControlledClock();
+  const harness = createHarness({ clock });
+  const request = await targetRequest();
+  harness.service.prepare();
+
+  await harness.service.claim(request.agentRunId);
+  await harness.service.claim(request.agentRunId);
+
+  assert.equal(clock.scheduledTimers(), 1);
+  assert.equal(clock.pendingTimers(), 1);
+  assert.equal(clock.nextDelay() >= 5_000 && clock.nextDelay() <= 10_000, true);
+  assert.equal(clock.fireNext(), true);
+  assert.equal(harness.transport.claimedRun, undefined);
+  assert.doesNotThrow(() => harness.service.prepare());
+});
+
+test("a handoff lease fails safe when runtime refuses to release an uncertain claim", async () => {
+  const clock = createControlledClock();
+  const harness = createHarness({
+    clock,
+    transportFactory(events) {
+      const transport = fakeTransport(events, contextFixture());
+      transport.releaseUnboundClaim = () => false;
+      return transport;
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+
+  assert.equal(clock.fireNext(), true);
+
+  assert.equal(harness.transport.claimedRun.agentRunId, request.agentRunId);
+  assert.equal(clock.pendingTimers(), 0);
+});
+
+test("execute binds the claimed handoff before work and cancels its lease", async () => {
+  const clock = createControlledClock();
+  const harness = createHarness({
+    clock,
+    scripts: [{ codexThreadId: "thread-lease-execute", output: completedOutput(), activeDurationMs: 10 }],
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+  assert.equal(clock.pendingTimers(), 1);
+
+  const execution = harness.service.executeTravelResearch(request);
+
+  assert.equal(clock.pendingTimers(), 0);
+  assert.equal(clock.fireLastCleared(), true);
+  assert.equal(harness.transport.claimedRun.agentRunId, request.agentRunId);
+  assert.equal((await execution).phase, "completed");
+});
+
+test("resume binds the claimed handoff before restoring its fixed task", async () => {
+  const request = await targetRequest();
+  const recovered = {
+    researchTaskId: "research-task-lease-resume",
+    codexThreadId: "thread-lease-resume",
+    targetCategory: "hotel",
+    targetScopeId: request.targetScopeId,
+    disclosureFingerprint: request.disclosureFingerprint,
+    aliasSalt: "alias-salt-lease-resume",
+    blockedReason: "codex_auth_required",
+    blockedHostname: null,
+    activeRuntimeMs: 12_000,
+    phase: "needs_owner_action",
+    startedAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:01:00.000Z",
+  };
+  const clock = createControlledClock();
+  const harness = createHarness({
+    clock,
+    initialState: recovered,
+    scripts: [{ codexThreadId: recovered.codexThreadId, output: completedOutput(), activeDurationMs: 13_000 }],
+  });
+  assert.equal((await harness.service.getResearchStatus()).phase, "needs_owner_action");
+  harness.service.prepare();
+  await harness.service.claim("agent-run-lease-resume");
+  assert.equal(clock.pendingTimers(), 1);
+
+  const resumed = harness.service.resumeTravelResearch({
+    agentRunId: "agent-run-lease-resume",
+    researchTaskId: recovered.researchTaskId,
+    resumeAction: "retry_codex_auth",
+  });
+
+  assert.equal(clock.pendingTimers(), 0);
+  assert.equal((await resumed).phase, "completed");
+});
+
 test("concurrent resume reuses only the identical operation and rejects a different task", async () => {
   const request = await targetRequest();
   const recovered = {
@@ -1609,6 +1715,8 @@ test("resume rejects browser-controlled fields and supersedes changed context wi
     }),
     { code: "CODEX_RESEARCH_FAILED" },
   );
+  harness.service.prepare();
+  await harness.service.claim("agent-run-2");
   const status = await harness.service.resumeTravelResearch({
     agentRunId: "agent-run-2",
     researchTaskId: "research-task-1",
@@ -2407,7 +2515,7 @@ test("cleanup revoke remains available after cancellation exhausts the active re
 });
 
 test("permanently uncertain context uses capped exponential backoff and releases only after run expiry", async () => {
-  const clock = createAutoAdvanceClock();
+  const clock = createAutoAdvanceClock(undefined, { parkedDelays: [8_000] });
   let contextAttempts = 0;
   const harness = createHarness({
     clock,
@@ -2477,7 +2585,7 @@ test("an expired uncertain resume context releases the run without deleting bloc
     startedAt: "2026-09-01T00:00:00.000Z",
     updatedAt: "2026-09-01T00:01:00.000Z",
   };
-  const clock = createAutoAdvanceClock();
+  const clock = createAutoAdvanceClock(undefined, { parkedDelays: [8_000] });
   let contextAttempts = 0;
   const harness = createHarness({
     clock,

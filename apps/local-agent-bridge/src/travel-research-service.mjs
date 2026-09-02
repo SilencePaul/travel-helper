@@ -4,6 +4,7 @@ import { buildTravelResearchInput } from "./travel-research-input.mjs";
 import { validateTravelResearchOutput } from "./travel-research-output.mjs";
 
 const ACTIVE_BUDGET_MS = 10 * 60 * 1_000;
+const CLAIM_HANDOFF_LEASE_MS = 8_000;
 const CATEGORIES = new Set(["hotel", "restaurant", "attraction"]);
 const RESUME_ACTIONS = new Set(["retry_codex_auth", "skip_blocked_source"]);
 const SOURCE_BLOCK_REASONS = new Set([
@@ -162,6 +163,7 @@ export class TravelResearchService {
   #inflight;
   #operationKey;
   #operationAgentRunId;
+  #claimHandoffLease;
   #restored = false;
   #cancelRequested = false;
   #lastSeenTime;
@@ -346,7 +348,16 @@ export class TravelResearchService {
 
   async claim(agentRunId) {
     if (typeof agentRunId !== "string" || agentRunId.length === 0) throw codedError("AGENT_RUN_INACTIVE");
-    return this.#transport.claim(agentRunId);
+    try {
+      const claimed = await this.#transport.claim(agentRunId);
+      this.#startClaimHandoffLease(agentRunId);
+      return claimed;
+    } catch (error) {
+      if (error?.uncertain !== true && error?.code !== "AGENT_TRANSPORT_UNAVAILABLE") {
+        this.#clearClaimHandoffLease(agentRunId);
+      }
+      throw error;
+    }
   }
 
   releaseUnboundClaim(agentRunId) {
@@ -356,7 +367,41 @@ export class TravelResearchService {
 
   #releaseRejectedOperation(agentRunId) {
     if (agentRunId === this.#operationAgentRunId || agentRunId === this.#task?.agentRunId) return false;
+    this.#clearClaimHandoffLease(agentRunId);
     return this.#transport.releaseUnboundClaim(agentRunId);
+  }
+
+  #clearClaimHandoffLease(agentRunId) {
+    const lease = this.#claimHandoffLease;
+    if (!lease || lease.agentRunId !== agentRunId) return false;
+    if (lease.timer !== undefined) this.#clearTimer(lease.timer);
+    this.#claimHandoffLease = undefined;
+    return true;
+  }
+
+  #startClaimHandoffLease(agentRunId) {
+    if (this.#claimHandoffLease?.agentRunId === agentRunId) return;
+    if (this.#claimHandoffLease) this.#clearClaimHandoffLease(this.#claimHandoffLease.agentRunId);
+    const lease = { agentRunId, timer: undefined };
+    lease.timer = this.#setTimer(() => {
+      if (this.#claimHandoffLease !== lease) return;
+      lease.timer = undefined;
+      if (agentRunId === this.#operationAgentRunId || agentRunId === this.#task?.agentRunId) {
+        this.#claimHandoffLease = undefined;
+        return;
+      }
+      let released = false;
+      try {
+        released = this.#transport.releaseUnboundClaim(agentRunId) === true;
+      } catch { /* A failed lease release leaves the runtime capability fail-safe busy. */ }
+      if (released && this.#claimHandoffLease === lease) this.#claimHandoffLease = undefined;
+    }, CLAIM_HANDOFF_LEASE_MS);
+    lease.timer?.unref?.();
+    this.#claimHandoffLease = lease;
+  }
+
+  #bindClaimHandoff(agentRunId) {
+    this.#clearClaimHandoffLease(agentRunId);
   }
 
   executeTravelResearch(input) {
@@ -365,6 +410,7 @@ export class TravelResearchService {
       || !CATEGORIES.has(input.targetCategory)
       || typeof input.targetScopeId !== "string" || !/^scope_[a-f0-9]{64}$/u.test(input.targetScopeId)
       || typeof input.disclosureFingerprint !== "string" || !/^[a-f0-9]{64}$/u.test(input.disclosureFingerprint)) {
+      if (typeof input?.agentRunId === "string") this.#releaseRejectedOperation(input.agentRunId);
       return Promise.reject(codedError("CODEX_RESEARCH_FAILED"));
     }
     const key = `execute:${JSON.stringify(input)}`;
@@ -381,6 +427,7 @@ export class TravelResearchService {
       this.#releaseRejectedOperation(input.agentRunId);
       return Promise.reject(codedError("CODEX_RESEARCH_FAILED"));
     }
+    this.#bindClaimHandoff(input.agentRunId);
     let operation;
     operation = this.#execute(input, key).finally(() => {
       if (this.#inflight === operation) {
@@ -492,6 +539,7 @@ export class TravelResearchService {
       || typeof input.agentRunId !== "string" || input.agentRunId.length === 0
       || typeof input.researchTaskId !== "string" || input.researchTaskId.length === 0
       || !RESUME_ACTIONS.has(input.resumeAction)) {
+      if (typeof input?.agentRunId === "string") this.#releaseRejectedOperation(input.agentRunId);
       return Promise.reject(codedError("CODEX_RESEARCH_FAILED"));
     }
     const operationKey = `resume:${JSON.stringify(input)}`;
@@ -511,6 +559,7 @@ export class TravelResearchService {
       this.#releaseRejectedOperation(input.agentRunId);
       return Promise.reject(codedError("CODEX_RESEARCH_FAILED"));
     }
+    this.#bindClaimHandoff(input.agentRunId);
     let operation;
     operation = this.#resume(input, operationKey).finally(() => {
       if (this.#inflight === operation) {
