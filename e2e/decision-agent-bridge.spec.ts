@@ -2,10 +2,12 @@ import { expect, test } from "@playwright/test";
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import seed from "../content/trip.seed.json";
 import { DecisionResearchHarness } from "./fixtures/decisionResearchHarness";
 
 type RuntimeModule = typeof import("../apps/local-agent-bridge/src/runtime.mjs");
 type ServerModule = typeof import("../apps/local-agent-bridge/src/server.mjs");
+type DecisionResearchModule = typeof import("../packages/contracts/src/decision-research.mjs");
 
 async function loadBridgeModules(): Promise<RuntimeModule & ServerModule> {
   const runtimeUrl = pathToFileURL(resolve(process.cwd(), "apps/local-agent-bridge/src/runtime.mjs")).href;
@@ -15,6 +17,11 @@ async function loadBridgeModules(): Promise<RuntimeModule & ServerModule> {
     import(serverUrl) as Promise<ServerModule>,
   ]);
   return { ...runtime, ...server };
+}
+
+async function loadDecisionResearchContracts(): Promise<DecisionResearchModule> {
+  const contractsUrl = pathToFileURL(resolve(process.cwd(), "packages/contracts/src/decision-research.mjs")).href;
+  return import(contractsUrl) as Promise<DecisionResearchModule>;
 }
 
 async function openDecisionResearch(page: import("@playwright/test").Page, role: "admin" | "member" = "admin") {
@@ -40,19 +47,25 @@ test("the dev-only research fixture creates only after confirmation and atomical
   expect(harness.count("workspace.command")).toBe(0);
   await page.getByRole("button", { name: `开始研究${categoryName}候选` }).click();
   await expect.poll(() => harness.count("bridge.execute")).toBe(1);
+  await expect(page.getByText("正在请 Codex 搜索候选与可核验来源")).toBeVisible();
+  const statusReadsBeforeCompletion = harness.count("bridge.status");
+  const workspaceRefreshesBeforeCompletion = harness.count("workspace.refresh");
   harness.complete();
 
+  await expect.poll(() => harness.count("bridge.status")).toBeGreaterThan(statusReadsBeforeCompletion);
+  await expect.poll(() => harness.count("workspace.refresh")).toBeGreaterThan(workspaceRefreshesBeforeCompletion);
   await expect(page.getByRole("heading", { name: "海景行旅" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "湾畔酒店" })).toBeVisible();
-  await expect(page.getByText("码头茶餐厅")).toHaveCount(0);
-  await expect(page.getByText("海港博物馆")).toHaveCount(0);
+  for (const name of ["码头茶餐厅", "巷里小馆", "海港博物馆", "山顶花园"]) {
+    await expect(page.getByRole("heading", { name })).toHaveCount(0);
+  }
   expect(harness.count("workspace.command")).toBe(1);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
 for (const scenario of [
-  { category: "restaurant" as const, categoryName: "餐厅", expected: ["码头茶餐厅", "巷里小馆"], absent: ["海景行旅", "海港博物馆"] },
-  { category: "attraction" as const, categoryName: "景点", expected: ["海港博物馆", "山顶花园"], absent: ["海景行旅", "码头茶餐厅"] },
+  { category: "restaurant" as const, categoryName: "餐厅", expected: ["码头茶餐厅", "巷里小馆"], absent: ["海景行旅", "湾畔酒店", "海港博物馆", "山顶花园"] },
+  { category: "attraction" as const, categoryName: "景点", expected: ["海港博物馆", "山顶花园"], absent: ["海景行旅", "湾畔酒店", "码头茶餐厅", "巷里小馆"] },
 ]) {
   test(`${scenario.categoryName} research never mixes candidate categories`, async ({ page }) => {
     const harness = new DecisionResearchHarness(page);
@@ -68,16 +81,62 @@ for (const scenario of [
   });
 }
 
+test("completing a new category preserves existing shared decisions", async ({ page }) => {
+  const harness = new DecisionResearchHarness(page, { existingSharedDecision: true });
+  await harness.install();
+  await openDecisionResearch(page);
+  const before = harness.workspaceSnapshot();
+  await expect(page.getByRole("heading", { name: "海景行旅" })).toBeVisible();
+  await selectResearchTarget(page, "restaurant");
+  await page.getByRole("button", { name: "开始研究餐厅候选" }).click();
+  await expect.poll(() => harness.count("bridge.execute")).toBe(1);
+
+  harness.complete();
+  expect(harness.runSnapshot("agent-run-e2e-1")?.status).toBe("revoked");
+
+  await expect(page.getByRole("heading", { name: "码头茶餐厅" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "海景行旅" })).toBeVisible();
+  const after = harness.workspaceSnapshot();
+  const existingCandidateIds = new Set(before.candidates.map((candidate) => candidate.id));
+  expect(after.preferences).toEqual(before.preferences);
+  expect(after.summary).toEqual(before.summary);
+  expect(after.placements).toEqual(before.placements);
+  expect(after.feedback).toEqual(before.feedback);
+  expect(after.confirmations).toEqual(before.confirmations);
+  expect(after.candidates.filter((candidate) => existingCandidateIds.has(candidate.id))).toEqual(before.candidates);
+  expect(after.evidence.filter((evidence) => existingCandidateIds.has(evidence.candidateId))).toEqual(before.evidence);
+});
+
 test("a multi-city trip binds the exact selected segment into the disclosure and execute request", async ({ page }) => {
+  const { buildResearchDisclosure, buildResearchTargetScopes, computeDisclosureFingerprint } = await loadDecisionResearchContracts();
   const harness = new DecisionResearchHarness(page);
   await harness.install();
   await openDecisionResearch(page);
   await selectResearchTarget(page, "hotel");
 
+  const trip = {
+    version: seed.version,
+    days: seed.days.map(({ id, date, city }) => ({ id, date, city })),
+    travelerNames: seed.travelers.map(({ name }) => name),
+    travelerCount: seed.travelers.length,
+  };
+  const hongKongScope = buildResearchTargetScopes(trip).find((scope) => scope.city === "香港");
+  expect(hongKongScope).toBeDefined();
+  const disclosure = await buildResearchDisclosure(
+    { trip, workspace: harness.workspaceSnapshot() },
+    { category: "hotel", targetScopeId: hongKongScope!.targetScopeId },
+  );
+  const disclosureFingerprint = await computeDisclosureFingerprint(disclosure);
+
   await expect(page.getByText("香港 · 2026-10-04 至 2026-10-05 · 2 人")).toBeVisible();
   await page.getByRole("button", { name: "开始研究酒店候选" }).click();
   await expect.poll(() => harness.count("bridge.execute")).toBe(1);
-  expect(harness.inputs("bridge.execute")[0]).toMatchObject({ targetCategory: "hotel", targetScopeId: expect.stringMatching(/^scope_[a-f0-9]{64}$/u) });
+  expect(harness.inputs("bridge.execute")).toEqual([{
+    agentRunId: "agent-run-e2e-1",
+    targetCategory: "hotel",
+    targetScopeId: hongKongScope!.targetScopeId,
+    disclosureFingerprint,
+  }]);
   harness.complete();
 });
 
@@ -94,6 +153,23 @@ test("a disclosure change after confirmation clears consent and cannot create a 
   await expect(page.getByRole("button", { name: "准备本机 Codex" })).toBeVisible();
   expect(harness.count("workspace.command")).toBe(0);
   expect(harness.count("bridge.execute")).toBe(0);
+});
+
+test("unmounting the Agent panel aborts an in-flight Bridge request without leaving pending work", async ({ page }) => {
+  const harness = new DecisionResearchHarness(page, { holdPrepare: true });
+  await harness.install();
+  await openDecisionResearch(page);
+  await page.getByRole("radio", { name: /香港 2026-10-04/ }).check();
+  await page.getByRole("radio", { name: /酒店/ }).check();
+  await page.getByRole("button", { name: "准备本机 Codex" }).click();
+  await expect.poll(() => harness.count("bridge.prepare")).toBe(1);
+
+  await page.getByRole("button", { name: /返回行程/ }).click();
+
+  await expect.poll(() => harness.count("bridge.abort")).toBe(1);
+  expect(harness.calls.find((call) => call.operation === "bridge.prepare")?.request).toMatchObject({ aborted: false });
+  expect(harness.count("bridge.prepare")).toBe(harness.count("bridge.abort"));
+  await expect.poll(() => harness.pendingRequestCount()).toBe(0);
 });
 
 test("a regular member sees only the static notice and makes zero local Bridge calls", async ({ page }) => {
@@ -118,8 +194,14 @@ test("an auth blocker creates a new run and resumes the same local research task
   await expect(page.getByRole("alert")).toContainText("请在 ChatGPT/Codex 中恢复登录");
   await page.getByRole("button", { name: "已恢复登录，继续研究" }).click();
   await expect.poll(() => harness.count("bridge.resume")).toBe(1);
-  expect(harness.inputs("bridge.resume")[0]).toMatchObject({ researchTaskId: "research-task-e2e", resumeAction: "retry_codex_auth" });
+  expect(harness.inputs("bridge.execute")).toEqual([expect.objectContaining({ agentRunId: "agent-run-e2e-1" })]);
+  expect(harness.inputs("bridge.resume")).toEqual([{
+    agentRunId: "agent-run-e2e-2",
+    researchTaskId: "research-task-e2e",
+    resumeAction: "retry_codex_auth",
+  }]);
   expect(harness.count("workspace.command")).toBe(2);
+  expect(harness.count("bridge.claim")).toBe(2);
   expect(harness.inputs("bridge.claim")).toEqual([
     { agentRunId: "agent-run-e2e-1" },
     { agentRunId: "agent-run-e2e-2" },
@@ -139,10 +221,27 @@ test("a blocked external source exposes only the hostname and a fixed skip actio
 
   await expect(page.getByRole("alert")).toContainText("booking.example.com");
   await expect(page.getByRole("button", { name: "跳过该来源并继续" })).toBeVisible();
-  await expect(page.getByLabel(/Cookie|验证码|密码/)).toHaveCount(0);
+  const agentPanel = page.getByRole("region", { name: "Codex 旅行研究" });
+  await expect(agentPanel.getByRole("textbox")).toHaveCount(0);
+  await expect(agentPanel.getByRole("searchbox")).toHaveCount(0);
+  expect(await agentPanel.evaluate((element) => ({
+    passwordInputs: Array.from(element.getElementsByTagName("input")).filter((input) => input.type === "password").length,
+    editableElements: Array.from(element.getElementsByTagName("*")).filter((child) => (child as HTMLElement).isContentEditable).length,
+  }))).toEqual({ passwordInputs: 0, editableElements: 0 });
   await page.getByRole("button", { name: "跳过该来源并继续" }).click();
   await expect.poll(() => harness.count("bridge.resume")).toBe(1);
-  expect(harness.inputs("bridge.resume")[0]).toMatchObject({ researchTaskId: "research-task-e2e", resumeAction: "skip_blocked_source" });
+  expect(harness.inputs("bridge.execute")).toEqual([expect.objectContaining({ agentRunId: "agent-run-e2e-1" })]);
+  expect(harness.inputs("bridge.resume")).toEqual([{
+    agentRunId: "agent-run-e2e-2",
+    researchTaskId: "research-task-e2e",
+    resumeAction: "skip_blocked_source",
+  }]);
+  expect(harness.count("workspace.command")).toBe(2);
+  expect(harness.count("bridge.claim")).toBe(2);
+  expect(harness.inputs("bridge.claim")).toEqual([
+    { agentRunId: "agent-run-e2e-1" },
+    { agentRunId: "agent-run-e2e-2" },
+  ]);
   harness.complete();
   await expect(page.getByRole("heading", { name: "码头茶餐厅" })).toBeVisible();
 });
@@ -177,6 +276,32 @@ test("repeated start activation is idempotent", async ({ page }) => {
   harness.beginResearching();
 });
 
+test("the fixture rejects repeated claims and mismatched task controls with safe errors", async ({ page }) => {
+  const harness = new DecisionResearchHarness(page);
+  await harness.install();
+  await openDecisionResearch(page);
+  await selectResearchTarget(page, "hotel");
+  await page.getByRole("button", { name: "开始研究酒店候选" }).click();
+  await expect.poll(() => harness.count("bridge.execute")).toBe(1);
+
+  const results = await page.evaluate(async () => {
+    const coordinator = (window as typeof window & {
+      __decisionResearchHarnessCall: (call: unknown) => Promise<unknown>;
+    }).__decisionResearchHarnessCall;
+    return Promise.all([
+      coordinator({ operation: "bridge.claim", input: { agentRunId: "agent-run-e2e-1" } }),
+      coordinator({ operation: "bridge.resume", input: { agentRunId: "agent-run-e2e-1", researchTaskId: "wrong-task", resumeAction: "retry_codex_auth" } }),
+      coordinator({ operation: "bridge.cancel", input: { researchTaskId: "wrong-task" } }),
+    ]);
+  });
+
+  expect(results).toEqual([
+    { ok: false, error: "AGENT_RUN_INACTIVE" },
+    { ok: false, error: "AGENT_RUN_INACTIVE" },
+    { ok: false, error: "AGENT_RUN_INACTIVE" },
+  ]);
+});
+
 test("stopping an active research task leaves no generated candidate", async ({ page }) => {
   const harness = new DecisionResearchHarness(page);
   await harness.install();
@@ -190,6 +315,7 @@ test("stopping an active research task leaves no generated candidate", async ({ 
   await expect(page.getByText("Codex 研究已停止")).toBeVisible();
   await expect(page.getByRole("heading", { name: "海景行旅" })).toHaveCount(0);
   expect(harness.count("bridge.cancel")).toBe(1);
+  expect(harness.inputs("bridge.cancel")).toEqual([{ researchTaskId: "research-task-e2e" }]);
 });
 
 test("Codex unavailability keeps existing shared decisions visible", async ({ page }) => {

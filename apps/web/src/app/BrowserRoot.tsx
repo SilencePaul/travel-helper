@@ -35,8 +35,10 @@ type TestDecisionResearchCall = {
     | "bridge.execute"
     | "bridge.status"
     | "bridge.resume"
-    | "bridge.cancel";
+    | "bridge.cancel"
+    | "bridge.abort";
   input?: unknown;
+  request?: { requestId: string; aborted: boolean };
 };
 type TestDecisionResearchResult = { ok: true; data: unknown } | { ok: false; error: string };
 type TestDecisionResearchCoordinator = (call: TestDecisionResearchCall) => Promise<TestDecisionResearchResult>;
@@ -275,13 +277,29 @@ function createBrowserTestAgentBridge(): LocalAgentBridge | undefined {
   if (new URLSearchParams(window.location.search).get("__testDecisionAgentRole") === "member") return undefined;
   const coordinator = browserTestDecisionCoordinator();
   if (!coordinator) return undefined;
+  let requestSequence = 0;
+  const callBridge = <T,>(operation: Extract<TestDecisionResearchCall["operation"], `bridge.${string}`>, input: unknown, options?: { signal?: AbortSignal }) => {
+    const requestId = `test-bridge-request-${++requestSequence}`;
+    const signal = options?.signal;
+    const request = callTestDecisionBridge<T>(coordinator, {
+      operation,
+      input,
+      request: { requestId, aborted: signal?.aborted ?? false },
+    });
+    const abort = () => {
+      void callTestDecisionCoordinator(coordinator, { operation: "bridge.abort", input: { requestId } }).catch(() => undefined);
+    };
+    if (signal?.aborted) abort();
+    else signal?.addEventListener("abort", abort, { once: true });
+    return request.finally(() => signal?.removeEventListener("abort", abort));
+  };
   return {
-    prepare: () => callTestDecisionBridge(coordinator, { operation: "bridge.prepare" }),
-    claim: (agentRunId) => callTestDecisionBridge(coordinator, { operation: "bridge.claim", input: { agentRunId } }),
-    executeTravelResearch: (input) => callTestDecisionBridge(coordinator, { operation: "bridge.execute", input }),
-    getResearchStatus: () => callTestDecisionBridge(coordinator, { operation: "bridge.status" }),
-    resumeTravelResearch: (input) => callTestDecisionBridge(coordinator, { operation: "bridge.resume", input }),
-    cancelResearch: (input) => callTestDecisionBridge(coordinator, { operation: "bridge.cancel", input }),
+    prepare: (options) => callBridge("bridge.prepare", undefined, options),
+    claim: (agentRunId, options) => callBridge("bridge.claim", { agentRunId }, options),
+    executeTravelResearch: (input, options) => callBridge("bridge.execute", input, options),
+    getResearchStatus: (options) => callBridge("bridge.status", undefined, options),
+    resumeTravelResearch: (input, options) => callBridge("bridge.resume", input, options),
+    cancelResearch: (input, options) => callBridge("bridge.cancel", input, options),
   };
 }
 
