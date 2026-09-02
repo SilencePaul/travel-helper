@@ -8,6 +8,7 @@ import { buildConnectionUrl, startLocalAgentBridge } from "./server.mjs";
 const APP_ORIGIN = "https://trip.example";
 const STATUS = Object.freeze({
   phase: "needs_owner_action",
+  tripId: "trip-1",
   researchTaskId: "research-task-1",
   agentRunId: "agent-run-1",
   operationId: "operation-1",
@@ -24,7 +25,7 @@ function rawRequest(port, {
   host = `127.0.0.1:${port}`,
   origin = APP_ORIGIN,
   contentType = method === "POST" ? "application/json" : undefined,
-  body = method === "POST" ? "{}" : "",
+  body = method === "POST" ? JSON.stringify({ tripId: "trip-1" }) : "",
   headers = {},
   declareLength = true,
 } = {}) {
@@ -135,8 +136,8 @@ function beginClaimRequest(port, agentRunId) {
 
 function fakeRuntime(events = []) {
   return {
-    prepare() {
-      events.push(["prepare"]);
+    prepare(tripId) {
+      events.push(["prepare", tripId]);
       return {
         publicKeyJwk: { kty: "EC", crv: "P-256", x: "x", y: "y", leaked: "private" },
         pairingCodeHash: "x".repeat(43),
@@ -155,8 +156,8 @@ function fakeRuntime(events = []) {
       events.push(["execute", input]);
       return { ...STATUS, secretLog: "/Users/owner/project/.env" };
     },
-    async getResearchStatus() {
-      events.push(["status"]);
+    async getResearchStatus(tripId) {
+      events.push(["status", tripId]);
       return { ...STATUS, stderr: "Bearer secret" };
     },
     async resumeTravelResearch(input) {
@@ -167,6 +168,7 @@ function fakeRuntime(events = []) {
       events.push(["cancel", input]);
       return {
         phase: "cancelled",
+        tripId: input.tripId,
         researchTaskId: input.researchTaskId,
         agentRunId: input.agentRunId,
         operationId: input.operationId,
@@ -222,7 +224,7 @@ test("an aborted claim response releases the newly claimed local capability befo
   ]);
 
   assert.equal(releaseCalls, 1);
-  const prepared = await rawRequest(bridge.port, { path: "/v1/agent-runs/prepare", body: "{}" });
+  const prepared = await rawRequest(bridge.port, { path: "/v1/agent-runs/prepare" });
   assert.equal(prepared.status, 200);
 });
 
@@ -291,23 +293,26 @@ test("the fixed route matrix dispatches only exact methods and strictly projects
   context.after(() => bridge.close());
 
   const routes = [
-    ["POST", "/v1/agent-runs/prepare", {}, ["prepare"]],
+    ["POST", "/v1/agent-runs/prepare", { tripId: "trip-1" }, ["prepare", "trip-1"]],
     ["POST", "/v1/agent-runs/claim", { agentRunId: "agent-run-1" }, ["claim", "agent-run-1"]],
     ["POST", "/v1/agent-runs/execute-travel-research", {
+      tripId: "trip-1",
       agentRunId: "agent-run-1",
       operationId: "operation-1",
       targetCategory: "hotel",
       targetScopeId: `scope_${"a".repeat(64)}`,
       disclosureFingerprint: "b".repeat(64),
     }, ["execute"]],
-    ["GET", "/v1/agent-runs/research-status", undefined, ["status"]],
+    ["POST", "/v1/agent-runs/research-status", { tripId: "trip-1" }, ["status", "trip-1"]],
     ["POST", "/v1/agent-runs/resume-travel-research", {
+      tripId: "trip-1",
       agentRunId: "agent-run-2",
       operationId: "operation-2",
       researchTaskId: "research-task-1",
       resumeAction: "skip_blocked_source",
     }, ["resume"]],
     ["POST", "/v1/agent-runs/cancel-research", {
+      tripId: "trip-1",
       researchTaskId: "research-task-1",
       agentRunId: "agent-run-1",
       operationId: "operation-1",
@@ -335,7 +340,7 @@ test("the fixed route matrix dispatches only exact methods and strictly projects
   assert.deepEqual(JSON.parse((await rawRequest(bridge.port, {
     method: "POST",
     path: "/v1/agent-runs/prepare",
-    body: "{}",
+    body: JSON.stringify({ tripId: "trip-1" }),
   })).body), {
     ok: true,
     data: {
@@ -364,8 +369,8 @@ test("each fixed path accepts only its exact JSON shape and status rejects body 
     ["POST", "/v1/agent-runs/resume-travel-research", { agentRunId: "agent-run-2", researchTaskId: "research-task-1", resumeAction: "retry_codex_auth", Cookie: "session=x" }],
     ["POST", "/v1/agent-runs/resume-travel-research", { agentRunId: "agent-run-2", researchTaskId: "research-task-1", resumeAction: "open_url", hostname: "example.org" }],
     ["POST", "/v1/agent-runs/cancel-research", { researchTaskId: "research-task-1", action: "shell", command: "rm", model: "other", sandbox: "danger-full-access" }],
-    ["GET", "/v1/agent-runs/research-status", "{}"],
-    ["GET", "/v1/agent-runs/research-status?detail=true", ""],
+    ["POST", "/v1/agent-runs/research-status", {}],
+    ["POST", "/v1/agent-runs/research-status?detail=true", { tripId: "trip-1" }],
   ];
 
   for (const [method, path, body] of invalidRequests) {
@@ -388,7 +393,7 @@ test("unknown paths, wrong methods and arbitrary command surfaces never reach ru
 
   for (const input of [
     { method: "POST", path: "/v1/command", body: JSON.stringify({ action: "submitProposalBatch" }) },
-    { method: "POST", path: "/v1/agent-runs/research-status", body: "{}" },
+    { method: "GET", path: "/v1/agent-runs/research-status", body: "", contentType: undefined },
     { method: "GET", path: "/v1/agent-runs/prepare", body: "", contentType: undefined },
     { method: "DELETE", path: "/v1/agent-runs/cancel-research", body: "", contentType: undefined },
     { method: "POST", path: "/v1/agent-runs/prepare/", body: "{}" },
@@ -400,7 +405,7 @@ test("unknown paths, wrong methods and arbitrary command surfaces never reach ru
   assert.equal(events.length, 0);
 });
 
-test("CORS preflight is path-specific, supports GET status and preserves PNA", async (context) => {
+test("CORS preflight is path-specific and preserves PNA", async (context) => {
   const events = [];
   const bridge = await startLocalAgentBridge({ appUrl: APP_ORIGIN, runtime: fakeRuntime(events) });
   context.after(() => bridge.close());
@@ -409,7 +414,7 @@ test("CORS preflight is path-specific, supports GET status and preserves PNA", a
     ["/v1/agent-runs/prepare", "POST"],
     ["/v1/agent-runs/claim", "POST"],
     ["/v1/agent-runs/execute-travel-research", "POST"],
-    ["/v1/agent-runs/research-status", "GET"],
+    ["/v1/agent-runs/research-status", "POST"],
     ["/v1/agent-runs/resume-travel-research", "POST"],
     ["/v1/agent-runs/cancel-research", "POST"],
   ]) {
@@ -437,7 +442,7 @@ test("CORS preflight is path-specific, supports GET status and preserves PNA", a
     path: "/v1/agent-runs/research-status",
     contentType: undefined,
     body: "",
-    headers: { "access-control-request-method": "POST" },
+    headers: { "access-control-request-method": "GET" },
   });
   assert.equal(wrong.status, 400);
 
@@ -490,11 +495,11 @@ test("every fixed GET, POST and OPTIONS route rejects Transfer-Encoding before r
     ["POST", "/v1/agent-runs/prepare", "POST", "{}"],
     ["POST", "/v1/agent-runs/claim", "POST", JSON.stringify({ agentRunId: "agent-run-1" })],
     ["POST", "/v1/agent-runs/execute-travel-research", "POST", "{}"],
-    ["GET", "/v1/agent-runs/research-status", "GET", "{}"],
+    ["POST", "/v1/agent-runs/research-status", "POST", "{}"],
     ["POST", "/v1/agent-runs/resume-travel-research", "POST", "{}"],
     ["POST", "/v1/agent-runs/cancel-research", "POST", "{}"],
     ["OPTIONS", "/v1/agent-runs/prepare", "POST", "{}"],
-    ["OPTIONS", "/v1/agent-runs/research-status", "GET", "{}"],
+    ["OPTIONS", "/v1/agent-runs/research-status", "POST", "{}"],
   ];
   for (const [method, path, requestedMethod, body] of routes) {
     const response = await rawSocketRequest(bridge.port, [
@@ -561,6 +566,7 @@ test("stable business errors are allowlisted and never expose error details", as
   const bridge = await startLocalAgentBridge({ appUrl: APP_ORIGIN, runtime });
   context.after(() => bridge.close());
   const validExecute = {
+    tripId: "trip-1",
     agentRunId: "agent-run-1",
     operationId: "operation-1",
     targetCategory: "hotel",

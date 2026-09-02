@@ -162,15 +162,18 @@ function readBody(request, maxBodyBytes, bodyTimeoutMs) {
 }
 
 function validPrepare(value) {
-  return exactKeys(value, []);
+  return exactKeys(value, ["tripId"]) && opaqueIdentifier(value.tripId);
 }
+
+const validStatus = validPrepare;
 
 function validClaim(value) {
   return exactKeys(value, ["agentRunId"]) && opaqueIdentifier(value.agentRunId);
 }
 
 function validExecute(value) {
-  return exactKeys(value, ["agentRunId", "operationId", "targetCategory", "targetScopeId", "disclosureFingerprint"])
+  return exactKeys(value, ["tripId", "agentRunId", "operationId", "targetCategory", "targetScopeId", "disclosureFingerprint"])
+    && opaqueIdentifier(value.tripId)
     && opaqueIdentifier(value.agentRunId)
     && opaqueIdentifier(value.operationId)
     && CATEGORIES.has(value.targetCategory)
@@ -181,7 +184,8 @@ function validExecute(value) {
 }
 
 function validResume(value) {
-  return exactKeys(value, ["agentRunId", "operationId", "researchTaskId", "resumeAction"])
+  return exactKeys(value, ["tripId", "agentRunId", "operationId", "researchTaskId", "resumeAction"])
+    && opaqueIdentifier(value.tripId)
     && opaqueIdentifier(value.agentRunId)
     && opaqueIdentifier(value.operationId)
     && opaqueIdentifier(value.researchTaskId)
@@ -189,7 +193,8 @@ function validResume(value) {
 }
 
 function validCancel(value) {
-  return exactKeys(value, ["researchTaskId", "agentRunId", "operationId"])
+  return exactKeys(value, ["tripId", "researchTaskId", "agentRunId", "operationId"])
+    && opaqueIdentifier(value.tripId)
     && opaqueIdentifier(value.researchTaskId)
     && opaqueIdentifier(value.agentRunId)
     && opaqueIdentifier(value.operationId);
@@ -224,7 +229,7 @@ const ROUTES = new Map([
   [PREPARE_PATH, {
     method: "POST",
     validate: validPrepare,
-    invoke: (runtime) => runtime.prepare(),
+    invoke: (runtime, body) => runtime.prepare(body.tripId),
     project: projectPrepared,
     prepared: true,
   }],
@@ -242,8 +247,9 @@ const ROUTES = new Map([
     project: safeResearchStatus,
   }],
   [STATUS_PATH, {
-    method: "GET",
-    invoke: (runtime) => runtime.getResearchStatus(),
+    method: "POST",
+    validate: validStatus,
+    invoke: (runtime, body) => runtime.getResearchStatus(body.tripId),
     project: safeResearchStatus,
   }],
   [RESUME_PATH, {

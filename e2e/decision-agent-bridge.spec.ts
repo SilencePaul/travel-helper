@@ -223,6 +223,7 @@ test("a multi-city trip binds the exact selected segment into the disclosure and
   await page.getByRole("button", { name: "开始研究酒店候选" }).click();
   await expect.poll(() => harness.count("bridge.execute")).toBe(1);
   expect(harness.inputs("bridge.execute")).toEqual([{
+    tripId: "trip-2026-gba",
     agentRunId: "agent-run-e2e-1",
     operationId: expect.any(String),
     targetCategory: "hotel",
@@ -289,6 +290,7 @@ test("an auth blocker creates a new run and resumes the same local research task
   const executeInput = harness.inputs("bridge.execute")[0] as { operationId: string };
   expect(harness.inputs("bridge.execute")).toEqual([expect.objectContaining({ agentRunId: "agent-run-e2e-1", operationId: expect.any(String) })]);
   expect(harness.inputs("bridge.resume")).toEqual([{
+    tripId: "trip-2026-gba",
     agentRunId: "agent-run-e2e-2",
     operationId: expect.any(String),
     researchTaskId: "research-task-e2e",
@@ -328,6 +330,7 @@ test("a blocked external source exposes only the hostname and a fixed skip actio
   const executeInput = harness.inputs("bridge.execute")[0] as { operationId: string };
   expect(harness.inputs("bridge.execute")).toEqual([expect.objectContaining({ agentRunId: "agent-run-e2e-1", operationId: expect.any(String) })]);
   expect(harness.inputs("bridge.resume")).toEqual([{
+    tripId: "trip-2026-gba",
     agentRunId: "agent-run-e2e-2",
     operationId: expect.any(String),
     researchTaskId: "research-task-e2e",
@@ -438,6 +441,7 @@ test("stopping an active research task leaves no generated candidate", async ({ 
   expect(harness.count("bridge.cancel")).toBe(1);
   const executeInput = harness.inputs("bridge.execute")[0] as { agentRunId: string; operationId: string };
   expect(harness.inputs("bridge.cancel")).toEqual([{
+    tripId: "trip-2026-gba",
     researchTaskId: "research-task-e2e",
     agentRunId: executeInput.agentRunId,
     operationId: executeInput.operationId,
@@ -524,6 +528,7 @@ test("the admin confirms the Codex scope and completes the signed local Bridge c
   const runtime = new LocalAgentBridgeRuntime({ agentEndpoint: "https://api.example.test/api/agent", fetch: fetchImpl });
   let serverStatus: { phase: "idle" } | {
     phase: "researching";
+    tripId: string;
     researchTaskId: string;
     agentRunId: string;
     operationId: string;
@@ -540,9 +545,10 @@ test("the admin confirms the Codex scope and completes the signed local Bridge c
     executeTravelResearch: async (input: unknown) => {
       forwardedExecuteInput = structuredClone(input);
       decisionContext = await runtime.getDecisionContext();
-      const exactInput = input as { agentRunId: string; operationId: string };
+      const exactInput = input as { tripId: string; agentRunId: string; operationId: string };
       serverStatus = {
         phase: "researching",
+        tripId: exactInput.tripId,
         researchTaskId: "research-task-e2e",
         agentRunId: exactInput.agentRunId,
         operationId: exactInput.operationId,
@@ -571,6 +577,7 @@ test("the admin confirms the Codex scope and completes the signed local Bridge c
     expect(createdRun).toBeDefined();
     await expect.poll(() => decisionContext).toMatchObject({ tripId: "trip-2026-gba" });
     expect(forwardedExecuteInput).toEqual({
+      tripId: "trip-2026-gba",
       agentRunId: "agent-run-e2e",
       operationId: expect.any(String),
       targetCategory: "hotel",

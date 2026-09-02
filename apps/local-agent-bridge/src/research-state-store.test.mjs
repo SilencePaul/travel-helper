@@ -22,6 +22,7 @@ function lockOwner(pid = process.pid, nonce = "replacement-owner-nonce-1234") {
 
 function recoverableState(overrides = {}) {
   return {
+    tripId: "trip-private",
     researchTaskId: "research-task-1",
     agentRunId: "agent-run-1",
     operationId: "operation-1",
@@ -45,6 +46,7 @@ function reconciliationState(overrides = {}) {
   const agentRunId = "agent-run-1";
   return {
     recordType: "self_revoke_reconciliation",
+    tripId: "trip-private",
     researchTaskId: "research-task-1",
     agentRunId,
     operationId: "operation-1",

@@ -367,11 +367,11 @@ function fixedLoopbackRuntime(service, runner) {
     }
   };
   return Object.freeze({
-    prepare: () => service.prepare(),
+    prepare: (tripId) => service.prepare(tripId),
     claim: (agentRunId) => service.claim(agentRunId),
     releaseUnboundClaim: (agentRunId) => service.releaseUnboundClaim(agentRunId),
     executeTravelResearch: (input) => finishRunnerSession(() => service.executeTravelResearch(input)),
-    getResearchStatus: () => service.getResearchStatus(),
+    getResearchStatus: (tripId) => service.getResearchStatus(tripId),
     resumeTravelResearch: (input) => finishRunnerSession(() => service.resumeTravelResearch(input)),
     cancelResearch: (input) => finishRunnerSession(() => service.cancelResearch(input)),
   });
@@ -392,12 +392,14 @@ function createServiceAwareShutdown(service, runner) {
             throw codedError(status.errorCode || "CODEX_RESEARCH_FAILED");
           }
           if (ACTIVE_RESEARCH_PHASES.has(status?.phase)) {
-            if (typeof status.researchTaskId !== "string" || status.researchTaskId.length === 0
+            if (typeof status.tripId !== "string" || status.tripId.length === 0
+              || typeof status.researchTaskId !== "string" || status.researchTaskId.length === 0
               || typeof status.agentRunId !== "string" || status.agentRunId.length === 0
               || typeof status.operationId !== "string" || status.operationId.length === 0) {
               throw codedError("CODEX_RESEARCH_FAILED");
             }
             const terminal = await service.cancelResearch({
+              tripId: status.tripId,
               researchTaskId: status.researchTaskId,
               agentRunId: status.agentRunId,
               operationId: status.operationId,

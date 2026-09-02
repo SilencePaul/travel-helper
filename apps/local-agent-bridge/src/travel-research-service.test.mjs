@@ -12,6 +12,7 @@ import { safeResearchStatus, TravelResearchService } from "./travel-research-ser
 
 const PUBLIC_RESOLVER = async () => [{ address: "93.184.216.34", family: 4 }];
 const RECOVERED_OPERATION_IDENTITY = {
+  tripId: "trip-private",
   agentRunId: "agent-run-recovered",
   operationId: "operation-recovered",
   reconciliationState: "active",
@@ -216,6 +217,7 @@ function fakeStore(events, initialState, options = {}) {
     },
     async persistNeedsOwnerAction(value, notifier) {
       events.push("store.persistNeedsOwnerAction");
+      if (options.persistError) throw options.persistError;
       state = structuredClone(value);
       options.onPersistStarted?.();
       if (options.persistGate) await options.persistGate;
@@ -224,6 +226,7 @@ function fakeStore(events, initialState, options = {}) {
     },
     async persistSelfRevokeReconciliation(value) {
       events.push("store.persistSelfRevokeReconciliation");
+      if (options.reconciliationPersistError) throw options.reconciliationPersistError;
       state = structuredClone(value);
       options.onReconciliationPersisted?.(structuredClone(value));
       return structuredClone(state);
@@ -320,6 +323,10 @@ function fakeTransport(events, context, options = {}) {
       return { ok: true, action: "submitProposalBatch", data: { count: payload.candidates.length } };
     },
     prepareRevokeSelf,
+    discardPreparedRevokeSelf(snapshot) {
+      events.push("transport.discardPreparedRevokeSelf");
+      return snapshot?.agentRunId === claimed?.agentRunId;
+    },
     reconcileRevokeSelf,
     async revokeSelf() { return reconcileRevokeSelf(prepareRevokeSelf()); },
     submittedPayloads,
@@ -391,11 +398,49 @@ async function targetRequest(context = contextFixture()) {
     aliasSalt: "fingerprint-salt-1234",
   }, webcrypto);
   return {
+    tripId: context.workspace.tripId,
     agentRunId: "agent-run-1",
     operationId: "operation-1",
     targetCategory: "hotel",
     targetScopeId,
     disclosureFingerprint: built.disclosureFingerprint,
+  };
+}
+
+function recoveredReconciliation(request, overrides = {}) {
+  return {
+    recordType: "self_revoke_reconciliation",
+    tripId: "trip-private",
+    researchTaskId: "research-task-reconciliation",
+    agentRunId: request.agentRunId,
+    operationId: request.operationId,
+    reconciliationState: "self_revoke_reconciling",
+    activePhase: "validating",
+    revokeRequest: {
+      agentRunId: request.agentRunId,
+      expiresAt: "2099-09-01T00:15:00.000Z",
+      firstSentAt: Date.parse("2026-09-01T00:00:00.000Z"),
+      body: JSON.stringify({
+        agentRunId: request.agentRunId,
+        sequence: 2,
+        idempotencyKey: "revoke-reconciliation-test",
+        action: "revokeAgentRunSelf",
+        payload: {},
+        signature: "s".repeat(86),
+      }),
+    },
+    codexThreadId: "thread-reconciliation",
+    targetCategory: "hotel",
+    targetScopeId: request.targetScopeId,
+    disclosureFingerprint: request.disclosureFingerprint,
+    aliasSalt: "alias-salt-reconciliation",
+    blockedReason: "codex_auth_required",
+    blockedHostname: null,
+    activeRuntimeMs: 12_000,
+    terminalPhase: "needs_owner_action",
+    startedAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:01:00.000Z",
+    ...overrides,
   };
 }
 
@@ -433,9 +478,10 @@ function createHarness({
 }
 
 async function cancelCurrentResearch(service) {
-  const status = await service.getResearchStatus();
+  const status = await service.getResearchStatus("trip-private");
   assert.notEqual(status.phase, "idle");
   return service.cancelResearch({
+    tripId: status.tripId,
     researchTaskId: status.researchTaskId,
     agentRunId: status.agentRunId,
     operationId: status.operationId,
@@ -450,7 +496,7 @@ test("happy path starts Codex only after prepare/claim and writes one validated 
   }] });
   const request = await targetRequest();
 
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   assert.equal(harness.runner.createCount, 0);
   assert.deepEqual(harness.events, ["transport.prepare", "transport.claim:agent-run-1"]);
@@ -459,6 +505,7 @@ test("happy path starts Codex only after prepare/claim and writes one validated 
 
   assert.deepEqual(status, {
     phase: "completed",
+    tripId: "trip-private",
     researchTaskId: "research-task-1",
     agentRunId: request.agentRunId,
     operationId: request.operationId,
@@ -481,6 +528,7 @@ test("happy path starts Codex only after prepare/claim and writes one validated 
   assert.equal(harness.transport.submittedPayloads[0].candidates.length, 2);
   assert.equal(harness.runner.initialInputs[0].prompt.includes(request.agentRunId), false);
   assert.equal(harness.runner.initialInputs[0].prompt.includes(request.operationId), false);
+  assert.equal(harness.runner.initialInputs[0].prompt.includes(request.tripId), false);
 });
 
 test("store clear is a mandatory safety gate before the first signed submit", async () => {
@@ -489,7 +537,7 @@ test("store clear is a mandatory safety gate before the first signed submit", as
     storeOptions: { clearFailures: [1] },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
 
   const status = await harness.service.executeTravelResearch(request);
@@ -508,7 +556,7 @@ test("cancel during the store safety gate prevents the first signed submit", asy
     storeOptions: { clearGate },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   const execution = harness.service.executeTravelResearch(request);
   while (!harness.events.includes("store.clear")) await new Promise((resolve) => setImmediate(resolve));
@@ -543,17 +591,17 @@ test("an existing blocked recovery prevents execute from replacing it or creatin
     initialState,
     scripts: [{ codexThreadId: "must-not-run", output: completedOutput(), activeDurationMs: 1 }],
   });
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
 
   await assert.rejects(harness.service.executeTravelResearch(request), { code: "CODEX_RESEARCH_FAILED" });
 
-  assert.equal((await harness.service.getResearchStatus()).researchTaskId, initialState.researchTaskId);
+  assert.equal((await harness.service.getResearchStatus("trip-private")).researchTaskId, initialState.researchTaskId);
   assert.equal(harness.runner.createCount, 0);
   assert.equal(harness.events.includes("transport.getDecisionContext"), false);
   assert.deepEqual(harness.store.state, initialState);
   assert.equal(harness.transport.claimedRun, undefined);
-  assert.doesNotThrow(() => harness.service.prepare());
+  assert.doesNotThrow(() => harness.service.prepare("trip-private"));
 });
 
 test("execute fails closed when recovery state cannot be loaded", async () => {
@@ -564,7 +612,7 @@ test("execute fails closed when recovery state cannot be loaded", async () => {
     },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
 
   await assert.rejects(harness.service.executeTravelResearch(request), { code: "CODEX_RESEARCH_FAILED" });
@@ -586,15 +634,16 @@ test("execute publishes an exact admission before a delayed recovery load so lif
     scripts: [{ codexThreadId: "must-not-start", output: completedOutput(), activeDurationMs: 1 }],
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
 
   const execution = harness.service.executeTravelResearch(request);
   await observedLoad;
-  const observedStatus = await harness.service.getResearchStatus();
+  const observedStatus = await harness.service.getResearchStatus("trip-private");
 
   assert.deepEqual(observedStatus, {
     phase: "researching",
+    tripId: "trip-private",
     researchTaskId: "research-task-1",
     agentRunId: request.agentRunId,
     operationId: request.operationId,
@@ -603,6 +652,7 @@ test("execute publishes an exact admission before a delayed recovery load so lif
     updatedAt: "2026-09-01T00:00:00.000Z",
   });
   const cancellation = harness.service.cancelResearch({
+    tripId: "trip-private",
     researchTaskId: observedStatus.researchTaskId,
     agentRunId: observedStatus.agentRunId,
     operationId: observedStatus.operationId,
@@ -642,13 +692,13 @@ test("a real runtime releases an unbound claim when execute fails before creatin
     },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
 
   await assert.rejects(harness.service.executeTravelResearch(request), { code: "CODEX_RESEARCH_FAILED" });
 
   assert.equal(harness.transport.claimedRun, undefined);
-  assert.doesNotThrow(() => harness.service.prepare());
+  assert.doesNotThrow(() => harness.service.prepare("trip-private"));
 });
 
 test("a pre-task execute failure preserves a real runtime claim with an uncertain signed envelope", async () => {
@@ -682,7 +732,7 @@ test("a pre-task execute failure preserves a real runtime claim with an uncertai
     },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   await assert.rejects(harness.transport.getDecisionContext(), { code: "AGENT_TRANSPORT_UNAVAILABLE", uncertain: true });
 
@@ -690,7 +740,7 @@ test("a pre-task execute failure preserves a real runtime claim with an uncertai
 
   assert.equal(contextAttempts, 1);
   assert.equal(harness.transport.claimedRun?.agentRunId, request.agentRunId);
-  assert.throws(() => harness.service.prepare(), /BRIDGE_BUSY/);
+  assert.throws(() => harness.service.prepare("trip-private"), /BRIDGE_BUSY/);
 });
 
 test("service composes with a real createCodexRunner session contract", async () => {
@@ -754,7 +804,7 @@ test("service composes with a real createCodexRunner session contract", async ()
   });
   const harness = createHarness({ runnerFactory });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
 
   const status = await harness.service.executeTravelResearch(request);
@@ -818,7 +868,7 @@ test("a real runtime keeps a pending signed submit alive past the service deadli
     },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   const execution = harness.service.executeTravelResearch(request);
   while (!actions.includes("submitProposalBatch")) {
@@ -828,7 +878,7 @@ test("a real runtime keeps a pending signed submit alive past the service deadli
   const timerFired = clock.fireNext();
   clock.advance(20_000);
   await new Promise((resolve) => setImmediate(resolve));
-  const pendingStatus = await harness.service.getResearchStatus();
+  const pendingStatus = await harness.service.getResearchStatus("trip-private");
   const claimedWhilePending = harness.transport.claimedRun;
   releaseSubmit();
   const status = await execution;
@@ -891,7 +941,7 @@ test("a definite real-runtime submit failure revokes and releases the capability
     },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
 
   const status = await harness.service.executeTravelResearch(request);
@@ -906,7 +956,7 @@ test("a definite real-runtime submit failure revokes and releases the capability
   ]);
   assert.equal(harness.transport.claimedRun, undefined);
   assert.equal(harness.events.includes("store.clear"), true);
-  assert.doesNotThrow(() => harness.service.prepare());
+  assert.doesNotThrow(() => harness.service.prepare("trip-private"));
 });
 
 test("external AgentRun revocation lets cancel release the real runtime capability and prepare again", async () => {
@@ -954,7 +1004,7 @@ test("external AgentRun revocation lets cancel release the real runtime capabili
     },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   const execution = harness.service.executeTravelResearch(request);
   await observedRunner;
@@ -966,7 +1016,7 @@ test("external AgentRun revocation lets cancel release the real runtime capabili
   assert.equal(executeStatus.phase, "cancelled");
   assert.equal(cancelStatus.phase, "cancelled");
   assert.equal(harness.transport.claimedRun, undefined);
-  assert.doesNotThrow(() => harness.service.prepare());
+  assert.doesNotThrow(() => harness.service.prepare("trip-private"));
   assert.deepEqual(actions, ["claimAgentRun", "getDecisionContext", "revokeAgentRunSelf"]);
 });
 
@@ -1021,7 +1071,7 @@ test("two lost real-runtime submit responses replay one envelope until the third
     },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
 
   const status = await harness.service.executeTravelResearch(request);
@@ -1095,10 +1145,11 @@ test("cancel waits for uncertain resumed context reconciliation and preserves bl
       });
     },
   });
-  assert.equal((await harness.service.getResearchStatus()).phase, "needs_owner_action");
-  harness.service.prepare();
+  assert.equal((await harness.service.getResearchStatus("trip-private")).phase, "needs_owner_action");
+  harness.service.prepare("trip-private");
   await harness.service.claim("agent-run-context-retry");
   const resume = harness.service.resumeTravelResearch({
+    tripId: "trip-private",
     agentRunId: "agent-run-context-retry",
     operationId: "resume-operation-context-retry",
     researchTaskId: initialState.researchTaskId,
@@ -1106,10 +1157,10 @@ test("cancel waits for uncertain resumed context reconciliation and preserves bl
   });
   await contextStarted;
 
-  const pendingPhase = (await harness.service.getResearchStatus()).phase;
+  const pendingPhase = (await harness.service.getResearchStatus("trip-private")).phase;
   const cancellation = cancelCurrentResearch(harness.service);
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal((await harness.service.getResearchStatus()).phase, "cancelling");
+  assert.equal((await harness.service.getResearchStatus("trip-private")).phase, "cancelling");
   assert.deepEqual(harness.store.state, initialState);
   releaseFirstContext();
   const [resumeStatus, cancelStatus] = await Promise.all([resume, cancellation]);
@@ -1175,7 +1226,7 @@ test("a submit confirmed after AgentRun expiry remains completed and clears loca
     },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   const execution = harness.service.executeTravelResearch(request);
   await observedSubmit;
@@ -1203,7 +1254,7 @@ test("concurrent execute calls for the same AgentRun share one runner and one ta
     };
   }] });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
 
   const first = harness.service.executeTravelResearch(request);
@@ -1222,7 +1273,7 @@ test("a settled execute replay returns the same task without another runner or s
     activeDurationMs: 5_000,
   }] });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
 
   const first = await harness.service.executeTravelResearch(request);
@@ -1246,7 +1297,7 @@ test("a different execute operation is rejected while research is in flight", as
     };
   }] });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
 
   const first = harness.service.executeTravelResearch(request);
@@ -1302,11 +1353,11 @@ test("a different execute operation releases its newly claimed unbound runtime c
     },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   const first = harness.service.executeTravelResearch(request);
   await observedPersist;
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim("agent-run-new-execute");
 
   await assert.rejects(harness.service.executeTravelResearch({
@@ -1316,7 +1367,7 @@ test("a different execute operation releases its newly claimed unbound runtime c
   }), { code: "CODEX_RESEARCH_FAILED" });
 
   assert.equal(harness.transport.claimedRun, undefined);
-  assert.doesNotThrow(() => harness.service.prepare());
+  assert.doesNotThrow(() => harness.service.prepare("trip-private"));
   releasePersist();
   assert.equal((await first).phase, "needs_owner_action");
   assert.deepEqual(actions, [
@@ -1331,7 +1382,7 @@ test("an unbound successful claim has one bounded handoff lease that releases lo
   const clock = createControlledClock();
   const harness = createHarness({ clock });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
 
   await harness.service.claim(request.agentRunId);
   await harness.service.claim(request.agentRunId);
@@ -1341,7 +1392,7 @@ test("an unbound successful claim has one bounded handoff lease that releases lo
   assert.equal(clock.nextDelay() >= 5_000 && clock.nextDelay() <= 10_000, true);
   assert.equal(clock.fireNext(), true);
   assert.equal(harness.transport.claimedRun, undefined);
-  assert.doesNotThrow(() => harness.service.prepare());
+  assert.doesNotThrow(() => harness.service.prepare("trip-private"));
 });
 
 test("two uncertain claims share one lease that expires the real runtime pending envelope", async () => {
@@ -1361,7 +1412,7 @@ test("two uncertain claims share one lease that expires the real runtime pending
     },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
 
   await assert.rejects(harness.service.claim(request.agentRunId), {
     code: "AGENT_TRANSPORT_UNAVAILABLE",
@@ -1376,9 +1427,9 @@ test("two uncertain claims share one lease that expires the real runtime pending
   assert.equal(claimBodies[0], claimBodies[1]);
   assert.equal(clock.scheduledTimers(), 1);
   assert.equal(clock.nextDelay(), 8_000);
-  assert.throws(() => harness.service.prepare(), { code: "BRIDGE_BUSY" });
+  assert.throws(() => harness.service.prepare("trip-private"), { code: "BRIDGE_BUSY" });
   assert.equal(clock.fireNext(), true);
-  assert.doesNotThrow(() => harness.service.prepare());
+  assert.doesNotThrow(() => harness.service.prepare("trip-private"));
 });
 
 test("uncertain invalid claim responses share one lease and expire the exact pending envelope", async () => {
@@ -1402,7 +1453,7 @@ test("uncertain invalid claim responses share one lease and expire the exact pen
     },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
 
   await assert.rejects(harness.service.claim(request.agentRunId), {
     code: "INVALID_AGENT_RESPONSE",
@@ -1417,9 +1468,9 @@ test("uncertain invalid claim responses share one lease and expire the exact pen
   assert.equal(claimBodies[0], claimBodies[1]);
   assert.equal(clock.scheduledTimers(), 1);
   assert.equal(clock.pendingTimers(), 1);
-  assert.throws(() => harness.service.prepare(), { code: "BRIDGE_BUSY" });
+  assert.throws(() => harness.service.prepare("trip-private"), { code: "BRIDGE_BUSY" });
   assert.equal(clock.fireNext(), true);
-  assert.doesNotThrow(() => harness.service.prepare());
+  assert.doesNotThrow(() => harness.service.prepare("trip-private"));
 });
 
 test("a definite invalid claim response does not start an unbound claim lease", async () => {
@@ -1437,7 +1488,7 @@ test("a definite invalid claim response does not start an unbound claim lease", 
     },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
 
   await assert.rejects(harness.service.claim(request.agentRunId), (error) => error === claimError);
   assert.equal(clock.scheduledTimers(), 0);
@@ -1457,7 +1508,7 @@ test("an ordinary release refusal preserves the uncertain claim lease until expi
     },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await assert.rejects(harness.service.claim(request.agentRunId), {
     code: "AGENT_TRANSPORT_UNAVAILABLE",
     uncertain: true,
@@ -1466,20 +1517,20 @@ test("an ordinary release refusal preserves the uncertain claim lease until expi
   assert.equal(harness.service.releaseUnboundClaim(request.agentRunId), false);
   assert.equal(clock.pendingTimers(), 1);
   assert.equal(clock.fireNext(), true);
-  assert.doesNotThrow(() => harness.service.prepare());
+  assert.doesNotThrow(() => harness.service.prepare("trip-private"));
 });
 
 test("a successful ordinary release clears its claim lease", async () => {
   const clock = createControlledClock();
   const harness = createHarness({ clock });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
 
   assert.equal(harness.service.releaseUnboundClaim(request.agentRunId), true);
   assert.equal(clock.pendingTimers(), 0);
   assert.equal(clock.fireNext(), false);
-  assert.doesNotThrow(() => harness.service.prepare());
+  assert.doesNotThrow(() => harness.service.prepare("trip-private"));
 });
 
 test("an ordinary release exception preserves its claim lease and propagates", async () => {
@@ -1497,13 +1548,13 @@ test("an ordinary release exception preserves its claim lease and propagates", a
     },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
 
   assert.throws(() => harness.service.releaseUnboundClaim(request.agentRunId), (error) => error === releaseError);
   assert.equal(clock.pendingTimers(), 1);
   assert.equal(clock.fireNext(), true);
-  assert.doesNotThrow(() => harness.service.prepare());
+  assert.doesNotThrow(() => harness.service.prepare("trip-private"));
 });
 
 test("TravelResearchService requires the internal unbound-claim expiry capability", () => {
@@ -1527,7 +1578,7 @@ test("a handoff lease fails safe when runtime refuses to release an uncertain cl
     },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
 
   assert.equal(clock.fireNext(), true);
@@ -1543,7 +1594,7 @@ test("execute binds the claimed handoff before work and cancels its lease", asyn
     scripts: [{ codexThreadId: "thread-lease-execute", output: completedOutput(), activeDurationMs: 10 }],
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   assert.equal(clock.pendingTimers(), 1);
 
@@ -1577,12 +1628,13 @@ test("resume binds the claimed handoff before restoring its fixed task", async (
     initialState: recovered,
     scripts: [{ codexThreadId: recovered.codexThreadId, output: completedOutput(), activeDurationMs: 13_000 }],
   });
-  assert.equal((await harness.service.getResearchStatus()).phase, "needs_owner_action");
-  harness.service.prepare();
+  assert.equal((await harness.service.getResearchStatus("trip-private")).phase, "needs_owner_action");
+  harness.service.prepare("trip-private");
   await harness.service.claim("agent-run-lease-resume");
   assert.equal(clock.pendingTimers(), 1);
 
   const resumed = harness.service.resumeTravelResearch({
+    tripId: "trip-private",
     agentRunId: "agent-run-lease-resume",
     operationId: "resume-operation-lease",
     researchTaskId: recovered.researchTaskId,
@@ -1623,9 +1675,10 @@ test("concurrent resume reuses only the identical operation and rejects a differ
       };
     }],
   });
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim("agent-run-resume");
   const input = {
+    tripId: "trip-private",
     agentRunId: "agent-run-resume",
     operationId: "resume-operation-concurrent",
     researchTaskId: recovered.researchTaskId,
@@ -1636,6 +1689,7 @@ test("concurrent resume reuses only the identical operation and rejects a differ
   const replay = harness.service.resumeTravelResearch(input);
   assert.equal(replay, first);
   await assert.rejects(harness.service.resumeTravelResearch({
+    tripId: "trip-private",
     ...input,
     researchTaskId: "different-task",
   }), { code: "CODEX_RESEARCH_FAILED" });
@@ -1666,9 +1720,10 @@ test("a settled resume replay returns the same task without another runner", asy
     initialState: recovered,
     scripts: [{ codexThreadId: recovered.codexThreadId, output: completedOutput(), activeDurationMs: 13_000 }],
   });
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim("agent-run-settled-resume");
   const input = {
+    tripId: "trip-private",
     agentRunId: "agent-run-settled-resume",
     operationId: "resume-operation-settled",
     researchTaskId: recovered.researchTaskId,
@@ -1739,20 +1794,22 @@ test("a different resume operation releases its newly claimed unbound runtime ca
       });
     },
   });
-  assert.equal((await harness.service.getResearchStatus()).phase, "needs_owner_action");
-  harness.service.prepare();
+  assert.equal((await harness.service.getResearchStatus("trip-private")).phase, "needs_owner_action");
+  harness.service.prepare("trip-private");
   await harness.service.claim("agent-run-old-resume");
   const first = harness.service.resumeTravelResearch({
+    tripId: "trip-private",
     agentRunId: "agent-run-old-resume",
     operationId: "resume-operation-old",
     researchTaskId: recovered.researchTaskId,
     resumeAction: "retry_codex_auth",
   });
   await observedPersist;
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim("agent-run-new-resume");
 
   await assert.rejects(harness.service.resumeTravelResearch({
+    tripId: "trip-private",
     agentRunId: "agent-run-new-resume",
     operationId: "resume-operation-new",
     researchTaskId: "different-task",
@@ -1760,7 +1817,7 @@ test("a different resume operation releases its newly claimed unbound runtime ca
   }), { code: "CODEX_RESEARCH_FAILED" });
 
   assert.equal(harness.transport.claimedRun, undefined);
-  assert.doesNotThrow(() => harness.service.prepare());
+  assert.doesNotThrow(() => harness.service.prepare("trip-private"));
   releasePersist();
   assert.equal((await first).phase, "needs_owner_action");
   assert.deepEqual(actions, [
@@ -1774,7 +1831,7 @@ test("a different resume operation releases its newly claimed unbound runtime ca
 test("changed disclosure revokes the run and never creates a Codex task", async () => {
   const harness = createHarness();
   const request = { ...await targetRequest(), disclosureFingerprint: "f".repeat(64) };
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
 
   const status = await harness.service.executeTravelResearch(request);
@@ -1799,7 +1856,7 @@ test("validated owner-action output revokes before persistence and notification 
       activeDurationMs: 15_000,
     }] });
     const request = await targetRequest();
-    harness.service.prepare();
+    harness.service.prepare("trip-private");
     await harness.service.claim(request.agentRunId);
 
     const status = await harness.service.executeTravelResearch(request);
@@ -1827,7 +1884,7 @@ test("cancel during owner-action revoke skips persistence and finishes cancelled
     transportOptions: { revokeGate },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   const execution = harness.service.executeTravelResearch(request);
   while (!harness.events.includes("transport.revokeSelf")) {
@@ -1858,7 +1915,7 @@ test("cancel during owner-action persistence clears the record and suppresses no
     storeOptions: { persistGate },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   const execution = harness.service.executeTravelResearch(request);
   while (!harness.events.includes("store.persistNeedsOwnerAction")) {
@@ -1866,7 +1923,7 @@ test("cancel during owner-action persistence clears the record and suppresses no
   }
 
   const cancellation = cancelCurrentResearch(harness.service);
-  while ((await harness.service.getResearchStatus()).phase !== "cancelling") {
+  while ((await harness.service.getResearchStatus("trip-private")).phase !== "cancelling") {
     await new Promise((resolve) => setImmediate(resolve));
   }
   releasePersist();
@@ -1893,7 +1950,7 @@ test("an issued owner-action revocation finishes reconciliation after the active
     transportOptions: { revokeGate },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   const execution = harness.service.executeTravelResearch(request);
   while (!harness.events.includes("transport.revokeSelf")) {
@@ -1903,7 +1960,7 @@ test("an issued owner-action revocation finishes reconciliation after the active
   const timerFired = clock.fireNext();
   clock.advance(20);
   await new Promise((resolve) => setImmediate(resolve));
-  const pendingStatus = await harness.service.getResearchStatus();
+  const pendingStatus = await harness.service.getResearchStatus("trip-private");
   releaseRevoke();
   const status = await execution;
 
@@ -1923,7 +1980,7 @@ test("runner authentication loss becomes owner action only with a recoverable th
   });
   const harness = createHarness({ scripts: [authError] });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
 
   const status = await harness.service.executeTravelResearch(request);
@@ -1941,7 +1998,7 @@ test("resume uses a newly claimed run, the same task/thread and a fixed skip pro
     activeDurationMs: 20_000,
   }] });
   const initialRequest = await targetRequest();
-  first.service.prepare();
+  first.service.prepare("trip-private");
   await first.service.claim(initialRequest.agentRunId);
   await first.service.executeTravelResearch(initialRequest);
 
@@ -1950,10 +2007,11 @@ test("resume uses a newly claimed run, the same task/thread and a fixed skip pro
     initialState: persisted,
     scripts: [{ codexThreadId: "thread-source", output: completedOutput(), activeDurationMs: 28_000 }],
   });
-  resumed.service.prepare();
+  resumed.service.prepare("trip-private");
   await resumed.service.claim("agent-run-2");
 
   const status = await resumed.service.resumeTravelResearch({
+    tripId: "trip-private",
     agentRunId: "agent-run-2",
     operationId: "resume-operation-source",
     researchTaskId: persisted.researchTaskId,
@@ -1992,11 +2050,12 @@ test("resume rejects browser-controlled fields and supersedes changed context wi
   const changed = contextFixture();
   changed.trip.travelerNames = ["一鸣", "美垚", "未授权变更"];
   const harness = createHarness({ context: changed, initialState });
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim("agent-run-2");
 
   await assert.rejects(
     harness.service.resumeTravelResearch({
+    tripId: "trip-private",
       agentRunId: "agent-run-2",
       operationId: "resume-operation-browser-input",
       researchTaskId: "research-task-1",
@@ -2005,9 +2064,10 @@ test("resume rejects browser-controlled fields and supersedes changed context wi
     }),
     { code: "CODEX_RESEARCH_FAILED" },
   );
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim("agent-run-2");
   const status = await harness.service.resumeTravelResearch({
+    tripId: "trip-private",
     agentRunId: "agent-run-2",
     operationId: "resume-operation-changed-context",
     researchTaskId: "research-task-1",
@@ -2028,7 +2088,7 @@ test("insufficient evidence resumes the same thread until success within the act
     { codexThreadId: "thread-evidence", output: completedOutput(), activeDurationMs: 599_000 },
   ] });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
 
   const status = await harness.service.executeTravelResearch(request);
@@ -2055,7 +2115,7 @@ test("active budget exhausted before validation times out with zero writes", asy
     },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
 
   const status = await harness.service.executeTravelResearch(request);
@@ -2088,10 +2148,11 @@ test("owner waiting time is excluded when restoring the runner active budget", a
     scripts: [{ codexThreadId: "thread-wait", output: completedOutput(), activeDurationMs: 50_000 }],
   });
   harness.clock.advance(31 * 24 * 60 * 60 * 1_000);
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim("agent-run-new");
 
   await harness.service.resumeTravelResearch({
+    tripId: "trip-private",
     agentRunId: "agent-run-new",
     operationId: "resume-operation-wait",
     researchTaskId: "research-task-wait",
@@ -2115,7 +2176,7 @@ test("fractional runner duration remains valid and recoverable persistence round
     activeDurationMs: 1.5,
   }] });
   const request = await targetRequest();
-  completed.service.prepare();
+  completed.service.prepare("trip-private");
   await completed.service.claim(request.agentRunId);
   assert.equal((await completed.service.executeTravelResearch(request)).phase, "completed");
 
@@ -2124,7 +2185,7 @@ test("fractional runner duration remains valid and recoverable persistence round
     output: ownerAction(),
     activeDurationMs: 1.5,
   }] });
-  blocked.service.prepare();
+  blocked.service.prepare("trip-private");
   await blocked.service.claim(request.agentRunId);
   assert.equal((await blocked.service.executeTravelResearch(request)).phase, "needs_owner_action");
   assert.equal(blocked.store.state.activeRuntimeMs, 2);
@@ -2140,7 +2201,7 @@ test("runner factory receives the active deadline remaining after signed context
     transportOptions: { contextGate },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   const execution = harness.service.executeTravelResearch(request);
   while (!harness.events.includes("transport.getDecisionContext")) {
@@ -2177,7 +2238,7 @@ test("wall-clock rollback cannot reduce service runtime or move status timestamp
     }],
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   const execution = harness.service.executeTravelResearch(request);
   while (!harness.events.includes("transport.getDecisionContext")) {
@@ -2210,7 +2271,7 @@ test("claimed-run expiry bounds signed context before any runner or write starts
     },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   const execution = harness.service.executeTravelResearch(request);
   while (!harness.events.includes("transport.getDecisionContext")) {
@@ -2249,7 +2310,7 @@ test("active deadline bounds validation before cloud submission", async () => {
     },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   const execution = harness.service.executeTravelResearch(request);
   while (!harness.events.includes("runner.resolveHostname")) {
@@ -2280,7 +2341,7 @@ test("issued cloud submit and final revoke requests reconcile after the active d
       transportOptions: phase === "submit" ? { submitGate: gate } : { revokeGate: gate },
     });
     const request = await targetRequest();
-    harness.service.prepare();
+    harness.service.prepare("trip-private");
     await harness.service.claim(request.agentRunId);
     const execution = harness.service.executeTravelResearch(request);
     const expectedEvent = phase === "submit"
@@ -2293,7 +2354,7 @@ test("issued cloud submit and final revoke requests reconcile after the active d
     const timerFired = clock.fireNext();
     clock.advance(20);
     await new Promise((resolve) => setImmediate(resolve));
-    const pendingStatus = await harness.service.getResearchStatus();
+    const pendingStatus = await harness.service.getResearchStatus("trip-private");
     releaseGate();
     const status = await execution;
 
@@ -2322,7 +2383,7 @@ test("claimed-run expiry races an in-flight runner, cancels it and writes no can
     transportOptions: { claimExpiresAt: "2026-09-01T00:00:00.010Z" },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   const execution = harness.service.executeTravelResearch(request);
   while (!harness.events.includes("runner.runInitial")) {
@@ -2362,7 +2423,7 @@ test("active deadline during evidence continuation cancels the runner and report
     ],
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   const execution = harness.service.executeTravelResearch(request);
   while (harness.runner.resumeInputs.length === 0) {
@@ -2394,7 +2455,7 @@ test("inactive, expired, unavailable, isolated, usage and invalid-output runs fa
       scripts: runnerError ? [runnerError] : [],
     });
     const request = await targetRequest();
-    harness.service.prepare();
+    harness.service.prepare("trip-private");
     await harness.service.claim(request.agentRunId);
 
     const status = await harness.service.executeTravelResearch(request);
@@ -2422,10 +2483,11 @@ test("resume action must match the persisted blocker and cannot carry credential
     updatedAt: "2026-09-01T00:01:00.000Z",
   };
   const harness = createHarness({ initialState });
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim("agent-run-new");
 
   await assert.rejects(harness.service.resumeTravelResearch({
+    tripId: "trip-private",
     agentRunId: "agent-run-new",
     operationId: "resume-operation-invalid-action",
     researchTaskId: "research-task-auth",
@@ -2434,6 +2496,7 @@ test("resume action must match the persisted blocker and cannot carry credential
   assert.equal(harness.runner.createCount, 0);
   assert.deepEqual(harness.store.state, initialState);
   await assert.rejects(harness.service.resumeTravelResearch({
+    tripId: "trip-private",
     agentRunId: "agent-run-new",
     operationId: "resume-operation-private-input",
     researchTaskId: "research-task-auth",
@@ -2517,10 +2580,11 @@ test("invalid resume state revokes a newly claimed real-runtime capability and p
         });
       },
     });
-    harness.service.prepare();
+    harness.service.prepare("trip-private");
     await harness.service.claim("agent-run-invalid-resume");
 
     await assert.rejects(harness.service.resumeTravelResearch({
+    tripId: "trip-private",
       agentRunId: "agent-run-invalid-resume",
       operationId: "resume-operation-invalid-state",
       ...scenario.input,
@@ -2531,7 +2595,7 @@ test("invalid resume state revokes a newly claimed real-runtime capability and p
     if (scenario.initialState && !scenario.storeOptions) {
       assert.deepEqual(harness.store.state, recovered, scenario.name);
     }
-    assert.doesNotThrow(() => harness.service.prepare(), scenario.name);
+    assert.doesNotThrow(() => harness.service.prepare("trip-private"), scenario.name);
   }
 });
 
@@ -2594,20 +2658,22 @@ test("an unclaimed or mismatched resume preserves blocked recovery and never rev
   };
 
   const unclaimed = createRuntimeHarness();
-  assert.equal((await unclaimed.service.getResearchStatus()).phase, "needs_owner_action");
+  assert.equal((await unclaimed.service.getResearchStatus("trip-private")).phase, "needs_owner_action");
   await assert.rejects(unclaimed.service.resumeTravelResearch({
+    tripId: "trip-private",
     agentRunId: "agent-run-correct-resume",
     operationId: "resume-operation-unclaimed",
     researchTaskId: recovered.researchTaskId,
     resumeAction: "retry_codex_auth",
   }), { code: "AGENT_RUN_INACTIVE" });
   assert.deepEqual(unclaimed.store.state, recovered);
-  assert.equal((await unclaimed.service.getResearchStatus()).phase, "needs_owner_action");
+  assert.equal((await unclaimed.service.getResearchStatus("trip-private")).phase, "needs_owner_action");
   assert.deepEqual(unclaimed.actions, []);
 
-  unclaimed.service.prepare();
+  unclaimed.service.prepare("trip-private");
   await unclaimed.service.claim("agent-run-correct-resume");
   const completed = await unclaimed.service.resumeTravelResearch({
+    tripId: "trip-private",
     agentRunId: "agent-run-correct-resume",
     operationId: "resume-operation-completed",
     researchTaskId: recovered.researchTaskId,
@@ -2622,17 +2688,18 @@ test("an unclaimed or mismatched resume preserves blocked recovery and never rev
   ]);
 
   const mismatched = createRuntimeHarness();
-  assert.equal((await mismatched.service.getResearchStatus()).phase, "needs_owner_action");
-  mismatched.service.prepare();
+  assert.equal((await mismatched.service.getResearchStatus("trip-private")).phase, "needs_owner_action");
+  mismatched.service.prepare("trip-private");
   await mismatched.service.claim("agent-run-other");
   await assert.rejects(mismatched.service.resumeTravelResearch({
+    tripId: "trip-private",
     agentRunId: "agent-run-correct-resume",
     operationId: "resume-operation-mismatch",
     researchTaskId: recovered.researchTaskId,
     resumeAction: "retry_codex_auth",
   }), { code: "AGENT_RUN_INACTIVE" });
   assert.deepEqual(mismatched.store.state, recovered);
-  assert.equal((await mismatched.service.getResearchStatus()).phase, "needs_owner_action");
+  assert.equal((await mismatched.service.getResearchStatus("trip-private")).phase, "needs_owner_action");
   assert.equal(mismatched.transport.claimedRun.agentRunId, "agent-run-other");
   assert.deepEqual(mismatched.actions, ["claimAgentRun"]);
 });
@@ -2680,8 +2747,8 @@ test("cancelling an old blocker releases a newer orphan claim after external clo
       });
     },
   });
-  assert.equal((await harness.service.getResearchStatus()).phase, "needs_owner_action");
-  harness.service.prepare();
+  assert.equal((await harness.service.getResearchStatus("trip-private")).phase, "needs_owner_action");
+  harness.service.prepare("trip-private");
   await harness.service.claim("agent-run-new-orphan");
 
   const status = await cancelCurrentResearch(harness.service);
@@ -2689,7 +2756,7 @@ test("cancelling an old blocker releases a newer orphan claim after external clo
   assert.equal(status.phase, "cancelled");
   assert.deepEqual(actions, ["claimAgentRun", "revokeAgentRunSelf"]);
   assert.equal(harness.transport.claimedRun, undefined);
-  assert.doesNotThrow(() => harness.service.prepare());
+  assert.doesNotThrow(() => harness.service.prepare("trip-private"));
 });
 
 test("an uncertain orphan revoke keeps the claim and reports failed instead of cancelled", async () => {
@@ -2709,8 +2776,8 @@ test("an uncertain orphan revoke keeps the claim and reports failed instead of c
     updatedAt: "2026-09-01T00:01:00.000Z",
   };
   const harness = createHarness({ initialState: recovered, transportOptions: { uncertainRevoke: true } });
-  await harness.service.getResearchStatus();
-  harness.service.prepare();
+  await harness.service.getResearchStatus("trip-private");
+  harness.service.prepare("trip-private");
   await harness.service.claim("agent-run-uncertain-orphan");
 
   const status = await cancelCurrentResearch(harness.service);
@@ -2736,7 +2803,7 @@ test("cancelling an active task revokes its matching claim exactly once", async 
     return originalGetContext();
   };
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   const execution = harness.service.executeTravelResearch(request);
   await observedContext;
@@ -2794,7 +2861,7 @@ test("cleanup revoke remains available after cancellation exhausts the active re
     },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   const execution = harness.service.executeTravelResearch(request);
   await observedContext;
@@ -2853,7 +2920,7 @@ test("permanently uncertain context uses capped exponential backoff and releases
     },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
 
   const status = await harness.service.executeTravelResearch(request);
@@ -2916,11 +2983,12 @@ test("an expired uncertain resume context releases the run without deleting bloc
       });
     },
   });
-  assert.equal((await harness.service.getResearchStatus()).phase, "needs_owner_action");
-  harness.service.prepare();
+  assert.equal((await harness.service.getResearchStatus("trip-private")).phase, "needs_owner_action");
+  harness.service.prepare("trip-private");
   await harness.service.claim("agent-run-expired-context");
 
   const status = await harness.service.resumeTravelResearch({
+    tripId: "trip-private",
     agentRunId: "agent-run-expired-context",
     operationId: "resume-operation-expired-context",
     researchTaskId: recovered.researchTaskId,
@@ -2968,10 +3036,11 @@ test("restart resume fallback preserves the recovered operation identity so exac
       return transport;
     },
   });
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim("agent-run-restart-fallback");
 
   const fallback = await harness.service.resumeTravelResearch({
+    tripId: "trip-private",
     agentRunId: "agent-run-restart-fallback",
     operationId: "operation-restart-fallback",
     researchTaskId: recovered.researchTaskId,
@@ -2987,11 +3056,159 @@ test("restart resume fallback preserves the recovered operation identity so exac
     blockedReason: recovered.blockedReason,
   });
   const cancelled = await harness.service.cancelResearch({
+    tripId: "trip-private",
     researchTaskId: fallback.researchTaskId,
     agentRunId: fallback.agentRunId,
     operationId: fallback.operationId,
   });
   assert.equal(cancelled.phase, "cancelled");
+});
+
+test("a recovered reconciliation is visible only to its exactly bound trip", async () => {
+  const request = await targetRequest();
+  let releaseRevoke;
+  const revokeGate = new Promise((resolve) => { releaseRevoke = resolve; });
+  const harness = createHarness({
+    initialState: recoveredReconciliation(request),
+    transportOptions: { revokeGate },
+  });
+
+  await assert.rejects(
+    harness.service.getResearchStatus("trip-other-with-identical-projection"),
+    { code: "AGENT_RUN_INACTIVE" },
+  );
+  const owned = await harness.service.getResearchStatus("trip-private");
+  assert.equal(owned.tripId, "trip-private");
+  assert.equal(owned.researchTaskId, "research-task-reconciliation");
+  releaseRevoke();
+});
+
+test("an identical projection from another trip cannot resume or replace the bound blocker", async () => {
+  const request = await targetRequest();
+  const recovered = {
+    tripId: "trip-private",
+    researchTaskId: "research-task-trip-bound",
+    codexThreadId: "thread-trip-bound",
+    targetCategory: "hotel",
+    targetScopeId: request.targetScopeId,
+    disclosureFingerprint: request.disclosureFingerprint,
+    aliasSalt: "alias-salt-trip-bound",
+    blockedReason: "codex_auth_required",
+    blockedHostname: null,
+    activeRuntimeMs: 12_000,
+    phase: "needs_owner_action",
+    startedAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:01:00.000Z",
+  };
+  const harness = createHarness({
+    initialState: recovered,
+    scripts: [{ codexThreadId: recovered.codexThreadId, output: completedOutput(), activeDurationMs: 13_000 }],
+  });
+
+  await assert.rejects(harness.service.getResearchStatus("trip-other-with-identical-projection"), { code: "AGENT_RUN_INACTIVE" });
+  harness.service.prepare("trip-other-with-identical-projection");
+  await harness.service.claim("agent-run-trip-other");
+  await assert.rejects(harness.service.resumeTravelResearch({
+    tripId: "trip-other-with-identical-projection",
+    agentRunId: "agent-run-trip-other",
+    operationId: "operation-trip-other",
+    researchTaskId: recovered.researchTaskId,
+    resumeAction: "retry_codex_auth",
+  }), { code: "CODEX_RESEARCH_FAILED" });
+  assert.equal(harness.runner.createCount, 0);
+  assert.equal(harness.transport.submittedPayloads.length, 0);
+  assert.deepEqual(harness.store.state, recovered);
+
+  harness.service.prepare("trip-private");
+  await harness.service.claim("agent-run-trip-owner");
+  const completed = await harness.service.resumeTravelResearch({
+    tripId: "trip-private",
+    agentRunId: "agent-run-trip-owner",
+    operationId: "operation-trip-owner",
+    researchTaskId: recovered.researchTaskId,
+    resumeAction: "retry_codex_auth",
+  });
+  assert.equal(completed.phase, "completed");
+});
+
+test("a matching exact cancel wins while recovered self-revoke reconciliation is in flight", async () => {
+  const request = await targetRequest();
+  let releaseRevoke;
+  let revokeStarted;
+  const revokeGate = new Promise((resolve) => { releaseRevoke = resolve; });
+  const observedRevoke = new Promise((resolve) => { revokeStarted = resolve; });
+  const harness = createHarness({
+    initialState: recoveredReconciliation(request),
+    transportFactory(events) {
+      const transport = fakeTransport(events, contextFixture());
+      transport.reconcileRevokeSelf = async () => {
+        events.push("transport.revokeSelf");
+        revokeStarted();
+        await revokeGate;
+        throw Object.assign(new Error("already revoked"), { code: "AGENT_RUN_INACTIVE" });
+      };
+      return transport;
+    },
+  });
+
+  const reconciling = await harness.service.getResearchStatus("trip-private");
+  await observedRevoke;
+  const cancellation = harness.service.cancelResearch({
+    tripId: "trip-private",
+    researchTaskId: reconciling.researchTaskId,
+    agentRunId: reconciling.agentRunId,
+    operationId: reconciling.operationId,
+  });
+  releaseRevoke();
+
+  const cancelledStatus = await cancellation;
+  assert.equal(cancelledStatus.phase, "cancelled");
+  assert.equal(cancelledStatus.tripId, "trip-private");
+  assert.equal(harness.store.state, undefined);
+  assert.equal(harness.events.includes("notifier.notifyOwnerAction"), false);
+});
+
+test("a self-revoke intent persistence failure discards only the unsent runtime envelope", async () => {
+  const harness = createHarness({
+    scripts: [{ codexThreadId: "thread-persist-failure", output: ownerAction("codex_auth_required"), activeDurationMs: 10 }],
+    storeOptions: { reconciliationPersistError: Object.assign(new Error("persist failed"), { code: "RESEARCH_STATE_UNAVAILABLE" }) },
+  });
+  const request = await targetRequest();
+  harness.service.prepare("trip-private");
+  await harness.service.claim(request.agentRunId);
+
+  const result = await harness.service.executeTravelResearch(request);
+
+  assert.equal(result.phase, "failed");
+  assert.equal(harness.events.filter((event) => event === "transport.discardPreparedRevokeSelf").length, 1);
+  assert.equal(harness.store.state, undefined);
+});
+
+test("a persisted self-revoke responsibility survives definitive revoke and final blocker persistence failures", async () => {
+  for (const failure of ["revoke", "final-persist"]) {
+    const request = await targetRequest();
+    const harness = createHarness({
+      scripts: [{ codexThreadId: `thread-${failure}`, output: ownerAction("codex_auth_required"), activeDurationMs: 10 }],
+      transportFactory: failure === "revoke" ? (events) => {
+        const transport = fakeTransport(events, contextFixture());
+        transport.reconcileRevokeSelf = async () => {
+          events.push("transport.revokeSelf");
+          throw Object.assign(new Error("definitive 4xx"), { code: "CODEX_RESEARCH_FAILED" });
+        };
+        return transport;
+      } : undefined,
+      storeOptions: failure === "final-persist"
+        ? { persistError: Object.assign(new Error("final persist failed"), { code: "RESEARCH_STATE_UNAVAILABLE" }) }
+        : undefined,
+    });
+    harness.service.prepare("trip-private");
+    await harness.service.claim(request.agentRunId);
+
+    await harness.service.executeTravelResearch(request).catch(() => undefined);
+
+    assert.equal(harness.store.state?.recordType, "self_revoke_reconciliation", failure);
+    assert.equal(harness.store.state?.agentRunId, request.agentRunId, failure);
+  }
 });
 
 test("a persisted self-revoke intent survives a committed-response crash and converges to the blocker after restart", async () => {
@@ -3009,7 +3226,7 @@ test("a persisted self-revoke intent survives a committed-response crash and con
     return originalReconcile(snapshot);
   };
   const request = await targetRequest();
-  original.service.prepare();
+  original.service.prepare("trip-private");
   await original.service.claim(request.agentRunId);
   const originalExecution = original.service.executeTravelResearch(request);
   await observedOriginalRevoke;
@@ -3038,13 +3255,13 @@ test("a persisted self-revoke intent survives a committed-response crash and con
     },
   });
 
-  const reconciling = await restarted.service.getResearchStatus();
+  const reconciling = await restarted.service.getResearchStatus("trip-private");
   assert.equal(reconciling.phase, "validating");
   assert.equal(reconciling.reconciliationState, "self_revoke_reconciling");
   await observedRestartRevoke;
   releaseRestartRevoke();
   await new Promise((resolve) => setImmediate(resolve));
-  const blocked = await restarted.service.getResearchStatus();
+  const blocked = await restarted.service.getResearchStatus("trip-private");
   assert.equal(blocked.phase, "needs_owner_action");
   assert.equal(blocked.researchTaskId, persistedIntent.researchTaskId);
   assert.equal(blocked.agentRunId, request.agentRunId);
@@ -3098,7 +3315,7 @@ test("an expired uncertain cleanup revoke releases capability before persisting 
     },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   const execution = harness.service.executeTravelResearch(request);
   while (revokeBodies.length === 0) await new Promise((resolve) => setImmediate(resolve));
@@ -3158,7 +3375,7 @@ test("an expired uncertain submit stays pending and replays before authoritative
     },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   const execution = harness.service.executeTravelResearch(request);
   while (submitBodies.length === 0) await new Promise((resolve) => setImmediate(resolve));
@@ -3186,7 +3403,7 @@ test("cancelling during signed context recheck prevents runner creation and cand
     transportOptions: { contextGate },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   const execution = harness.service.executeTravelResearch(request);
   while (!harness.events.includes("transport.getDecisionContext")) {
@@ -3216,7 +3433,7 @@ test("cancel stops an active runner before validation and produces no candidates
     };
   }] });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   const execution = harness.service.executeTravelResearch(request);
   while (!harness.events.includes("runner.runInitial")) await new Promise((resolve) => setImmediate(resolve));
@@ -3240,19 +3457,20 @@ test("cancel requires the exact task, run, and operation without affecting the c
     return { codexThreadId: "thread-exact-cancel", output: completedOutput(), activeDurationMs: 10 };
   }] });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
   const execution = harness.service.executeTravelResearch(request);
   while (!harness.events.includes("runner.runInitial")) await new Promise((resolve) => setImmediate(resolve));
-  const status = await harness.service.getResearchStatus();
+  const status = await harness.service.getResearchStatus("trip-private");
 
   await assert.rejects(harness.service.cancelResearch({
+    tripId: "trip-private",
     researchTaskId: status.researchTaskId,
     agentRunId: "agent-run-other",
     operationId: status.operationId,
   }), { code: "AGENT_RUN_INACTIVE" });
   assert.equal(harness.events.includes("runner.cancel"), false);
-  assert.equal((await harness.service.getResearchStatus()).phase, "researching");
+  assert.equal((await harness.service.getResearchStatus("trip-private")).phase, "researching");
 
   const cancellation = cancelCurrentResearch(harness.service);
   release();
@@ -3276,7 +3494,7 @@ test("cancel during writing waits for terminal reconciliation and never reports 
       transportOptions: { submitGate, submitError },
     });
     const request = await targetRequest();
-    harness.service.prepare();
+    harness.service.prepare("trip-private");
     await harness.service.claim(request.agentRunId);
     const execution = harness.service.executeTravelResearch(request);
     while (!harness.events.includes("transport.submitProposalBatch")) {
@@ -3285,7 +3503,7 @@ test("cancel during writing waits for terminal reconciliation and never reports 
 
     const cancellation = cancelCurrentResearch(harness.service);
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal((await harness.service.getResearchStatus()).phase, "cancelling");
+    assert.equal((await harness.service.getResearchStatus("trip-private")).phase, "cancelling");
     releaseSubmit();
     const [executeStatus, cancelStatus] = await Promise.all([execution, cancellation]);
 
@@ -3307,7 +3525,7 @@ test("uncertain cloud submit retries an identical payload and writes only once l
     transportOptions: { uncertainSubmitOnce: true },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
 
   const status = await harness.service.executeTravelResearch(request);
@@ -3327,7 +3545,7 @@ test("uncertain blocker revocation replays until determined before persistence",
     transportOptions: { uncertainRevokeCount: 2 },
   });
   const request = await targetRequest();
-  harness.service.prepare();
+  harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
 
   const status = await harness.service.executeTravelResearch(request);
@@ -3356,7 +3574,7 @@ test("getResearchStatus restores only the safe blocked projection and strict sta
   };
   const harness = createHarness({ initialState });
 
-  const status = await harness.service.getResearchStatus();
+  const status = await harness.service.getResearchStatus("trip-private");
   assert.deepEqual(status, {
     phase: "needs_owner_action",
     researchTaskId: "research-task-1",
@@ -3372,6 +3590,7 @@ test("getResearchStatus restores only the safe blocked projection and strict sta
 
   assert.deepEqual(safeResearchStatus({
     phase: "failed",
+    tripId: "trip-private",
     researchTaskId: "task-2",
     agentRunId: "agent-run-safe",
     operationId: "operation-safe",
@@ -3384,6 +3603,7 @@ test("getResearchStatus restores only the safe blocked projection and strict sta
     detail: "/Users/private/path",
   }), {
     phase: "failed",
+    tripId: "trip-private",
     researchTaskId: "task-2",
     agentRunId: "agent-run-safe",
     operationId: "operation-safe",

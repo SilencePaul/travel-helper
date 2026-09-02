@@ -978,6 +978,27 @@ test("a persisted signed self-revoke envelope can be reconciled by a fresh runti
   assert.equal(restarted.claimedRun, undefined);
 });
 
+test("an unsent prepared self-revoke can be discarded exactly after local intent persistence fails", async () => {
+  let fetchCalls = 0;
+  const runtime = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.example.test/api/agent",
+    now: () => new Date("2026-08-31T00:05:00.000Z"),
+    fetch: async (_url, init) => {
+      fetchCalls += 1;
+      const body = JSON.parse(init.body);
+      return Response.json({ ok: true, data: claimedData(body.agentRunId, 7) });
+    },
+  });
+  runtime.prepare();
+  await runtime.claim("agent-run-persist-failed");
+  const unsent = runtime.prepareRevokeSelf();
+
+  assert.equal(runtime.discardPreparedRevokeSelf(unsent), true);
+  assert.doesNotThrow(() => runtime.prepare());
+  assert.equal(fetchCalls, 1);
+  assert.equal(runtime.discardPreparedRevokeSelf(unsent), false);
+});
+
 test("a persisted self-revoke can retry its exact envelope after a definitive response failure", async () => {
   const first = new LocalAgentBridgeRuntime({
     agentEndpoint: "https://api.example.test/api/agent",

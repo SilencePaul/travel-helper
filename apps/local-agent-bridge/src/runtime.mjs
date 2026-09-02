@@ -499,12 +499,13 @@ export class LocalAgentBridgeRuntime {
         payload: safePayload,
       };
       const envelope = { ...signed, signature: signature(this.#prepared.privateKey, signed) };
-      this.#pendingCommand = { action, requested, firstSentAt, body: JSON.stringify(envelope) };
+      this.#pendingCommand = { action, requested, firstSentAt, body: JSON.stringify(envelope), sent: false };
     } else if (this.#pendingCommand.requested !== requested) {
       throw codedError("COMMAND_RETRY_REQUIRED");
     }
     this.#busy = "command";
     try {
+      this.#pendingCommand.sent = true;
       const response = await this.#post(this.#pendingCommand.body);
       currentTime(this.#now, true);
       if (
@@ -600,6 +601,7 @@ export class LocalAgentBridgeRuntime {
         requested,
         firstSentAt,
         body: JSON.stringify({ ...signed, signature: signature(this.#prepared.privateKey, signed) }),
+        sent: false,
       };
     } else if (this.#pendingCommand.requested !== requested) {
       throw codedError("COMMAND_RETRY_REQUIRED");
@@ -610,6 +612,23 @@ export class LocalAgentBridgeRuntime {
       firstSentAt: this.#pendingCommand.firstSentAt,
       body: this.#pendingCommand.body,
     });
+  }
+
+  discardPreparedRevokeSelf(value) {
+    let snapshot;
+    try {
+      snapshot = safeRevokeSnapshot(value);
+    } catch {
+      return false;
+    }
+    if (this.#busy || !this.#prepared || !this.#claimed || !this.#pendingCommand
+      || this.#pendingCommand.sent
+      || this.#claimed.agentRunId !== snapshot.agentRunId
+      || this.#pendingCommand.action !== "revokeAgentRunSelf"
+      || this.#pendingCommand.firstSentAt !== snapshot.firstSentAt
+      || this.#pendingCommand.body !== snapshot.body) return false;
+    this.#clearCapability();
+    return true;
   }
 
   async reconcileRevokeSelf(value) {
@@ -644,6 +663,7 @@ export class LocalAgentBridgeRuntime {
         requested,
         firstSentAt: snapshot.firstSentAt,
         body: snapshot.body,
+        sent: true,
       };
     }
     return this.#executeCommand("revokeAgentRunSelf", {}, true);

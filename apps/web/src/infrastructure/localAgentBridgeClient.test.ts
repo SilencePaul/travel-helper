@@ -16,6 +16,7 @@ const prepared = {
 
 const researchStatus = {
   phase: "researching" as const,
+  tripId: "trip-secret",
   researchTaskId: "research-task-1",
   agentRunId: "agent-run-1",
   operationId: "operation-1",
@@ -25,6 +26,7 @@ const researchStatus = {
 };
 
 const executeInput = {
+  tripId: "trip-secret",
   agentRunId: "agent-run-1",
   operationId: "operation-1",
   targetCategory: "hotel" as const,
@@ -33,6 +35,7 @@ const executeInput = {
 };
 
 const resumeInput = {
+  tripId: "trip-secret",
   agentRunId: "agent-run-2",
   operationId: "operation-2",
   researchTaskId: "research-task-1",
@@ -40,6 +43,7 @@ const resumeInput = {
 };
 
 const cancelInput = {
+  tripId: "trip-secret",
   researchTaskId: "research-task-1",
   agentRunId: "agent-run-1",
   operationId: "operation-1",
@@ -73,17 +77,17 @@ describe("LocalAgentBridgeClient", () => {
     expect(() => new LocalAgentBridgeClient(address)).toThrow("INVALID_BRIDGE_URL");
   });
 
-  it("prepares with an exact empty body and credential-free no-store fetch", async () => {
+  it("prepares with the exact local trip binding and credential-free no-store fetch", async () => {
     const fetch = vi.fn().mockResolvedValue(jsonResponse({ ok: true, data: prepared }));
     const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch });
 
-    await expect(client.prepare()).resolves.toEqual(prepared);
+    await expect(client.prepare("trip-secret")).resolves.toEqual(prepared);
     expect(fetch).toHaveBeenCalledTimes(1);
     const [url, init] = fetch.mock.calls[0]!;
     expect(url).toBe("http://127.0.0.1:43120/v1/agent-runs/prepare");
     expect(init).toMatchObject({ method: "POST", headers: { "content-type": "application/json" } });
     assertSafeRequest(init);
-    expect(String(init.body)).toBe("{}");
+    expect(JSON.parse(String(init.body))).toEqual({ tripId: "trip-secret" });
     expect(String(init.body)).not.toContain("scope");
     expect(String(init.body)).not.toContain("pairingCode\"");
     expect(String(init.body)).not.toContain("privateKey");
@@ -129,7 +133,7 @@ describe("LocalAgentBridgeClient", () => {
       timeoutMs: 50,
     });
 
-    const request = client.prepare({ signal: controller.signal });
+    const request = client.prepare("trip-secret", { signal: controller.signal });
     controller.abort(new Error("caller stopped"));
     const outcome = await Promise.race([
       request.then(() => "resolved", (error: LocalAgentBridgeError) => error.code),
@@ -138,7 +142,7 @@ describe("LocalAgentBridgeClient", () => {
 
     expect(outcome).toBe("BRIDGE_UNAVAILABLE");
     expect(requestSignal?.aborted).toBe(true);
-    expect(JSON.parse(String(fetch.mock.calls[0]?.[1]?.body))).toEqual({});
+    expect(JSON.parse(String(fetch.mock.calls[0]?.[1]?.body))).toEqual({ tripId: "trip-secret" });
   });
 
   it("calls each fixed travel research route with its exact method, path, and body", async () => {
@@ -159,7 +163,7 @@ describe("LocalAgentBridgeClient", () => {
     const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch });
 
     await expect(client.executeTravelResearch(executeInput)).resolves.toEqual(researchStatus);
-    await expect(client.getResearchStatus()).resolves.toEqual(researchStatus);
+    await expect(client.getResearchStatus("trip-secret")).resolves.toEqual(researchStatus);
     await expect(client.resumeTravelResearch(resumeInput)).resolves.toEqual({
       ...researchStatus,
       agentRunId: resumeInput.agentRunId,
@@ -173,9 +177,8 @@ describe("LocalAgentBridgeClient", () => {
     expect(calls[0]?.[1]).toMatchObject({ method: "POST" });
     expect(JSON.parse(String(calls[0]?.[1]?.body))).toEqual(executeInput);
     expect(calls[1]?.[0]).toBe("http://127.0.0.1:43120/v1/agent-runs/research-status");
-    expect(calls[1]?.[1]).toMatchObject({ method: "GET" });
-    expect(Object.hasOwn(calls[1]?.[1] ?? {}, "body")).toBe(false);
-    expect(Object.hasOwn(calls[1]?.[1]?.headers ?? {}, "content-type")).toBe(false);
+    expect(calls[1]?.[1]).toMatchObject({ method: "POST" });
+    expect(JSON.parse(String(calls[1]?.[1]?.body))).toEqual({ tripId: "trip-secret" });
     expect(calls[2]?.[0]).toBe("http://127.0.0.1:43120/v1/agent-runs/resume-travel-research");
     expect(calls[2]?.[1]).toMatchObject({ method: "POST" });
     expect(JSON.parse(String(calls[2]?.[1]?.body))).toEqual(resumeInput);
@@ -224,9 +227,9 @@ describe("LocalAgentBridgeClient", () => {
   ])("strictly rejects extra secret-capable fields in a successful %s response", async (method, body) => {
     const fetch = vi.fn().mockResolvedValue(jsonResponse(body()));
     const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch });
-    const operation = method === "prepare" ? client.prepare()
+    const operation = method === "prepare" ? client.prepare("trip-secret")
       : method === "execute" ? client.executeTravelResearch(executeInput)
-        : method === "status" ? client.getResearchStatus()
+        : method === "status" ? client.getResearchStatus("trip-secret")
           : method === "resume" ? client.resumeTravelResearch(resumeInput)
             : client.cancelResearch(cancelInput);
 
@@ -241,7 +244,7 @@ describe("LocalAgentBridgeClient", () => {
     const fetch = vi.fn().mockResolvedValue(jsonResponse({ ok: false, error: code }, 409));
     const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch });
 
-    const error = await client.getResearchStatus().then(() => undefined, (value: unknown) => value);
+    const error = await client.getResearchStatus("trip-secret").then(() => undefined, (value: unknown) => value);
 
     expect(error).toBeInstanceOf(LocalAgentBridgeError);
     expect(error).toMatchObject({ name: "LocalAgentBridgeError", code, message: code });
@@ -255,14 +258,14 @@ describe("LocalAgentBridgeClient", () => {
     const fetch = vi.fn().mockResolvedValue(jsonResponse(body, 500));
     const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch });
 
-    await expect(client.getResearchStatus()).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
+    await expect(client.getResearchStatus("trip-secret")).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
   });
 
   it("rejects malformed JSON as an invalid bridge response", async () => {
     const fetch = vi.fn().mockResolvedValue(new Response("not-json", { status: 200 }));
     const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch });
 
-    await expect(client.getResearchStatus()).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
+    await expect(client.getResearchStatus("trip-secret")).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
   });
 
   it.each([
@@ -277,7 +280,7 @@ describe("LocalAgentBridgeClient", () => {
     }));
     const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch });
 
-    await expect(client.getResearchStatus()).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
+    await expect(client.getResearchStatus("trip-secret")).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
   });
 
   it.each([
@@ -291,7 +294,7 @@ describe("LocalAgentBridgeClient", () => {
     }));
     const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch });
 
-    await expect(client.getResearchStatus()).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
+    await expect(client.getResearchStatus("trip-secret")).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
   });
 
   it("rejects a declared oversized response before acquiring its body reader", async () => {
@@ -315,7 +318,7 @@ describe("LocalAgentBridgeClient", () => {
     const fetch = vi.fn().mockResolvedValue(response);
     const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch });
 
-    await expect(client.getResearchStatus()).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
+    await expect(client.getResearchStatus("trip-secret")).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
     expect(readerAcquired).toBe(false);
     expect(cancelCount).toBe(1);
   });
@@ -342,7 +345,7 @@ describe("LocalAgentBridgeClient", () => {
     const fetch = vi.fn().mockResolvedValue(response);
     const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch, timeoutMs: 1_000 });
 
-    await expect(client.getResearchStatus()).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
+    await expect(client.getResearchStatus("trip-secret")).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
     expect(events).toEqual(failure === "mime"
       ? ["cancel-start", "cancel-end"]
       : ["reader", "cancel-start", "cancel-end"]);
@@ -372,7 +375,7 @@ describe("LocalAgentBridgeClient", () => {
     const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch, timeoutMs: 5 });
 
     const outcome = await Promise.race([
-      client.getResearchStatus().then(() => "resolved", (error: LocalAgentBridgeError) => error.code),
+      client.getResearchStatus("trip-secret").then(() => "resolved", (error: LocalAgentBridgeError) => error.code),
       new Promise<string>((resolve) => globalThis.setTimeout(() => resolve("still-pending"), 30)),
     ]);
 
@@ -402,7 +405,7 @@ describe("LocalAgentBridgeClient", () => {
     const fetch = vi.fn().mockResolvedValue(response);
     const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch });
 
-    await expect(client.getResearchStatus()).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
+    await expect(client.getResearchStatus("trip-secret")).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
     expect(readCount).toBe(2);
     expect(cancelCount).toBe(1);
   });
@@ -435,7 +438,7 @@ describe("LocalAgentBridgeClient", () => {
     const fetch = vi.fn().mockResolvedValue(response);
     const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch, timeoutMs: 1_000 });
 
-    await expect(client.getResearchStatus()).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
+    await expect(client.getResearchStatus("trip-secret")).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
     expect(readCount).toBe(1);
     expect(events).toEqual(["cancel-start", "cancel-end", "release"]);
   });
@@ -463,7 +466,7 @@ describe("LocalAgentBridgeClient", () => {
     const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch, timeoutMs: 5 });
 
     const outcome = await Promise.race([
-      client.getResearchStatus().then(() => "resolved", (error: LocalAgentBridgeError) => error.code),
+      client.getResearchStatus("trip-secret").then(() => "resolved", (error: LocalAgentBridgeError) => error.code),
       new Promise<string>((resolve) => globalThis.setTimeout(() => resolve("still-pending"), 30)),
     ]);
 
@@ -496,7 +499,7 @@ describe("LocalAgentBridgeClient", () => {
     const fetch = vi.fn().mockResolvedValue(response);
     const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch, timeoutMs: 1 });
 
-    const error = await client.getResearchStatus().then(() => undefined, (value: unknown) => value);
+    const error = await client.getResearchStatus("trip-secret").then(() => undefined, (value: unknown) => value);
 
     expect(error).toMatchObject({ code: "BRIDGE_UNAVAILABLE" });
     expect(readCount).toBeLessThan(5_000);
@@ -527,7 +530,7 @@ describe("LocalAgentBridgeClient", () => {
     const fetch = vi.fn().mockResolvedValue(response);
     const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch });
 
-    await expect(client.getResearchStatus()).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
+    await expect(client.getResearchStatus("trip-secret")).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
   });
 
   it("cancels the body of a fetch response that arrives after the caller has already aborted", async () => {
@@ -549,7 +552,7 @@ describe("LocalAgentBridgeClient", () => {
     const controller = new AbortController();
     const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch, timeoutMs: 1_000 });
 
-    const request = client.getResearchStatus({ signal: controller.signal });
+    const request = client.getResearchStatus("trip-secret", { signal: controller.signal });
     controller.abort(new Error("caller stopped"));
     await expect(request).rejects.toMatchObject({ code: "BRIDGE_UNAVAILABLE" });
     resolveFetch(response);
@@ -583,7 +586,7 @@ describe("LocalAgentBridgeClient", () => {
     const client = new LocalAgentBridgeClient(`http://127.0.0.1:${address.port}`, { timeoutMs: 10 });
 
     try {
-      await expect(client.getResearchStatus()).rejects.toMatchObject({ code: "BRIDGE_UNAVAILABLE" });
+      await expect(client.getResearchStatus("trip-secret")).rejects.toMatchObject({ code: "BRIDGE_UNAVAILABLE" });
       const outcome = await Promise.race([
         closed.then(() => "closed"),
         new Promise<string>((resolve) => globalThis.setTimeout(() => resolve("still-open"), 500)),
@@ -601,7 +604,7 @@ describe("LocalAgentBridgeClient", () => {
     controller.abort(new Error("already stopped"));
     const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch });
 
-    await expect(client.getResearchStatus({ signal: controller.signal })).rejects.toMatchObject({
+    await expect(client.getResearchStatus("trip-secret", { signal: controller.signal })).rejects.toMatchObject({
       code: "BRIDGE_UNAVAILABLE",
     });
     expect(fetch).not.toHaveBeenCalled();
@@ -615,7 +618,7 @@ describe("LocalAgentBridgeClient", () => {
     });
 
     const outcome = await Promise.race([
-      client.getResearchStatus().then(() => "resolved", (error: LocalAgentBridgeError) => error.code),
+      client.getResearchStatus("trip-secret").then(() => "resolved", (error: LocalAgentBridgeError) => error.code),
       new Promise<string>((resolve) => globalThis.setTimeout(() => resolve("still-pending"), 30)),
     ]);
     expect(outcome).toBe("BRIDGE_UNAVAILABLE");
@@ -635,7 +638,7 @@ describe("LocalAgentBridgeClient", () => {
     });
 
     const outcome = await Promise.race([
-      client.getResearchStatus().then(() => "resolved", (error: LocalAgentBridgeError) => error.code),
+      client.getResearchStatus("trip-secret").then(() => "resolved", (error: LocalAgentBridgeError) => error.code),
       new Promise<string>((resolve) => globalThis.setTimeout(() => resolve("still-pending"), 30)),
     ]);
     expect(outcome).toBe("BRIDGE_UNAVAILABLE");
@@ -664,7 +667,7 @@ describe("LocalAgentBridgeClient", () => {
       timeoutMs: 1_000,
     });
 
-    const request = client.getResearchStatus({ signal: controller.signal });
+    const request = client.getResearchStatus("trip-secret", { signal: controller.signal });
     await readingBody;
     controller.abort(new Error("caller stopped waiting"));
 

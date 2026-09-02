@@ -7,6 +7,7 @@ import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, parse, resolve } from "node:path";
 
 export const RECOVERY_STATE_FIELDS = Object.freeze([
+  "tripId",
   "researchTaskId",
   "agentRunId",
   "operationId",
@@ -25,6 +26,7 @@ export const RECOVERY_STATE_FIELDS = Object.freeze([
 ]);
 export const RECONCILIATION_STATE_FIELDS = Object.freeze([
   "recordType",
+  "tripId",
   "researchTaskId",
   "agentRunId",
   "operationId",
@@ -224,6 +226,7 @@ function validRevokeRequest(value, agentRunId) {
 function validateReconciliationShape(value) {
   const valid = hasExactFields(value, RECONCILIATION_STATE_FIELDS)
     && value.recordType === "self_revoke_reconciliation"
+    && opaqueIdentifier(value.tripId)
     && opaqueIdentifier(value.researchTaskId)
     && opaqueIdentifier(value.agentRunId)
     && opaqueIdentifier(value.operationId)
@@ -258,6 +261,7 @@ function validateStateShape(value) {
     return validateReconciliationShape(value);
   }
   const valid = hasExactFields(value)
+    && opaqueIdentifier(value.tripId)
     && opaqueIdentifier(value.researchTaskId)
     && opaqueIdentifier(value.agentRunId)
     && opaqueIdentifier(value.operationId)

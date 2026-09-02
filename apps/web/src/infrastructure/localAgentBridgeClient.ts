@@ -37,7 +37,9 @@ const ErrorResponseSchema = z.object({
   ok: z.literal(false),
   error: ResearchErrorCodeSchema,
 }).strict();
+const PrepareInputSchema = z.object({ tripId: OpaqueIdentifierSchema }).strict();
 const ExecuteTravelResearchInputSchema = z.object({
+  tripId: OpaqueIdentifierSchema,
   agentRunId: OpaqueIdentifierSchema,
   operationId: OpaqueIdentifierSchema,
   targetCategory: CandidateCategorySchema,
@@ -45,12 +47,14 @@ const ExecuteTravelResearchInputSchema = z.object({
   disclosureFingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
 }).strict();
 const ResumeTravelResearchInputSchema = z.object({
+  tripId: OpaqueIdentifierSchema,
   agentRunId: OpaqueIdentifierSchema,
   operationId: OpaqueIdentifierSchema,
   researchTaskId: OpaqueIdentifierSchema,
   resumeAction: ResearchResumeActionSchema,
 }).strict();
 const CancelResearchInputSchema = z.object({
+  tripId: OpaqueIdentifierSchema,
   researchTaskId: OpaqueIdentifierSchema,
   agentRunId: OpaqueIdentifierSchema,
   operationId: OpaqueIdentifierSchema,
@@ -65,6 +69,7 @@ export type PreparedAgentRun = z.infer<typeof PreparedAgentRunSchema>;
 export type LocalAgentClaim = z.infer<typeof ClaimResponseSchema>["data"];
 export type RequestOptions = { signal?: AbortSignal };
 export type ExecuteTravelResearchInput = {
+  tripId: string;
   agentRunId: string;
   operationId: string;
   targetCategory: CandidateCategory;
@@ -72,12 +77,13 @@ export type ExecuteTravelResearchInput = {
   disclosureFingerprint: string;
 };
 export type ResumeTravelResearchInput = {
+  tripId: string;
   agentRunId: string;
   operationId: string;
   researchTaskId: string;
   resumeAction: ResearchResumeAction;
 };
-export type CancelResearchInput = { researchTaskId: string; agentRunId: string; operationId: string };
+export type CancelResearchInput = { tripId: string; researchTaskId: string; agentRunId: string; operationId: string };
 export type LocalAgentBridgeErrorCode = ResearchErrorCode | "BRIDGE_UNAVAILABLE" | "INVALID_BRIDGE_RESPONSE";
 
 export class LocalAgentBridgeError extends Error {
@@ -91,10 +97,10 @@ export class LocalAgentBridgeError extends Error {
 }
 
 export interface LocalAgentBridge {
-  prepare(options?: RequestOptions): Promise<PreparedAgentRun>;
+  prepare(tripId: string, options?: RequestOptions): Promise<PreparedAgentRun>;
   claim(agentRunId: string, options?: RequestOptions): Promise<LocalAgentClaim>;
   executeTravelResearch(input: ExecuteTravelResearchInput, options?: RequestOptions): Promise<ResearchStatus>;
-  getResearchStatus(options?: RequestOptions): Promise<ResearchStatus>;
+  getResearchStatus(tripId: string, options?: RequestOptions): Promise<ResearchStatus>;
   resumeTravelResearch(input: ResumeTravelResearchInput, options?: RequestOptions): Promise<ResearchStatus>;
   cancelResearch(input: CancelResearchInput, options?: RequestOptions): Promise<ResearchStatus>;
 }
@@ -353,8 +359,13 @@ export class LocalAgentBridgeClient implements LocalAgentBridge {
     return parsed;
   }
 
-  async prepare(options: RequestOptions = {}): Promise<PreparedAgentRun> {
-    const response = await this.request("POST", "/v1/agent-runs/prepare", {}, options.signal);
+  async prepare(tripId: string, options: RequestOptions = {}): Promise<PreparedAgentRun> {
+    const response = await this.request(
+      "POST",
+      "/v1/agent-runs/prepare",
+      PrepareInputSchema.parse({ tripId }),
+      options.signal,
+    );
     const parsed = PrepareResponseSchema.safeParse(response);
     if (!parsed.success) throw invalidBridgeResponse();
     return parsed.data.data;
@@ -382,9 +393,10 @@ export class LocalAgentBridgeClient implements LocalAgentBridge {
     return this.researchPost("/v1/agent-runs/execute-travel-research", parsedInput, options, parsedInput);
   }
 
-  async getResearchStatus(options: RequestOptions = {}): Promise<ResearchStatus> {
-    const response = await this.request("GET", "/v1/agent-runs/research-status", undefined, options.signal);
-    return this.parseResearchStatus(response);
+  async getResearchStatus(tripId: string, options: RequestOptions = {}): Promise<ResearchStatus> {
+    const input = PrepareInputSchema.parse({ tripId });
+    const response = await this.request("POST", "/v1/agent-runs/research-status", input, options.signal);
+    return this.parseResearchStatus(response, { tripId });
   }
 
   async resumeTravelResearch(
@@ -409,20 +421,23 @@ export class LocalAgentBridgeClient implements LocalAgentBridge {
     path: string,
     body: Record<string, unknown>,
     options: RequestOptions,
-    expected?: { agentRunId: string; operationId: string; researchTaskId?: string },
+    expected?: { tripId: string; agentRunId?: string; operationId?: string; researchTaskId?: string },
   ) {
     const response = await this.request("POST", path, body, options.signal);
     return this.parseResearchStatus(response, expected);
   }
 
-  private parseResearchStatus(response: unknown, expected?: { agentRunId: string; operationId: string; researchTaskId?: string }) {
+  private parseResearchStatus(response: unknown, expected?: { tripId: string; agentRunId?: string; operationId?: string; researchTaskId?: string }) {
     const parsed = ResearchStatusResponseSchema.safeParse(response);
     if (!parsed.success) throw invalidBridgeResponse();
     if (expected !== undefined
-      && (parsed.data.data.phase === "idle"
-        || parsed.data.data.agentRunId !== expected.agentRunId
-        || parsed.data.data.operationId !== expected.operationId
-        || (expected.researchTaskId !== undefined && parsed.data.data.researchTaskId !== expected.researchTaskId))) {
+      && ((parsed.data.data.phase !== "idle" && parsed.data.data.tripId !== expected.tripId)
+        || (expected.agentRunId !== undefined
+          && (parsed.data.data.phase === "idle" || parsed.data.data.agentRunId !== expected.agentRunId))
+        || (expected.operationId !== undefined
+          && (parsed.data.data.phase === "idle" || parsed.data.data.operationId !== expected.operationId))
+        || (expected.researchTaskId !== undefined
+          && (parsed.data.data.phase === "idle" || parsed.data.data.researchTaskId !== expected.researchTaskId)))) {
       throw invalidBridgeResponse();
     }
     return parsed.data.data;

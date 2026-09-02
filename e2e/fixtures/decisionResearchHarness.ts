@@ -38,7 +38,7 @@ type HarnessOptions = {
 };
 
 const now = "2026-08-31T00:00:00.000Z";
-const taskBase = { researchTaskId: "research-task-e2e", startedAt: now, updatedAt: now };
+const taskBase = { tripId: "trip-2026-gba", researchTaskId: "research-task-e2e", startedAt: now, updatedAt: now };
 const candidateNames: Record<CandidateCategory, [string, string]> = {
   hotel: ["海景行旅", "湾畔酒店"],
   restaurant: ["码头茶餐厅", "巷里小馆"],
@@ -312,6 +312,7 @@ export class DecisionResearchHarness {
         return run ? { ok: true, data: structuredClone(run) } : { ok: false, error: "AGENT_RUN_NOT_FOUND" };
       }
       case "bridge.prepare": {
+        if (inputRecord(call.input)?.tripId !== this.currentWorkspace.tripId) return { ok: false, error: "AGENT_RUN_INACTIVE" };
         if (this.prepareError) return { ok: false, error: this.prepareError };
         if (this.holdPrepare) {
           if (!call.request?.requestId) return { ok: false, error: "AGENT_TRANSPORT_UNAVAILABLE" };
@@ -341,7 +342,8 @@ export class DecisionResearchHarness {
         const activeRun = this.activeClaimedRun();
         const canStartNewTask = this.currentResearchTaskId === undefined
           || ["completed", "cancelled", "failed", "superseded"].includes(this.currentStatus.phase);
-        if (!input || input.agentRunId !== activeRun?.agentRunId || !canStartNewTask) {
+        if (!input || input.tripId !== this.currentWorkspace.tripId
+          || input.agentRunId !== activeRun?.agentRunId || !canStartNewTask) {
           return { ok: false, error: "AGENT_RUN_INACTIVE" };
         }
         if (typeof input.targetCategory !== "string" || !Object.hasOwn(candidateNames, input.targetCategory)) {
@@ -359,6 +361,7 @@ export class DecisionResearchHarness {
         return { ok: true, data: status };
       }
       case "bridge.status": {
+        if (inputRecord(call.input)?.tripId !== this.currentWorkspace.tripId) return { ok: false, error: "AGENT_RUN_INACTIVE" };
         return { ok: true, data: structuredClone(this.currentStatus) };
       }
       case "bridge.resume": {
@@ -367,7 +370,8 @@ export class DecisionResearchHarness {
         const expectedAction = this.currentStatus.phase === "needs_owner_action" && this.currentStatus.blockedReason === "codex_auth_required"
           ? "retry_codex_auth"
           : "skip_blocked_source";
-        if (!input || input.agentRunId !== activeRun?.agentRunId || input.researchTaskId !== this.currentResearchTaskId
+        if (!input || input.tripId !== this.currentWorkspace.tripId
+          || input.agentRunId !== activeRun?.agentRunId || input.researchTaskId !== this.currentResearchTaskId
           || typeof input.operationId !== "string" || input.operationId.length === 0
           || this.currentStatus.phase !== "needs_owner_action" || input.resumeAction !== expectedAction) {
           return { ok: false, error: "AGENT_RUN_INACTIVE" };
@@ -380,7 +384,8 @@ export class DecisionResearchHarness {
       }
       case "bridge.cancel": {
         const input = inputRecord(call.input);
-        if (!this.currentResearchTaskId || input?.researchTaskId !== this.currentResearchTaskId
+        if (!this.currentResearchTaskId || input?.tripId !== this.currentWorkspace.tripId
+          || input.researchTaskId !== this.currentResearchTaskId
           || input.agentRunId !== this.currentResearchAgentRunId
           || input.operationId !== this.currentResearchOperationId) {
           return { ok: false, error: "AGENT_RUN_INACTIVE" };

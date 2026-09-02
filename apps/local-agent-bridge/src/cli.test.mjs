@@ -154,6 +154,7 @@ test("SIGTERM on the real HTTP bridge cancels active research before runner clos
   const executionGate = new Promise((resolve) => { releaseExecution = resolve; });
   const executionStarted = new Promise((resolve) => { markExecutionStarted = resolve; });
   const timestamps = {
+    tripId: "trip-1",
     researchTaskId: "research-task-1",
     agentRunId: "agent-run-1",
     operationId: "operation-1",
@@ -211,6 +212,7 @@ test("SIGTERM on the real HTTP bridge cancels active research before runner clos
     method: "POST",
     headers: { origin: "https://trip.example", "content-type": "application/json", connection: "close" },
     body: JSON.stringify({
+      tripId: "trip-1",
       agentRunId: "agent-run-1",
       operationId: "operation-1",
       targetCategory: "hotel",
@@ -230,6 +232,7 @@ test("SIGTERM on the real HTTP bridge cancels active research before runner clos
   assert.equal(cancelIndex >= 0, true);
   assert.equal(events.indexOf("runner.close") > cancelIndex, true);
   assert.deepEqual(events[cancelIndex], ["service.cancel", {
+    tripId: "trip-1",
     researchTaskId: "research-task-1",
     agentRunId: "agent-run-1",
     operationId: "operation-1",
@@ -287,6 +290,7 @@ test("shutdown preserves owner-action state and propagates active cancellation f
   });
   const active = await createHarness({
     phase: "writing",
+    tripId: "trip-1",
     researchTaskId: "research-task-writing",
     agentRunId: "agent-run-writing",
     operationId: "operation-writing",
@@ -295,6 +299,7 @@ test("shutdown preserves owner-action state and propagates active cancellation f
   assert.deepEqual(active.events, [
     "service.status:writing",
     ["service.cancel", {
+      tripId: "trip-1",
       researchTaskId: "research-task-writing",
       agentRunId: "agent-run-writing",
       operationId: "operation-writing",
@@ -304,6 +309,7 @@ test("shutdown preserves owner-action state and propagates active cancellation f
 
   const terminalFailure = await createHarness({
     phase: "cancelling",
+    tripId: "trip-1",
     researchTaskId: "research-task-terminal-failure",
     agentRunId: "agent-run-terminal-failure",
     operationId: "operation-terminal-failure",
@@ -312,6 +318,7 @@ test("shutdown preserves owner-action state and propagates active cancellation f
   assert.deepEqual(terminalFailure.events, [
     "service.status:cancelling",
     ["service.cancel", {
+      tripId: "trip-1",
       researchTaskId: "research-task-terminal-failure",
       agentRunId: "agent-run-terminal-failure",
       operationId: "operation-terminal-failure",
@@ -446,6 +453,7 @@ test("SIGTERM cannot wash a failed cancellation into success while retrying reso
       statusCalls += 1;
       return {
         phase,
+        tripId: "trip-1",
         researchTaskId: "research-task-1",
         agentRunId: "agent-run-1",
         operationId: "operation-1",
@@ -458,6 +466,7 @@ test("SIGTERM cannot wash a failed cancellation into success while retrying reso
       phase = "failed";
       return {
         phase,
+        tripId: "trip-1",
         researchTaskId: "research-task-1",
         agentRunId: "agent-run-1",
         operationId: "operation-1",
@@ -512,6 +521,7 @@ test("SIGTERM reports exit failure when active terminal reconciliation cannot fi
     async getResearchStatus() {
       return {
         phase: "cancelling",
+        tripId: "trip-1",
         researchTaskId: "research-task-1",
         agentRunId: "agent-run-1",
         operationId: "operation-1",
@@ -968,7 +978,7 @@ test("the real CLI constructs components without running Codex or notifications,
   const response = await fetch(`${bridgeOrigin}/v1/agent-runs/prepare`, {
     method: "POST",
     headers: { origin: connectionUrl.origin, "content-type": "application/json" },
-    body: "{}",
+    body: JSON.stringify({ tripId: "trip-real-cli" }),
   });
   assert.equal(response.status, 200);
   const prepared = await response.json();

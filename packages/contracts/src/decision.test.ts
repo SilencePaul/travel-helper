@@ -194,6 +194,7 @@ describe("decision contracts", () => {
     expect(ResearchStatusSchema.parse({ phase: "idle" })).toEqual({ phase: "idle" });
     const blockedStatus = ResearchStatusSchema.parse({
       phase: "needs_owner_action",
+      tripId: "trip-1",
       researchTaskId: "research-1",
       agentRunId: "agent-run-1",
       operationId: "operation-1",
@@ -209,6 +210,7 @@ describe("decision contracts", () => {
     for (const leakedField of ["codexThreadId", "log", "prompt", "path", "context"] as const) {
       expect(ResearchStatusSchema.safeParse({
         phase: "researching",
+        tripId: "trip-1",
         researchTaskId: "research-1",
         agentRunId: "agent-run-1",
         operationId: "operation-1",
@@ -243,6 +245,7 @@ describe("decision contracts", () => {
 
   it("exposes self-revoke reconciliation only while an operation is active", () => {
     const base = {
+      tripId: "trip-1",
       researchTaskId: "research-1",
       agentRunId: "agent-run-1",
       operationId: "operation-1",
@@ -268,6 +271,7 @@ describe("decision contracts", () => {
   it("requires source hostnames while forbidding them for Codex authentication blockers", () => {
     const base = {
       phase: "needs_owner_action",
+      tripId: "trip-1",
       researchTaskId: "research-1",
       agentRunId: "agent-run-1",
       operationId: "operation-1",
@@ -303,6 +307,7 @@ describe("decision contracts", () => {
   it("keeps authentication, disclosure changes, and cancellation out of failed status", () => {
     const failed = {
       phase: "failed",
+      tripId: "trip-1",
       researchTaskId: "research-1",
       agentRunId: "agent-run-1",
       operationId: "operation-1",

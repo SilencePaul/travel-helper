@@ -709,6 +709,7 @@ test("queues a Codex completion refresh while a page command is busy and runs it
   await userEvent.click(screen.getByRole("button", { name: "保存我的偏好" }));
   await act(async () => finishStatus({
     phase: "completed",
+    tripId: trip.id,
     researchTaskId: "research-task-completed-while-busy",
     agentRunId: "agent-run-completed-while-busy",
     operationId: "operation-completed-while-busy",

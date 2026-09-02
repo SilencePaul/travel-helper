@@ -70,6 +70,7 @@ const workspace: DecisionWorkspace = {
 };
 
 const timestamps = {
+  tripId: trip.id,
   researchTaskId: "research-task-1",
   agentRunId: "agent-run-1",
   operationId: "agent-request-001",
@@ -104,6 +105,7 @@ function setup(options: {
   repository?: DecisionWorkspaceRepository;
   onResearchCompleted?: () => void | Promise<void>;
   currentWorkspace?: DecisionWorkspace;
+  currentTrip?: Trip;
   newIdempotencyKey?: () => string;
 } = {}) {
   const bridge = options.bridge ?? makeBridge();
@@ -111,7 +113,7 @@ function setup(options: {
   const view = render(<DecisionAgentPanel
     repository={repository}
     bridge={bridge}
-    trip={trip}
+    trip={options.currentTrip ?? trip}
     workspace={options.currentWorkspace ?? workspace}
     onResearchCompleted={options.onResearchCompleted ?? vi.fn()}
     newIdempotencyKey={options.newIdempotencyKey ?? (() => "agent-request-001")}
@@ -157,7 +159,7 @@ describe("DecisionAgentPanel", () => {
     await userEvent.click(screen.getByRole("button", { name: "准备本机 Codex" }));
 
     expect(await screen.findByText("本次将发送给 Codex")).toBeVisible();
-    expect(bridge.prepare).toHaveBeenCalledWith(expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(bridge.prepare).toHaveBeenCalledWith(trip.id, expect.objectContaining({ signal: expect.any(AbortSignal) }));
     expect(repository.command).not.toHaveBeenCalled();
     expect(screen.getByText(/香港 · 2026-10-01 至 2026-10-02 · 2 人/)).toBeVisible();
     expect(screen.getByText("一鸣、美垚")).toBeVisible();
@@ -194,6 +196,7 @@ describe("DecisionAgentPanel", () => {
     expect(command).toHaveBeenCalledWith(expect.objectContaining({ action: "createAgentRun", scope: ["submitProposalBatch"] }));
     expect(bridge.executeTravelResearch).toHaveBeenCalledTimes(1);
     expect(bridge.executeTravelResearch).toHaveBeenCalledWith({
+      tripId: trip.id,
       agentRunId: "agent-run-1",
       operationId: "agent-request-001",
       targetCategory: "hotel",
@@ -317,6 +320,7 @@ describe("DecisionAgentPanel", () => {
   it("确定的 execute 拒绝直接清理新 run，不读取或绑定旧任务状态", async () => {
     const oldRunning = {
       phase: "researching",
+      tripId: trip.id,
       researchTaskId: "research-task-old-operation",
       agentRunId: "agent-run-old-operation",
       operationId: "operation-old-operation",
@@ -344,6 +348,7 @@ describe("DecisionAgentPanel", () => {
   it("execute 响应丢失后同操作重放被确定拒绝时，不绑定旧全局状态并撤销新 run", async () => {
     const oldRunning = {
       phase: "researching",
+      tripId: trip.id,
       researchTaskId: "research-task-old-operation",
       agentRunId: "agent-run-old-operation",
       operationId: "operation-old-operation",
@@ -714,6 +719,7 @@ describe("DecisionAgentPanel", () => {
 
     await waitFor(() => expect(calls).toEqual(["prepare", "createAgentRun", "claim", "resume"]));
     expect(bridge.resumeTravelResearch).toHaveBeenCalledWith({
+      tripId: trip.id,
       agentRunId: "agent-run-1",
       operationId: "agent-request-001",
       researchTaskId: "research-task-1",
@@ -764,6 +770,7 @@ describe("DecisionAgentPanel", () => {
     await userEvent.click(screen.getByRole("button", { name: "已恢复登录，继续研究" }));
 
     await waitFor(() => expect(bridge.resumeTravelResearch).toHaveBeenCalledWith({
+      tripId: trip.id,
       agentRunId: "agent-run-1",
       operationId: "agent-request-002",
       researchTaskId: "research-task-1",
@@ -1022,6 +1029,7 @@ describe("DecisionAgentPanel", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
       expect(bridge.cancelResearch).toHaveBeenCalledTimes(1);
       expect(bridge.cancelResearch).toHaveBeenCalledWith({
+        tripId: trip.id,
         researchTaskId: researching.researchTaskId,
         agentRunId: researching.agentRunId,
         operationId: researching.operationId,
@@ -1081,6 +1089,7 @@ describe("DecisionAgentPanel", () => {
     await screen.findByText("Codex 正在继续研究");
     expect(command.mock.calls.map(([input]) => input.action)).toEqual(["createAgentRun", "createAgentRun"]);
     expect(bridge.resumeTravelResearch).toHaveBeenCalledWith({
+      tripId: trip.id,
       agentRunId: "agent-run-2",
       operationId: "agent-request-001",
       researchTaskId: "research-task-1",
@@ -1134,6 +1143,7 @@ describe("DecisionAgentPanel", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "已恢复登录，继续研究" }));
     expect(bridge.resumeTravelResearch).toHaveBeenCalledWith({
+      tripId: trip.id,
       agentRunId: "agent-run-2",
       operationId: "agent-request-001",
       researchTaskId: "research-task-1",
@@ -1181,6 +1191,7 @@ describe("DecisionAgentPanel", () => {
   it("旧 attached run 撤销时不得 cancel 本机已切换的新 task", async () => {
     const newTask = {
       phase: "researching",
+      tripId: trip.id,
       researchTaskId: "research-task-new",
       agentRunId: "agent-run-new",
       operationId: "operation-new",
@@ -1377,6 +1388,7 @@ describe("DecisionAgentPanel", () => {
 
     await waitFor(() => expect(bridge.cancelResearch).toHaveBeenCalledWith(
       {
+        tripId: trip.id,
         researchTaskId: blocked.researchTaskId,
         agentRunId: blocked.agentRunId,
         operationId: blocked.operationId,
@@ -1396,6 +1408,7 @@ describe("DecisionAgentPanel", () => {
     } satisfies ResearchStatus;
     const researchingSecond = {
       phase: "researching",
+      tripId: trip.id,
       researchTaskId: "research-task-2",
       agentRunId: "agent-run-2",
       operationId: "request-2",
@@ -1453,6 +1466,7 @@ describe("DecisionAgentPanel", () => {
     await waitFor(() => expect(screen.getByRole("group", { name: "选择行程段" })).toBeEnabled());
     expect(bridge.cancelResearch).toHaveBeenCalledWith(
       {
+        tripId: trip.id,
         researchTaskId: researchingSecond.researchTaskId,
         agentRunId: researchingSecond.agentRunId,
         operationId: researchingSecond.operationId,
@@ -1542,7 +1556,24 @@ describe("DecisionAgentPanel", () => {
     await waitFor(() => expect(bridge.getResearchStatus).toHaveBeenCalledTimes(2));
     expect(bridge.cancelResearch).not.toHaveBeenCalled();
     expect(repository.command).not.toHaveBeenCalled();
-    expect(await screen.findByText("正在请 Codex 搜索候选与可核验来源")).toBeVisible();
+    expect(screen.queryByText("research-task-other-tab")).not.toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent("本机 Bridge 状态暂时无法读取");
+  });
+
+  it("相同行程投影但不同 trip id 不会采纳另一行程的持久 blocker", async () => {
+    const blockerFromTripA = {
+      phase: "needs_owner_action",
+      ...timestamps,
+      blockedReason: "codex_auth_required" as const,
+    } satisfies ResearchStatus;
+    const tripB = { ...trip, id: "trip-same-projection-b" };
+    const bridge = makeBridge({ getResearchStatus: vi.fn().mockResolvedValue(blockerFromTripA) });
+
+    setup({ bridge, currentTrip: tripB });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("本机 Bridge 状态暂时无法读取");
+    expect(screen.queryByRole("button", { name: "已恢复登录，继续研究" })).not.toBeInTheDocument();
+    expect(bridge.resumeTravelResearch).not.toHaveBeenCalled();
   });
 
   it("同 trip 替换 Repository 时 failed 任务只由源 Repository 撤销后才重新初始化", async () => {
@@ -1771,6 +1802,7 @@ describe("DecisionAgentPanel", () => {
     view.rerender(<DecisionAgentPanel repository={repository} bridge={bridge} trip={changedTrip} workspace={workspace} onResearchCompleted={vi.fn()} newIdempotencyKey={() => "trip-change"} />);
 
     await waitFor(() => expect(bridge.cancelResearch).toHaveBeenCalledWith({
+      tripId: trip.id,
       researchTaskId: blocked.researchTaskId,
       agentRunId: blocked.agentRunId,
       operationId: blocked.operationId,

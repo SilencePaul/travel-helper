@@ -258,6 +258,7 @@ export const AgentDecisionContextSchema = z.object({
 }).strict();
 
 const ResearchTaskStatusBase = {
+  tripId: OpaqueIdentifierSchema,
   researchTaskId: OpaqueIdentifierSchema,
   agentRunId: OpaqueIdentifierSchema,
   operationId: OpaqueIdentifierSchema,

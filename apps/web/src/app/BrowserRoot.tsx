@@ -268,10 +268,10 @@ function createBrowserTestAgentBridge(): LocalAgentBridge | undefined {
     });
   };
   return {
-    prepare: (options) => callBridge("bridge.prepare", undefined, options),
+    prepare: (tripId, options) => callBridge("bridge.prepare", { tripId }, options),
     claim: (agentRunId, options) => callBridge("bridge.claim", { agentRunId }, options),
     executeTravelResearch: (input, options) => callBridge("bridge.execute", input, options),
-    getResearchStatus: (options) => callBridge("bridge.status", undefined, options),
+    getResearchStatus: (tripId, options) => callBridge("bridge.status", { tripId }, options),
     resumeTravelResearch: (input, options) => callBridge("bridge.resume", input, options),
     cancelResearch: (input, options) => callBridge("bridge.cancel", input, options),
   };
@@ -280,7 +280,7 @@ function createBrowserTestAgentBridge(): LocalAgentBridge | undefined {
 export function BrowserRoot({ agentBridge }: { agentBridge?: LocalAgentBridge } = {}) {
   const mode = browserDataMode(import.meta.env.DEV, import.meta.env.VITE_DATA_MODE);
   if (mode === "cloudbase") return <ProductionAuthGate agentBridge={agentBridge} />;
-  if (mode === "local") return <DevBrowserRoot agentBridge={agentBridge} />;
+  if (import.meta.env.DEV && mode === "local") return <DevBrowserRoot agentBridge={agentBridge} />;
   return (
     <AuthShell step="配置检查" title="旅行助手尚未正确发布" description="生产环境没有连接到共享行程服务。">
       <p className="auth-error" role="alert">请联系管理员检查数据模式配置后重新发布。</p>
