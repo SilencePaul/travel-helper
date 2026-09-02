@@ -370,8 +370,9 @@ export class TravelResearchService {
 
   #releaseRejectedOperation(agentRunId) {
     if (agentRunId === this.#operationAgentRunId || agentRunId === this.#task?.agentRunId) return false;
-    this.#clearClaimHandoffLease(agentRunId);
-    return this.#transport.releaseUnboundClaim(agentRunId);
+    const released = this.#transport.releaseUnboundClaim(agentRunId);
+    if (released === true) this.#clearClaimHandoffLease(agentRunId);
+    return released;
   }
 
   #clearClaimHandoffLease(agentRunId) {

@@ -1281,6 +1281,68 @@ test("two uncertain claims share one lease that expires the real runtime pending
   assert.doesNotThrow(() => harness.service.prepare());
 });
 
+test("an ordinary release refusal preserves the uncertain claim lease until expiry", async () => {
+  const clock = createControlledClock();
+  const harness = createHarness({
+    clock,
+    transportFactory(_events, runtimeClock) {
+      return new LocalAgentBridgeRuntime({
+        agentEndpoint: "https://api.public.org/api/agent",
+        now: runtimeClock,
+        fetch: async () => { throw new TypeError("claim response unknown"); },
+      });
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await assert.rejects(harness.service.claim(request.agentRunId), {
+    code: "AGENT_TRANSPORT_UNAVAILABLE",
+    uncertain: true,
+  });
+
+  assert.equal(harness.service.releaseUnboundClaim(request.agentRunId), false);
+  assert.equal(clock.pendingTimers(), 1);
+  assert.equal(clock.fireNext(), true);
+  assert.doesNotThrow(() => harness.service.prepare());
+});
+
+test("a successful ordinary release clears its claim lease", async () => {
+  const clock = createControlledClock();
+  const harness = createHarness({ clock });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+
+  assert.equal(harness.service.releaseUnboundClaim(request.agentRunId), true);
+  assert.equal(clock.pendingTimers(), 0);
+  assert.equal(clock.fireNext(), false);
+  assert.doesNotThrow(() => harness.service.prepare());
+});
+
+test("an ordinary release exception preserves its claim lease and propagates", async () => {
+  const clock = createControlledClock();
+  const releaseError = Object.assign(new Error("private release failure"), {
+    code: "AGENT_TRANSPORT_UNAVAILABLE",
+    uncertain: true,
+  });
+  const harness = createHarness({
+    clock,
+    transportFactory(events) {
+      const transport = fakeTransport(events, contextFixture());
+      transport.releaseUnboundClaim = () => { throw releaseError; };
+      return transport;
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+  await harness.service.claim(request.agentRunId);
+
+  assert.throws(() => harness.service.releaseUnboundClaim(request.agentRunId), (error) => error === releaseError);
+  assert.equal(clock.pendingTimers(), 1);
+  assert.equal(clock.fireNext(), true);
+  assert.doesNotThrow(() => harness.service.prepare());
+});
+
 test("TravelResearchService requires the internal unbound-claim expiry capability", () => {
   assert.throws(() => createHarness({
     transportFactory(events) {
