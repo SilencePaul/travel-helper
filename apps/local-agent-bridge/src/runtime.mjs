@@ -28,6 +28,7 @@ const PUBLIC_AGENT_ERRORS = new Set([
   "CURSOR_EXPIRED",
 ]);
 const UNCERTAIN_HTTP_STATUSES = new Set([408, 425, 429]);
+const MIN_UNBOUND_CLAIM_AGE_MS = 8_000;
 const BRIDGE_ERROR = Symbol("bridgeError");
 
 export { canonicalJson };
@@ -276,6 +277,26 @@ export class LocalAgentBridgeRuntime {
     return true;
   }
 
+  expireUnboundClaim(agentRunId, minAgeMs = MIN_UNBOUND_CLAIM_AGE_MS) {
+    if (this.#busy || this.#pendingCommand
+      || typeof agentRunId !== "string" || !agentRunId
+      || !Number.isSafeInteger(minAgeMs) || minAgeMs < 0) return false;
+    const pending = this.#pendingClaim;
+    const claimed = this.#claimed;
+    if ((pending && claimed) || (!pending && !claimed)) return false;
+    const capability = pending ?? claimed;
+    if (capability.agentRunId !== agentRunId || !Number.isFinite(capability.firstSentAt)) return false;
+    let now;
+    try {
+      now = currentTime(this.#now);
+    } catch {
+      return false;
+    }
+    if (now - capability.firstSentAt < Math.max(MIN_UNBOUND_CLAIM_AGE_MS, minAgeMs)) return false;
+    this.#clearCapability();
+    return true;
+  }
+
   #clearCapability() {
     this.#prepared = undefined;
     this.#claimed = undefined;
@@ -395,7 +416,12 @@ export class LocalAgentBridgeRuntime {
       ) {
         throw codedError("INVALID_AGENT_RESPONSE", true);
       }
-      this.#claimed = { agentRunId, expiresAt: data.expiresAt, nextSequence: data.nextSequence };
+      this.#claimed = {
+        agentRunId,
+        expiresAt: data.expiresAt,
+        nextSequence: data.nextSequence,
+        firstSentAt: pending.firstSentAt,
+      };
       this.#pendingClaim = undefined;
       return { agentRunId, status: "claimed" };
     } catch (error) {

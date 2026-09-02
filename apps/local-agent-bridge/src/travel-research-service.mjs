@@ -175,6 +175,7 @@ export class TravelResearchService {
     if (!transport || typeof transport.prepare !== "function" || typeof transport.claim !== "function"
       || typeof transport.getDecisionContext !== "function" || typeof transport.revokeSelf !== "function"
       || typeof transport.releaseUnboundClaim !== "function"
+      || typeof transport.expireUnboundClaim !== "function"
       || (typeof transport.submitProposalBatch !== "function" && typeof transport.command !== "function")
       || !runner || typeof runner.create !== "function"
       || !store || typeof store.load !== "function" || typeof store.clear !== "function"
@@ -353,7 +354,9 @@ export class TravelResearchService {
       this.#startClaimHandoffLease(agentRunId);
       return claimed;
     } catch (error) {
-      if (error?.uncertain !== true && error?.code !== "AGENT_TRANSPORT_UNAVAILABLE") {
+      if (error?.code === "AGENT_TRANSPORT_UNAVAILABLE") {
+        this.#startClaimHandoffLease(agentRunId);
+      } else if (error?.uncertain !== true) {
         this.#clearClaimHandoffLease(agentRunId);
       }
       throw error;
@@ -392,7 +395,7 @@ export class TravelResearchService {
       }
       let released = false;
       try {
-        released = this.#transport.releaseUnboundClaim(agentRunId) === true;
+        released = this.#transport.expireUnboundClaim(agentRunId, CLAIM_HANDOFF_LEASE_MS) === true;
       } catch { /* A failed lease release leaves the runtime capability fail-safe busy. */ }
       if (released && this.#claimHandoffLease === lease) this.#claimHandoffLease = undefined;
     }, CLAIM_HANDOFF_LEASE_MS);

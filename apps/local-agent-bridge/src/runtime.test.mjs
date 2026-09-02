@@ -208,6 +208,104 @@ test("releaseUnboundClaim preserves an uncertain signed command until its exact 
   assert.doesNotThrow(() => runtime.prepare());
 });
 
+test("expireUnboundClaim preserves an exact uncertain claim for eight seconds, then clears it", async () => {
+  let now = new Date("2026-09-01T00:00:00.000Z");
+  const claimBodies = [];
+  const runtime = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.example.test/api/agent",
+    now: () => now,
+    fetch: async (_url, init) => {
+      claimBodies.push(init.body);
+      throw new TypeError("claim response unknown");
+    },
+  });
+  runtime.prepare();
+
+  await assert.rejects(runtime.claim("agent-run-expiring-claim"), {
+    code: "AGENT_TRANSPORT_UNAVAILABLE",
+    uncertain: true,
+  });
+  now = new Date("2026-09-01T00:00:04.000Z");
+  await assert.rejects(runtime.claim("agent-run-expiring-claim"), {
+    code: "AGENT_TRANSPORT_UNAVAILABLE",
+    uncertain: true,
+  });
+
+  assert.equal(claimBodies.length, 2);
+  assert.equal(claimBodies[0], claimBodies[1]);
+  assert.equal(runtime.expireUnboundClaim("agent-run-other"), false);
+  now = new Date("2026-09-01T00:00:07.999Z");
+  assert.equal(runtime.expireUnboundClaim("agent-run-expiring-claim", 1), false);
+  assert.throws(() => runtime.prepare(), { code: "BRIDGE_BUSY" });
+
+  now = new Date("2026-09-01T00:00:08.000Z");
+  assert.equal(runtime.expireUnboundClaim("agent-run-expiring-claim"), true);
+  assert.doesNotThrow(() => runtime.prepare());
+});
+
+test("expireUnboundClaim refuses a busy claim and later expires the matching claimed capability", async () => {
+  let now = new Date("2026-09-01T00:00:00.000Z");
+  let releaseClaim;
+  let claimStarted;
+  const claimGate = new Promise((resolve) => { releaseClaim = resolve; });
+  const observedClaim = new Promise((resolve) => { claimStarted = resolve; });
+  const runtime = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.example.test/api/agent",
+    now: () => now,
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      claimStarted();
+      await claimGate;
+      return Response.json({ ok: true, data: claimedData(body.agentRunId) });
+    },
+  });
+  runtime.prepare();
+  const claim = runtime.claim("agent-run-busy-expiry");
+  await observedClaim;
+  now = new Date("2026-09-01T00:00:08.000Z");
+
+  assert.equal(runtime.expireUnboundClaim("agent-run-busy-expiry"), false);
+  releaseClaim();
+  await claim;
+  assert.equal(runtime.expireUnboundClaim("agent-run-busy-expiry"), true);
+  assert.equal(runtime.claimedRun, undefined);
+  assert.doesNotThrow(() => runtime.prepare());
+});
+
+test("expireUnboundClaim never clears a pending signed command", async () => {
+  let now = new Date("2026-09-01T00:00:00.000Z");
+  let contextAttempts = 0;
+  const contextBodies = [];
+  const runtime = new LocalAgentBridgeRuntime({
+    agentEndpoint: "https://api.example.test/api/agent",
+    now: () => now,
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.action === "claimAgentRun") {
+        return Response.json({ ok: true, data: claimedData(body.agentRunId) });
+      }
+      contextBodies.push(init.body);
+      contextAttempts += 1;
+      if (contextAttempts === 1) throw new TypeError("context response unknown");
+      return Response.json({ ok: true, action: body.action, data: { tripId: "trip-1" } });
+    },
+  });
+  runtime.prepare();
+  await runtime.claim("agent-run-pending-command-expiry");
+  await assert.rejects(runtime.getDecisionContext(), {
+    code: "AGENT_TRANSPORT_UNAVAILABLE",
+    uncertain: true,
+  });
+  now = new Date("2026-09-01T00:00:08.000Z");
+
+  assert.equal(runtime.expireUnboundClaim("agent-run-pending-command-expiry"), false);
+  assert.throws(() => runtime.prepare(), { code: "BRIDGE_BUSY" });
+  await runtime.getDecisionContext();
+  assert.equal(contextBodies[0], contextBodies[1]);
+  assert.equal(runtime.expireUnboundClaim("agent-run-pending-command-expiry"), true);
+  assert.doesNotThrow(() => runtime.prepare());
+});
+
 test("submitProposalBatch is a fixed runtime wrapper and uncertain retries reuse the pending envelope", async () => {
   const bodies = [];
   let attempt = 0;

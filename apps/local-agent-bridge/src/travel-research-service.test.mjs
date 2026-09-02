@@ -242,6 +242,11 @@ function fakeTransport(events, context, options = {}) {
       claimed = undefined;
       return true;
     },
+    expireUnboundClaim(agentRunId) {
+      if (claimed?.agentRunId !== agentRunId) return false;
+      claimed = undefined;
+      return true;
+    },
     async getDecisionContext() {
       events.push("transport.getDecisionContext");
       contextAttempts += 1;
@@ -1239,13 +1244,60 @@ test("an unbound successful claim has one bounded handoff lease that releases lo
   assert.doesNotThrow(() => harness.service.prepare());
 });
 
+test("two uncertain claims share one lease that expires the real runtime pending envelope", async () => {
+  const clock = createControlledClock();
+  const claimBodies = [];
+  const harness = createHarness({
+    clock,
+    transportFactory(_events, runtimeClock) {
+      return new LocalAgentBridgeRuntime({
+        agentEndpoint: "https://api.public.org/api/agent",
+        now: runtimeClock,
+        fetch: async (_url, init) => {
+          claimBodies.push(init.body);
+          throw new TypeError("claim response unknown");
+        },
+      });
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+
+  await assert.rejects(harness.service.claim(request.agentRunId), {
+    code: "AGENT_TRANSPORT_UNAVAILABLE",
+    uncertain: true,
+  });
+  await assert.rejects(harness.service.claim(request.agentRunId), {
+    code: "AGENT_TRANSPORT_UNAVAILABLE",
+    uncertain: true,
+  });
+
+  assert.equal(claimBodies.length, 2);
+  assert.equal(claimBodies[0], claimBodies[1]);
+  assert.equal(clock.scheduledTimers(), 1);
+  assert.equal(clock.nextDelay(), 8_000);
+  assert.throws(() => harness.service.prepare(), { code: "BRIDGE_BUSY" });
+  assert.equal(clock.fireNext(), true);
+  assert.doesNotThrow(() => harness.service.prepare());
+});
+
+test("TravelResearchService requires the internal unbound-claim expiry capability", () => {
+  assert.throws(() => createHarness({
+    transportFactory(events) {
+      const transport = fakeTransport(events, contextFixture());
+      delete transport.expireUnboundClaim;
+      return transport;
+    },
+  }), { code: "CODEX_RESEARCH_FAILED" });
+});
+
 test("a handoff lease fails safe when runtime refuses to release an uncertain claim", async () => {
   const clock = createControlledClock();
   const harness = createHarness({
     clock,
     transportFactory(events) {
       const transport = fakeTransport(events, contextFixture());
-      transport.releaseUnboundClaim = () => false;
+      transport.expireUnboundClaim = () => false;
       return transport;
     },
   });
