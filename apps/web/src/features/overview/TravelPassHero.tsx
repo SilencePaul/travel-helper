@@ -47,7 +47,9 @@ function formatDate(date: string) {
 
 export function TravelPassHero({ trip, member, selectedDayId }: TravelPassHeroProps) {
   const day = selectedRouteLeg(trip, selectedDayId);
-  const activeStops = routeStops(day.city).filter((stop) => cityCodes[stop]);
+  const activeStops = [...new Set(
+    routeStops(day.city).filter((stop) => Object.hasOwn(cityCodes, stop)),
+  )];
   const routeDescription = "北京出发，经深圳、香港、澳门、珠海，返回北京的路线";
   const routeAriaLabel = activeStops.length > 0
     ? `${routeDescription}；当前 D${day.dayNumber}，${activeStops.join("、")}已高亮`
