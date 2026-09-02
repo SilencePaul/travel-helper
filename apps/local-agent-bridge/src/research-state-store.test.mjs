@@ -298,10 +298,65 @@ test("a stale store cleanup cannot delete a newer proposal responsibility", asyn
     updatedAt: "2026-09-01T01:05:06.000Z",
   });
   await stale.persistProposalReconciliation(oldRecord);
-  await current.save(newRecord);
+  await current.save(newRecord, oldRecord);
 
   await assert.rejects(stale.clear(oldRecord), { code: "RESEARCH_STATE_CONFLICT" });
   assert.deepEqual(await current.load(), newRecord);
+});
+
+test("an existing proposal responsibility rejects a competing self-revoke intent", async (context) => {
+  const { store } = await temporaryStore(context);
+  const proposal = proposalReconciliationState();
+  await store.persistProposalReconciliation(proposal);
+
+  await assert.rejects(
+    store.persistSelfRevokeReconciliation(reconciliationState(), undefined),
+    { code: "RESEARCH_STATE_CONFLICT" },
+  );
+  assert.deepEqual(await store.load(), proposal);
+});
+
+test("an existing proposal responsibility rejects a competing owner-action record", async (context) => {
+  const { store } = await temporaryStore(context);
+  const proposal = proposalReconciliationState();
+  let notifications = 0;
+  await store.persistProposalReconciliation(proposal);
+
+  await assert.rejects(store.persistNeedsOwnerAction(recoverableState(), {
+    async notifyOwnerAction() { notifications += 1; },
+  }, undefined), { code: "RESEARCH_STATE_CONFLICT" });
+  assert.equal(notifications, 0);
+  assert.deepEqual(await store.load(), proposal);
+});
+
+test("a held self-revoke intent can transition atomically to owner action", async (context) => {
+  const { store } = await temporaryStore(context);
+  const intent = reconciliationState();
+  const blocker = recoverableState();
+  let notifications = 0;
+  await store.persistSelfRevokeReconciliation(intent);
+
+  await store.persistNeedsOwnerAction(blocker, {
+    async notifyOwnerAction() { notifications += 1; },
+  }, intent);
+
+  assert.equal(notifications, 1);
+  assert.deepEqual(await store.load(), blocker);
+});
+
+test("a stale owner-action writer cannot replace a newer proposal responsibility", async (context) => {
+  const { directory, store: stale } = await temporaryStore(context);
+  const current = createResearchStateStore({ directory, resolveHostname: PUBLIC_RESOLVER });
+  const blocker = recoverableState();
+  const proposal = proposalReconciliationState();
+  const staleBlocker = recoverableState({ updatedAt: "2026-09-01T01:05:06.000Z" });
+  await stale.persistNeedsOwnerAction(blocker, { async notifyOwnerAction() { return true; } });
+  await current.save(proposal, blocker);
+
+  await assert.rejects(stale.persistNeedsOwnerAction(staleBlocker, {
+    async notifyOwnerAction() { return true; },
+  }, blocker), { code: "RESEARCH_STATE_CONFLICT" });
+  assert.deepEqual(await current.load(), proposal);
 });
 
 test("persists and reloads a bounded proposal envelope near the legal payload limit", async (context) => {
@@ -580,13 +635,17 @@ test("rejects extra, missing, malformed, nested, and privacy-bearing fields", as
 test("clear is idempotent and removes completed or cancelled task recovery", async (context) => {
   const { filePath, store } = await temporaryStore(context);
 
-  await store.save(recoverableState());
-  await store.clear();
+  const first = recoverableState();
+  await store.save(first);
+  await store.clear(first);
   assert.equal(await store.load(), undefined);
   await assert.rejects(stat(filePath), { code: "ENOENT" });
 
-  await store.save(recoverableState({ researchTaskId: "research-task-2" }));
-  await store.clear();
+  const second = recoverableState({ researchTaskId: "research-task-2" });
+  await store.save(second);
+  await assert.rejects(store.clear(), { code: "RESEARCH_STATE_CONFLICT" });
+  assert.deepEqual(await store.load(), second);
+  await store.clear(second);
   await store.clear();
   assert.equal(await store.load(), undefined);
 });
@@ -615,7 +674,7 @@ test("persists a new owner-action transition before notifying and does not re-no
   assert.equal(calls.length, 1);
 
   const second = recoverableState({ updatedAt: "2026-09-01T01:05:06.000Z" });
-  await restarted.persistNeedsOwnerAction(second, notifier);
+  await restarted.persistNeedsOwnerAction(second, notifier, first);
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[1].persisted, second);
   assert.notEqual(calls[0].transitionKey, calls[1].transitionKey);
@@ -633,7 +692,7 @@ test("publishing a blocker notifies once even when its reconciliation intent use
       notifications += 1;
       return true;
     },
-  });
+  }, intent);
   await store.persistNeedsOwnerAction(blocker, {
     async notifyOwnerAction() {
       notifications += 1;
@@ -1251,7 +1310,7 @@ test("a same-process nonce marked orphaned after persistent release failure is r
     researchTaskId: "same-process-recovery",
     updatedAt: "2026-09-01T01:09:10.000Z",
   });
-  await second.save(nextState);
+  await second.save(nextState, recoverableState());
 
   assert.deepEqual(await second.load(), nextState);
   await assert.rejects(stat(lockPath), { code: "ENOENT" });
@@ -1262,7 +1321,8 @@ test("explicit fd chmod preserves state and lock mode under a restrictive umask"
   const lockModes = [];
   const previousMask = process.umask(0o777);
   try {
-    await store.save(recoverableState());
+    const firstState = recoverableState();
+    await store.save(firstState);
     assert.equal((await stat(filePath)).mode & 0o777, 0o600);
     assert.deepEqual(await store.load(), recoverableState());
     await store.persistNeedsOwnerAction(
@@ -1273,6 +1333,7 @@ test("explicit fd chmod preserves state and lock mode under a restrictive umask"
           return true;
         },
       },
+      firstState,
     );
   } finally {
     process.umask(previousMask);

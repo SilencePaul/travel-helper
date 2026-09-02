@@ -226,7 +226,6 @@ export class TravelResearchService {
   #recoveryRecord;
   #reconciliationRecord;
   #proposalReconciliationRecord;
-  #proposalPersistencePending = false;
   #preparedTripId;
   #preparedCapabilityIdentity;
   #restored = false;
@@ -321,7 +320,6 @@ export class TravelResearchService {
     const reconciling = recovered.recordType === "self_revoke_reconciliation";
     this.#recoveryRecord = recovered;
     this.#proposalReconciliationRecord = proposalReconciling ? recovered : undefined;
-    this.#proposalPersistencePending = false;
     this.#reconciliationRecord = reconciling ? recovered : undefined;
     if (proposalReconciling) {
       this.#task = {
@@ -779,7 +777,7 @@ export class TravelResearchService {
     const record = this.#proposalReconciliationRecord;
     let operation;
     operation = (async () => {
-      if (this.#proposalPersistencePending && !await this.#persistProposalResponsibility(record)) {
+      if (!await this.#persistProposalResponsibility(record)) {
         return safeResearchStatus(this.#status);
       }
       return this.#finishProposalReconciliation(record);
@@ -803,6 +801,8 @@ export class TravelResearchService {
 
   async #finishRecoveredSelfRevoke(record) {
     if (this.#cancelRequested) return this.#finishCancelled();
+    await this.#store.persistSelfRevokeReconciliation(record, record);
+    this.#recoveryRecord = record;
     try {
       await this.#revokeStrict({ cleanup: true, revokeRequest: record.revokeRequest });
     } catch (error) {
@@ -827,7 +827,7 @@ export class TravelResearchService {
       startedAt: record.startedAt,
       updatedAt: this.#now(),
     };
-    await this.#store.persistNeedsOwnerAction(finalRecord, this.#guardedNotifier);
+    await this.#store.persistNeedsOwnerAction(finalRecord, this.#guardedNotifier, record);
     this.#recoveryRecord = finalRecord;
     if (this.#cancelRequested) return this.#finishCancelled();
     this.#reconciliationRecord = undefined;
@@ -1101,7 +1101,6 @@ export class TravelResearchService {
           updatedAt: this.#now(),
         };
         this.#proposalReconciliationRecord = record;
-        this.#proposalPersistencePending = true;
         if (!await this.#persistProposalResponsibility(record, { discardIfAbsent: true })) {
           return safeResearchStatus(this.#status);
         }
@@ -1165,7 +1164,7 @@ export class TravelResearchService {
         updatedAt: record.updatedAt,
       };
       try {
-        await this.#store.persistSelfRevokeReconciliation(reconciliationRecord);
+        await this.#store.persistSelfRevokeReconciliation(reconciliationRecord, this.#recoveryRecord);
       } catch (error) {
         let observed;
         let readBackCertain = true;
@@ -1179,6 +1178,10 @@ export class TravelResearchService {
           throw error;
         }
         const exactReadBack = readBackCertain && sameReconciliationIntent(observed, reconciliationRecord);
+        if (readBackCertain && !exactReadBack) {
+          this.#transport.discardPreparedRevokeSelf(revokeRequest);
+          throw error;
+        }
         this.#reconciliationRecord = readBackCertain
           ? (exactReadBack ? observed : undefined)
           : reconciliationRecord;
@@ -1205,7 +1208,7 @@ export class TravelResearchService {
         if (stableFailureCode(error) !== "AGENT_RUN_INACTIVE") throw error;
       }
       if (this.#cancelRequested) return this.#finishCancelled();
-      await this.#store.persistNeedsOwnerAction(record, this.#guardedNotifier);
+      await this.#store.persistNeedsOwnerAction(record, this.#guardedNotifier, reconciliationRecord);
       this.#recoveryRecord = record;
       if (this.#cancelRequested) return this.#finishCancelled();
       this.#reconciliationRecord = undefined;
@@ -1229,9 +1232,8 @@ export class TravelResearchService {
 
   async #persistProposalResponsibility(record, { discardIfAbsent = false } = {}) {
     try {
-      await this.#store.persistProposalReconciliation(record);
+      await this.#store.persistProposalReconciliation(record, this.#recoveryRecord);
       this.#recoveryRecord = record;
-      this.#proposalPersistencePending = false;
       return true;
     } catch (error) {
       let observed;
@@ -1243,17 +1245,14 @@ export class TravelResearchService {
       }
       if (readBackCertain && sameProposalReconciliation(observed, record)) {
         this.#recoveryRecord = observed;
-        this.#proposalPersistencePending = false;
         return true;
       }
       if (discardIfAbsent && readBackCertain && observed === undefined) {
         this.#transport.discardPreparedProposalSubmission(record.submission);
         this.#proposalReconciliationRecord = undefined;
-        this.#proposalPersistencePending = false;
         throw error;
       }
       this.#proposalReconciliationRecord = record;
-      this.#proposalPersistencePending = true;
       return false;
     }
   }
@@ -1274,7 +1273,6 @@ export class TravelResearchService {
             return safeResearchStatus(this.#status);
           }
           this.#proposalReconciliationRecord = undefined;
-          this.#proposalPersistencePending = false;
           return this.#finishStatus("failed", { errorCode: "AGENT_RUN_INACTIVE" });
         }
         outcome = "failed";
@@ -1296,7 +1294,6 @@ export class TravelResearchService {
         return safeResearchStatus(this.#status);
       }
       this.#proposalReconciliationRecord = undefined;
-      this.#proposalPersistencePending = false;
       if (outcome === "completed") return this.#finishStatus("completed");
       return this.#finishStatus("failed", { errorCode: stableFailureCode(submitError) });
     } catch {

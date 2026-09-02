@@ -205,6 +205,14 @@ function fakeStore(events, initialState, options = {}) {
   let clearCount = 0;
   let loadCount = 0;
   let proposalPersistCount = 0;
+  const currentState = () => state && { ...RECOVERED_OPERATION_IDENTITY, ...state };
+  const assertExpected = (value, expected) => {
+    const current = currentState();
+    if (!isDeepStrictEqual(current, value) && !isDeepStrictEqual(current, expected)) {
+      throw Object.assign(new Error("private state conflict"), { code: "RESEARCH_STATE_CONFLICT" });
+    }
+    return isDeepStrictEqual(current, value);
+  };
   return {
     async load() {
       loadCount += 1;
@@ -225,24 +233,32 @@ function fakeStore(events, initialState, options = {}) {
         throw Object.assign(new Error("private store failure"), { code: "RESEARCH_STATE_UNAVAILABLE" });
       }
       const current = state && { ...RECOVERED_OPERATION_IDENTITY, ...state };
-      if (arguments.length > 0 && current !== undefined
-        && (expected === undefined || !isDeepStrictEqual(current, expected))) {
+      if (current !== undefined && !isDeepStrictEqual(current, expected)) {
         throw Object.assign(new Error("private state conflict"), { code: "RESEARCH_STATE_CONFLICT" });
       }
       state = undefined;
     },
-    async persistNeedsOwnerAction(value, notifier) {
+    async persistNeedsOwnerAction(value, notifier, expected) {
       events.push("store.persistNeedsOwnerAction");
       if (options.persistError) throw options.persistError;
+      const replacement = options.replaceBeforeNeedsOwnerAction?.({
+        current: currentState() && structuredClone(currentState()),
+        value: structuredClone(value),
+      });
+      if (replacement !== undefined) state = structuredClone(replacement);
+      const idempotent = assertExpected(value, expected);
+      if (idempotent) return structuredClone(currentState());
       state = structuredClone(value);
       options.onPersistStarted?.();
       if (options.persistGate) await options.persistGate;
       await notifier?.notifyOwnerAction("transition-key");
       return structuredClone(state);
     },
-    async persistSelfRevokeReconciliation(value) {
+    async persistSelfRevokeReconciliation(value, expected) {
       events.push("store.persistSelfRevokeReconciliation");
       if (options.reconciliationPersistError) throw options.reconciliationPersistError;
+      const idempotent = assertExpected(value, expected);
+      if (idempotent) return structuredClone(currentState());
       state = structuredClone(value);
       options.onReconciliationPersisted?.(structuredClone(value));
       if (options.transformReconciliationAfterWrite) {
@@ -251,16 +267,15 @@ function fakeStore(events, initialState, options = {}) {
       if (options.reconciliationPersistErrorAfterWrite) throw options.reconciliationPersistErrorAfterWrite;
       return structuredClone(state);
     },
-    async persistProposalReconciliation(value) {
+    async persistProposalReconciliation(value, expected) {
       proposalPersistCount += 1;
       events.push("store.persistProposalReconciliation");
       if (options.proposalPersistFailures?.includes(proposalPersistCount)) {
         throw Object.assign(new Error("private proposal persist failure"), { code: "RESEARCH_STATE_UNAVAILABLE" });
       }
       if (options.proposalPersistError) throw options.proposalPersistError;
-      if (state !== undefined && !isDeepStrictEqual(state, value)) {
-        throw Object.assign(new Error("private state conflict"), { code: "RESEARCH_STATE_CONFLICT" });
-      }
+      const idempotent = assertExpected(value, expected);
+      if (idempotent) return structuredClone(currentState());
       state = structuredClone(value);
       return structuredClone(state);
     },
@@ -1512,6 +1527,80 @@ test("a definitive expired or invalid proposal submit clears recovery and fails 
       assert.equal(harness.events.includes("transport.revokeSelf"), false);
     });
   }
+});
+
+test("a competing owner-action path cannot replace or act after proposal ownership wins", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "travel-owner-action-cas-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const directory = join(root, "application-data");
+  const proposalStore = createResearchStateStore({ directory, resolveHostname: PUBLIC_RESOLVER });
+  const blockerBaseStore = createResearchStateStore({ directory, resolveHostname: PUBLIC_RESOLVER });
+  let releaseBlockerPersist;
+  let observeBlockerPersist;
+  const blockerPersistGate = new Promise((resolve) => { releaseBlockerPersist = resolve; });
+  const blockerPersistStarted = new Promise((resolve) => { observeBlockerPersist = resolve; });
+  const blockerStore = {
+    load: (...args) => blockerBaseStore.load(...args),
+    clear: (...args) => blockerBaseStore.clear(...args),
+    save: (...args) => blockerBaseStore.save(...args),
+    persistNeedsOwnerAction: (...args) => blockerBaseStore.persistNeedsOwnerAction(...args),
+    async persistSelfRevokeReconciliation(...args) {
+      observeBlockerPersist();
+      await blockerPersistGate;
+      return blockerBaseStore.persistSelfRevokeReconciliation(...args);
+    },
+    persistProposalReconciliation: (...args) => blockerBaseStore.persistProposalReconciliation(...args),
+  };
+  const proposalEvents = [];
+  const blockerEvents = [];
+  let releaseProposalSubmit;
+  const proposalSubmitGate = new Promise((resolve) => { releaseProposalSubmit = resolve; });
+  const proposalTransport = fakeTransport(proposalEvents, contextFixture(), { submitGate: proposalSubmitGate });
+  const blockerTransport = fakeTransport(blockerEvents, contextFixture());
+  const proposalService = new TravelResearchService({
+    transport: proposalTransport,
+    runner: fakeRunner(proposalEvents, [{ codexThreadId: "thread-owner-cas-proposal", output: completedOutput(), activeDurationMs: 10 }]),
+    store: proposalStore,
+    notifier: { async notifyOwnerAction() { return true; } },
+    clock: createClock(),
+    idGenerator: (() => { const values = ["research-task-owner-cas-proposal", "alias-salt-owner-cas-proposal"]; return () => values.shift(); })(),
+  });
+  const blockerService = new TravelResearchService({
+    transport: blockerTransport,
+    runner: fakeRunner(blockerEvents, [{ codexThreadId: "thread-owner-cas-blocker", output: ownerAction(), activeDurationMs: 10 }]),
+    store: blockerStore,
+    notifier: { async notifyOwnerAction() { return true; } },
+    clock: createClock(),
+    idGenerator: (() => { const values = ["research-task-owner-cas-blocker", "alias-salt-owner-cas-blocker"]; return () => values.shift(); })(),
+  });
+  const proposalRequest = await targetRequest();
+  const blockerRequest = {
+    ...proposalRequest,
+    agentRunId: "agent-run-owner-cas-blocker",
+    operationId: "operation-owner-cas-blocker",
+  };
+  proposalService.prepare(proposalRequest.tripId);
+  blockerService.prepare(blockerRequest.tripId);
+  await proposalService.claim(proposalRequest.agentRunId);
+  await blockerService.claim(blockerRequest.agentRunId);
+
+  const blockerExecution = blockerService.executeTravelResearch(blockerRequest);
+  await blockerPersistStarted;
+  const proposalExecution = proposalService.executeTravelResearch(proposalRequest);
+  while (proposalTransport.submittedPayloads.length === 0) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  releaseBlockerPersist();
+
+  const blockerStatus = await blockerExecution;
+  const owned = await proposalStore.load();
+  assert.equal(blockerStatus.phase, "failed");
+  assert.equal(owned.recordType, "proposal_submit_reconciliation");
+  assert.equal(owned.operationId, proposalRequest.operationId);
+  assert.equal(blockerEvents.includes("transport.revokeSelf"), false);
+
+  releaseProposalSubmit();
+  assert.equal((await proposalExecution).phase, "completed");
 });
 
 test("two services crossing after the empty-state gate cannot overwrite proposal ownership", async (context) => {
@@ -3717,6 +3806,36 @@ test("a recovered reconciliation is visible only to its exactly bound trip", asy
   releaseRevoke();
 });
 
+test("a final owner-action CAS conflict prevents a recovered intent from revoking again", async () => {
+  const request = await targetRequest();
+  const recovered = recoveredReconciliation(request);
+  const competing = {
+    ...recovered,
+    recordType: "proposal_submit_reconciliation",
+    researchTaskId: "research-task-competing-proposal",
+    operationId: "operation-competing-proposal",
+  };
+  const harness = createHarness({
+    initialState: recovered,
+    storeOptions: {
+      replaceBeforeNeedsOwnerAction: () => competing,
+    },
+  });
+
+  await harness.service.getResearchStatus(request.tripId);
+  while (harness.store.state?.recordType !== "proposal_submit_reconciliation") {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(harness.events.filter((event) => event === "transport.revokeSelf").length, 1);
+
+  await harness.service.getResearchStatus(request.tripId);
+  await new Promise((resolve) => setImmediate(resolve));
+  await harness.service.getResearchStatus(request.tripId);
+
+  assert.equal(harness.events.filter((event) => event === "transport.revokeSelf").length, 1);
+  assert.equal(harness.store.state.recordType, "proposal_submit_reconciliation");
+});
+
 test("an identical projection from another trip cannot resume or replace the bound blocker", async () => {
   const request = await targetRequest();
   const recovered = {
@@ -3927,7 +4046,7 @@ test("a self-revoke intent published before a persistence error is read back and
   assert.equal(harness.events.includes("transport.discardPreparedRevokeSelf"), false);
 });
 
-test("a non-exact self-revoke intent read back after a persistence error is not adopted or cleared", async () => {
+test("a non-exact self-revoke intent read back after a persistence error fails without acting on it", async () => {
   const mismatches = [
     ["recordType", "other_reconciliation"],
     ["reconciliationState", "active"],
@@ -3970,11 +4089,11 @@ test("a non-exact self-revoke intent read back after a persistence error is not 
     const result = await harness.service.executeTravelResearch(request);
     const polled = await harness.service.getResearchStatus(request.tripId);
 
-    assert.equal(result.reconciliationState, "self_revoke_reconciling", field);
-    assert.equal(polled.reconciliationState, "self_revoke_reconciling", field);
+    assert.equal(result.phase, "failed", field);
+    assert.equal(polled.phase, "failed", field);
     assert.equal(harness.events.includes("transport.revokeSelf"), false, field);
-    assert.equal(harness.events.includes("transport.discardPreparedRevokeSelf"), false, field);
-    assert.equal(harness.events.includes("store.clear"), false, field);
+    assert.equal(harness.events.includes("transport.discardPreparedRevokeSelf"), true, field);
+    assert.equal(harness.store.state === undefined, false, field);
   }
 });
 

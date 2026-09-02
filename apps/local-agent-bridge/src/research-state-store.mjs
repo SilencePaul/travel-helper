@@ -821,13 +821,22 @@ export function createResearchStateStore({
     return state;
   }
 
-  async function save(value) {
+  async function compareAndPersist(state, expectedState, lock) {
+    const current = await load();
+    if (isDeepStrictEqual(current, state)) return { state, previous: current, changed: false };
+    if (!isDeepStrictEqual(current, expectedState)) throw codedError("RESEARCH_STATE_CONFLICT");
+    await writeState(state, lock);
+    return { state, previous: current, changed: true };
+  }
+
+  async function save(value, expected) {
     const state = await validateState(value);
+    const expectedState = expected === undefined ? undefined : await validateState(expected);
     const lock = await acquireLock();
     let result;
     let failure;
     try {
-      result = await writeState(state, lock);
+      result = (await compareAndPersist(state, expectedState, lock)).state;
     } catch (error) {
       failure = error;
     }
@@ -841,15 +850,13 @@ export function createResearchStateStore({
   }
 
   async function clear(expected) {
-    const compare = arguments.length > 0;
-    const expectedState = compare && expected !== undefined ? await validateState(expected) : undefined;
+    const expectedState = expected === undefined ? undefined : await validateState(expected);
     const lock = await acquireLock();
     let result;
     let failure;
     try {
       const current = await load();
-      if (compare && current !== undefined
-        && (expectedState === undefined || !isDeepStrictEqual(current, expectedState))) {
+      if (current !== undefined && !isDeepStrictEqual(current, expectedState)) {
         throw codedError("RESEARCH_STATE_CONFLICT");
       }
       if (current !== undefined) {
@@ -1200,16 +1207,16 @@ export function createResearchStateStore({
     if (failed) throw codedError("RESEARCH_STATE_UNAVAILABLE");
   }
 
-  async function persistNeedsOwnerAction(value, notifier) {
+  async function persistNeedsOwnerAction(value, notifier, expected) {
     const state = await validateState(value);
     if (Object.hasOwn(state, "recordType")) throw codedError("RESEARCH_STATE_INVALID");
+    const expectedState = expected === undefined ? undefined : await validateState(expected);
     const lock = await acquireLock();
     let result;
     let failure;
     try {
-      const previous = await load();
-      const isNewTransition = !sameTransition(previous, state);
-      await writeState(state, lock);
+      const persisted = await compareAndPersist(state, expectedState, lock);
+      const isNewTransition = persisted.changed && !sameTransition(persisted.previous, state);
       if (!await ownsLock(lock, OWNERSHIP_CHECK_ATTEMPTS)) {
         throw codedError("RESEARCH_STATE_UNAVAILABLE");
       }
@@ -1233,14 +1240,15 @@ export function createResearchStateStore({
     return result;
   }
 
-  async function persistSelfRevokeReconciliation(value) {
+  async function persistSelfRevokeReconciliation(value, expected) {
     const state = await validateState(value);
     if (state.recordType !== "self_revoke_reconciliation") throw codedError("RESEARCH_STATE_INVALID");
+    const expectedState = expected === undefined ? undefined : await validateState(expected);
     const lock = await acquireLock();
     let result;
     let failure;
     try {
-      result = await writeState(state, lock);
+      result = (await compareAndPersist(state, expectedState, lock)).state;
     } catch (error) {
       failure = error;
     }
@@ -1261,14 +1269,7 @@ export function createResearchStateStore({
     let result;
     let failure;
     try {
-      const current = await load();
-      if (isDeepStrictEqual(current, state)) {
-        result = state;
-      } else if (!isDeepStrictEqual(current, expectedState)) {
-        throw codedError("RESEARCH_STATE_CONFLICT");
-      } else {
-        result = await writeState(state, lock);
-      }
+      result = (await compareAndPersist(state, expectedState, lock)).state;
     } catch (error) {
       failure = error;
     }
