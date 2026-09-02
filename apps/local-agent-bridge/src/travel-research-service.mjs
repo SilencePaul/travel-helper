@@ -666,7 +666,10 @@ export class TravelResearchService {
   async getResearchStatus(tripId) {
     if (tripId !== undefined && !opaqueIdentifier(tripId)) throw codedError("CODEX_RESEARCH_FAILED");
     if (this.#status.phase !== "idle" || this.#restored) {
-      if (tripId !== undefined && this.#task && this.#task.tripId !== tripId) throw codedError("AGENT_RUN_INACTIVE");
+      if (tripId !== undefined && this.#task && this.#task.tripId !== tripId) {
+        if (TERMINAL_PHASES.has(this.#status.phase)) return safeResearchStatus({ phase: "idle" });
+        throw codedError("AGENT_RUN_INACTIVE");
+      }
       if (this.#reconciliationRecord && !this.#inflight) this.#startRecoveredSelfRevoke();
       return safeResearchStatus(this.#status);
     }
@@ -679,7 +682,10 @@ export class TravelResearchService {
     this.#restored = true;
     if (!recovered) return this.#status;
     this.#restoreRecoveredState(recovered);
-    if (tripId !== undefined && recovered.tripId !== tripId) throw codedError("AGENT_RUN_INACTIVE");
+    if (tripId !== undefined && recovered.tripId !== tripId) {
+      if (TERMINAL_PHASES.has(this.#status.phase)) return safeResearchStatus({ phase: "idle" });
+      throw codedError("AGENT_RUN_INACTIVE");
+    }
     if (recovered.recordType === "self_revoke_reconciliation") this.#startRecoveredSelfRevoke();
     return this.#status;
   }

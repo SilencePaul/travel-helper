@@ -2918,6 +2918,54 @@ test("cancelling an active task revokes its matching claim exactly once", async 
   assert.equal(harness.events.filter((event) => event === "transport.revokeSelf").length, 1);
 });
 
+test("a cancelled trip becomes idle to another trip without weakening active trip isolation", async () => {
+  let releaseContext;
+  let contextStarted;
+  const contextGate = new Promise((resolve) => { releaseContext = resolve; });
+  const observedContext = new Promise((resolve) => { contextStarted = resolve; });
+  const context = contextFixture();
+  const harness = createHarness({
+    context,
+    transportOptions: { contextGate },
+    scripts: [{ codexThreadId: "thread-next-trip", output: completedOutput(), activeDurationMs: 1 }],
+  });
+  const originalGetContext = harness.transport.getDecisionContext.bind(harness.transport);
+  harness.transport.getDecisionContext = async () => {
+    contextStarted();
+    return originalGetContext();
+  };
+  const firstRequest = await targetRequest(context);
+  harness.service.prepare(firstRequest.tripId);
+  await harness.service.claim(firstRequest.agentRunId);
+  const execution = harness.service.executeTravelResearch(firstRequest);
+  await observedContext;
+
+  await assert.rejects(harness.service.getResearchStatus("trip-next"), { code: "AGENT_RUN_INACTIVE" });
+
+  const cancellation = cancelCurrentResearch(harness.service);
+  releaseContext();
+  const [executeStatus, cancelStatus] = await Promise.all([execution, cancellation]);
+  assert.equal(executeStatus.phase, "cancelled");
+  assert.equal(cancelStatus.phase, "cancelled");
+
+  context.workspace.tripId = "trip-next";
+  const nextRequest = {
+    ...await targetRequest(context),
+    agentRunId: "agent-run-2",
+    operationId: "operation-2",
+  };
+  assert.deepEqual(await harness.service.getResearchStatus(nextRequest.tripId), { phase: "idle" });
+  harness.service.prepare(nextRequest.tripId);
+  await harness.service.claim(nextRequest.agentRunId);
+
+  const nextStatus = await harness.service.executeTravelResearch(nextRequest);
+
+  assert.equal(nextStatus.phase, "completed");
+  assert.equal(nextStatus.tripId, nextRequest.tripId);
+  assert.equal(nextStatus.researchTaskId, "research-task-2");
+  assert.equal(harness.runner.createCount, 1);
+});
+
 test("cleanup revoke remains available after cancellation exhausts the active research budget", async () => {
   let releaseContext;
   let contextStarted;
