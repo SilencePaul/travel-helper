@@ -993,6 +993,10 @@ test("an unsent prepared self-revoke can be discarded exactly after local intent
   await runtime.claim("agent-run-persist-failed");
   const unsent = runtime.prepareRevokeSelf();
 
+  assert.equal(runtime.discardPreparedRevokeSelf({
+    ...unsent,
+    expiresAt: "2099-09-01T00:15:01.000Z",
+  }), false);
   assert.equal(runtime.discardPreparedRevokeSelf(unsent), true);
   assert.doesNotThrow(() => runtime.prepare());
   assert.equal(fetchCalls, 1);
@@ -1076,6 +1080,17 @@ test("the same runtime retries an exactly persisted self-revoke after a definiti
     ...persisted,
     firstSentAt: persisted.firstSentAt + 1,
   }), /COMMAND_RETRY_REQUIRED/);
+  await assert.rejects(runtime.reconcileRevokeSelf({
+    ...persisted,
+    expiresAt: "2099-09-01T00:15:01.000Z",
+  }), /COMMAND_RETRY_REQUIRED/);
+  const nextSequenceEnvelope = JSON.parse(persisted.body);
+  nextSequenceEnvelope.sequence += 1;
+  await assert.rejects(runtime.reconcileRevokeSelf({
+    ...persisted,
+    body: JSON.stringify(nextSequenceEnvelope),
+  }), /COMMAND_RETRY_REQUIRED/);
+  assert.deepEqual(bodies, [persisted.body]);
   await assert.doesNotReject(runtime.reconcileRevokeSelf(persisted));
 
   assert.deepEqual(bodies, [persisted.body, persisted.body]);

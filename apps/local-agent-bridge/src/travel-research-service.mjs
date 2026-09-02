@@ -1,5 +1,6 @@
 import { isIP } from "node:net";
 
+import { RECONCILIATION_STATE_FIELDS } from "./research-state-store.mjs";
 import { buildTravelResearchInput } from "./travel-research-input.mjs";
 import { validateTravelResearchOutput } from "./travel-research-output.mjs";
 
@@ -94,15 +95,14 @@ function baseStatus(value) {
 }
 
 function sameReconciliationIntent(left, right) {
-  return left?.recordType === "self_revoke_reconciliation"
-    && left.tripId === right.tripId
-    && left.researchTaskId === right.researchTaskId
-    && left.agentRunId === right.agentRunId
-    && left.operationId === right.operationId
-    && left.revokeRequest?.agentRunId === right.revokeRequest.agentRunId
-    && left.revokeRequest?.expiresAt === right.revokeRequest.expiresAt
-    && left.revokeRequest?.firstSentAt === right.revokeRequest.firstSentAt
-    && left.revokeRequest?.body === right.revokeRequest.body;
+  const revokeRequestFields = ["agentRunId", "expiresAt", "firstSentAt", "body"];
+  if (!exactKeys(left, RECONCILIATION_STATE_FIELDS)
+    || !exactKeys(right, RECONCILIATION_STATE_FIELDS)
+    || !exactKeys(left.revokeRequest, revokeRequestFields)
+    || !exactKeys(right.revokeRequest, revokeRequestFields)) return false;
+  return RECONCILIATION_STATE_FIELDS.every((field) => field === "revokeRequest"
+    ? revokeRequestFields.every((requestField) => left.revokeRequest[requestField] === right.revokeRequest[requestField])
+    : left[field] === right[field]);
 }
 
 export function safeResearchStatus(value) {
@@ -1037,8 +1037,9 @@ export class TravelResearchService {
           this.#transport.discardPreparedRevokeSelf(revokeRequest);
           throw error;
         }
-        this.#reconciliationRecord = readBackCertain && sameReconciliationIntent(observed, reconciliationRecord)
-          ? observed
+        const exactReadBack = readBackCertain && sameReconciliationIntent(observed, reconciliationRecord);
+        this.#reconciliationRecord = readBackCertain
+          ? (exactReadBack ? observed : undefined)
           : reconciliationRecord;
         this.#task.selfRevokeReconciling = true;
         this.#status = safeResearchStatus({

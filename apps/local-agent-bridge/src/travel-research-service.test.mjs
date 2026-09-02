@@ -229,6 +229,9 @@ function fakeStore(events, initialState, options = {}) {
       if (options.reconciliationPersistError) throw options.reconciliationPersistError;
       state = structuredClone(value);
       options.onReconciliationPersisted?.(structuredClone(value));
+      if (options.transformReconciliationAfterWrite) {
+        state = options.transformReconciliationAfterWrite(structuredClone(state));
+      }
       if (options.reconciliationPersistErrorAfterWrite) throw options.reconciliationPersistErrorAfterWrite;
       return structuredClone(state);
     },
@@ -3316,6 +3319,57 @@ test("a self-revoke intent published before a persistence error is read back and
   assert.equal(harness.store.state?.tripId, request.tripId);
   assert.equal(harness.store.state?.agentRunId, request.agentRunId);
   assert.equal(harness.events.includes("transport.discardPreparedRevokeSelf"), false);
+});
+
+test("a non-exact self-revoke intent read back after a persistence error is not adopted or cleared", async () => {
+  const mismatches = [
+    ["recordType", "other_reconciliation"],
+    ["reconciliationState", "active"],
+    ["activePhase", "writing"],
+    ["codexThreadId", "thread-read-back-mismatch"],
+    ["targetCategory", "restaurant"],
+    ["targetScopeId", `scope_${"b".repeat(64)}`],
+    ["disclosureFingerprint", "c".repeat(64)],
+    ["aliasSalt", "alias-salt-read-back-mismatch"],
+    ["blockedReason", "source_login_required"],
+    ["blockedHostname", "login.example.com"],
+    ["activeRuntimeMs", 11],
+    ["terminalPhase", "failed"],
+    ["startedAt", "2026-09-01T00:00:01.000Z"],
+    ["updatedAt", "2026-09-01T00:00:02.000Z"],
+    ["revokeRequest", (value) => ({ ...value, agentRunId: "agent-run-read-back-mismatch" })],
+    ["revokeRequest", (value) => ({ ...value, expiresAt: "2099-09-01T00:15:01.000Z" })],
+    ["revokeRequest", (value) => ({ ...value, firstSentAt: value.firstSentAt + 1 })],
+    ["revokeRequest", (value) => ({ ...value, body: `${value.body} ` })],
+    ["revokeRequest", (value) => ({ ...value, extra: "not-allowed" })],
+  ];
+
+  for (const [field, replacement] of mismatches) {
+    const harness = createHarness({
+      scripts: [{ codexThreadId: "thread-persist-mismatch", output: ownerAction("codex_auth_required"), activeDurationMs: 10 }],
+      storeOptions: {
+        transformReconciliationAfterWrite: (state) => ({
+          ...state,
+          [field]: typeof replacement === "function" ? replacement(state[field]) : replacement,
+        }),
+        reconciliationPersistErrorAfterWrite: Object.assign(new Error("directory sync failed after rename"), {
+          code: "RESEARCH_STATE_UNAVAILABLE",
+        }),
+      },
+    });
+    const request = await targetRequest();
+    harness.service.prepare("trip-private");
+    await harness.service.claim(request.agentRunId);
+
+    const result = await harness.service.executeTravelResearch(request);
+    const polled = await harness.service.getResearchStatus(request.tripId);
+
+    assert.equal(result.reconciliationState, "self_revoke_reconciling", field);
+    assert.equal(polled.reconciliationState, "self_revoke_reconciling", field);
+    assert.equal(harness.events.includes("transport.revokeSelf"), false, field);
+    assert.equal(harness.events.includes("transport.discardPreparedRevokeSelf"), false, field);
+    assert.equal(harness.events.includes("store.clear"), false, field);
+  }
 });
 
 test("a persisted self-revoke responsibility survives definitive revoke and final blocker persistence failures", async () => {

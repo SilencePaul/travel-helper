@@ -624,6 +624,7 @@ export class LocalAgentBridgeRuntime {
     if (this.#busy || !this.#prepared || !this.#claimed || !this.#pendingCommand
       || this.#pendingCommand.sent
       || this.#claimed.agentRunId !== snapshot.agentRunId
+      || this.#claimed.expiresAt !== snapshot.expiresAt
       || this.#pendingCommand.action !== "revokeAgentRunSelf"
       || this.#pendingCommand.firstSentAt !== snapshot.firstSentAt
       || this.#pendingCommand.body !== snapshot.body) return false;
@@ -637,6 +638,8 @@ export class LocalAgentBridgeRuntime {
     const requested = canonicalJson({ action: "revokeAgentRunSelf", payload: {} });
     if (this.#pendingCommand) {
       if (!this.#claimed || this.#claimed.agentRunId !== snapshot.agentRunId
+        || this.#claimed.expiresAt !== snapshot.expiresAt
+        || this.#claimed.nextSequence !== snapshot.sequence
         || this.#pendingCommand.requested !== requested
         || this.#pendingCommand.firstSentAt !== snapshot.firstSentAt
         || this.#pendingCommand.body !== snapshot.body) {
