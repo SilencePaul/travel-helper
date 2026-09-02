@@ -5,7 +5,7 @@ import { MemoryRouter, useNavigate } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import seed from "../../../../content/trip.seed.json";
 import { TripApp } from "../App";
-import { browserDataMode, ProductionAuthGate } from "./BrowserRoot";
+import { browserDataMode, browserTestDecisionAgentEnabled, ProductionAuthGate, readBrowserTestDecisionCoordinator } from "./BrowserRoot";
 
 const seededTrip = TripSchema.parse(seed);
 
@@ -20,6 +20,15 @@ describe("browserDataMode", () => {
     expect(browserDataMode(false, undefined)).toBe("invalid");
     expect(browserDataMode(false, "cloudbase")).toBe("cloudbase");
     expect(browserDataMode(true, "local")).toBe("local");
+  });
+
+  it("never accepts the decision research coordinator outside a development build", () => {
+    const readCoordinator = vi.fn(() => { throw new Error("production must not read the coordinator"); });
+    expect(browserTestDecisionAgentEnabled(false, "?__testDecisionAgent=1")).toBe(false);
+    expect(readBrowserTestDecisionCoordinator(false, "?__testDecisionAgent=1", readCoordinator)).toBeUndefined();
+    expect(readCoordinator).not.toHaveBeenCalled();
+    expect(browserTestDecisionAgentEnabled(true, "?__testDecisionAgent=1")).toBe(true);
+    expect(browserTestDecisionAgentEnabled(true, "?__testDecisionAgent=0")).toBe(false);
   });
 });
 
