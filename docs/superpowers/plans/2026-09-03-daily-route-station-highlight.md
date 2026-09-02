@@ -22,7 +22,7 @@
 - Modify: `apps/web/src/features/overview/TravelPassHero.test.tsx`
 - Modify: `apps/web/src/features/overview/TravelPassHero.tsx`
 
-- [ ] **Step 1: Add failing tests for single-city, multi-city, return PEK, fallback, and unknown-city states**
+- [x] **Step 1: Add failing tests for single-city, multi-city, return PEK, fallback, and unknown-city states**
 
 Add a reusable route fixture and assertion helper to `TravelPassHero.test.tsx`:
 
@@ -109,7 +109,7 @@ const route = screen.getByRole("img", {
 });
 ```
 
-- [ ] **Step 2: Run the focused test and verify the new assertions fail**
+- [x] **Step 2: Run the focused test and verify the new assertions fail**
 
 Run:
 
@@ -119,12 +119,12 @@ pnpm --dir apps/web exec vitest run src/features/overview/TravelPassHero.test.ts
 
 Expected: FAIL because no SVG station currently renders `data-active="true"`, and the route accessible name has no current-day suffix.
 
-- [ ] **Step 3: Derive recognized active cities from the same selected-day fallback used by the ticket**
+- [x] **Step 3: Derive recognized active cities from the same selected-day fallback used by the ticket**
 
 In `TravelPassHero.tsx`, immediately after `const day = selectedRouteLeg(...)`, add:
 
 ```tsx
-const activeStops = routeStops(day.city).filter((stop) => cityCodes[stop]);
+const activeStops = [...new Set(routeStops(day.city).filter((stop) => Object.hasOwn(cityCodes, stop)))];
 const routeDescription = "北京出发，经深圳、香港、澳门、珠海，返回北京的路线";
 const routeAriaLabel = activeStops.length > 0
   ? `${routeDescription}；当前 D${day.dayNumber}，${activeStops.join("、")}已高亮`
@@ -157,7 +157,7 @@ Leave the first PEK group without `data-active`; add the Beijing condition only 
 >
 ```
 
-- [ ] **Step 4: Run the focused tests and verify they pass**
+- [x] **Step 4: Run the focused tests and verify they pass**
 
 Run:
 
@@ -167,7 +167,7 @@ pnpm --dir apps/web exec vitest run src/features/overview/TravelPassHero.test.ts
 
 Expected: the `TravelPassHero` test file passes, including the existing ticket and route structure assertions.
 
-- [ ] **Step 5: Commit station behavior**
+- [x] **Step 5: Commit station behavior**
 
 ```bash
 git add apps/web/src/features/overview/TravelPassHero.tsx apps/web/src/features/overview/TravelPassHero.test.tsx
@@ -179,7 +179,7 @@ git commit -m "feat: sync route stations with selected day"
 **Files:**
 - Modify: `apps/web/src/styles/global.css`
 
-- [ ] **Step 1: Add the coral active-state style**
+- [x] **Step 1: Add the coral active-state style**
 
 Immediately after the existing endpoint text rule, add:
 
@@ -189,12 +189,12 @@ Immediately after the existing endpoint text rule, add:
   stroke: var(--pass-coral);
   filter: drop-shadow(0 0 6px rgb(216 93 59 / 48%));
 }
-.travel-pass-hero__station[data-active="true"] text { fill: var(--pass-coral); }
+.travel-pass-hero__station[data-active="true"] text { fill: var(--accent-semantic); }
 ```
 
-This is static, introduces no transition or keyframe animation, and does not alter SVG geometry.
+节点/光环使用 coral，文字使用深珊瑚语义色以满足 11–13px AA 对比度；仍为静态无动画。
 
-- [ ] **Step 2: Run the component tests and web static checks**
+- [x] **Step 2: Run the component tests and web static checks**
 
 Run:
 
@@ -206,7 +206,7 @@ pnpm --dir apps/web lint
 
 Expected: all commands exit 0. Existing lint warnings may remain, but there must be no new error attributable to these files.
 
-- [ ] **Step 3: Commit the visual treatment**
+- [x] **Step 3: Commit the visual treatment**
 
 ```bash
 git add apps/web/src/styles/global.css
@@ -219,7 +219,7 @@ git commit -m "style: highlight active travel route stations"
 - No source changes expected.
 - Modify only the files above if verification reveals a defect directly caused by this feature.
 
-- [ ] **Step 1: Run the complete web test suite and build**
+- [x] **Step 1: Run the complete web test suite and build**
 
 Run:
 
@@ -231,7 +231,7 @@ pnpm --dir apps/web build
 
 Expected: all web tests pass, TypeScript exits 0, and Vite produces the production build.
 
-- [ ] **Step 2: Verify the live overview in the existing local preview**
+- [x] **Step 2: Verify the live overview in the existing local preview**
 
 Open `http://127.0.0.1:4182/`, sign in using the existing local state if required, and verify:
 
@@ -243,7 +243,7 @@ Open `http://127.0.0.1:4182/`, sign in using the existing local state if require
 6. At a narrow viewport, labels and halos remain visible without route clipping.
 7. Browser console has no new errors or warnings.
 
-- [ ] **Step 3: Run the relevant overview regression test**
+- [x] **Step 3: Run the relevant overview regression test**
 
 Run:
 
@@ -253,7 +253,7 @@ pnpm --dir apps/web exec vitest run src/features/overview/OverviewPage.test.tsx 
 
 Expected: both overview test files pass, including selected-day synchronization.
 
-- [ ] **Step 4: Record verification without creating an empty commit**
+- [x] **Step 4: Record verification without creating an empty commit**
 
 If verification requires a code correction, rerun the failing check and commit only the directly related correction:
 
