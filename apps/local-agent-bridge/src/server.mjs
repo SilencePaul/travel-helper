@@ -267,6 +267,7 @@ function requestError(error) {
   if (error?.code === "REQUEST_TOO_LARGE") return { status: 413, code: "INVALID_REQUEST" };
   if (error?.code === "REQUEST_TIMEOUT") return { status: 408, code: "INVALID_REQUEST" };
   if (error?.code === "INVALID_REQUEST") return { status: 400, code: "INVALID_REQUEST" };
+  if (error?.uncertain === true) return { status: 409, code: "AGENT_TRANSPORT_UNAVAILABLE" };
   if (BUSINESS_ERRORS.has(error?.code)) return { status: 409, code: error.code };
   return { status: 500, code: "CODEX_RESEARCH_FAILED" };
 }

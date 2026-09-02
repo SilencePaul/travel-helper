@@ -545,6 +545,49 @@ test("stable business errors are allowlisted and never expose error details", as
   assert.deepEqual(JSON.parse(unknown.body), { ok: false, error: "CODEX_RESEARCH_FAILED" });
 });
 
+test("uncertain claim errors are projected as transport unavailable while definite invalid responses stay generic", async (context) => {
+  const runtime = fakeRuntime();
+  const claimedIds = [];
+  let mode = "uncertain";
+  runtime.claim = async (agentRunId) => {
+    claimedIds.push(agentRunId);
+    if (mode === "uncertain") {
+      throw Object.assign(new Error("private malformed response"), {
+        code: "INVALID_AGENT_RESPONSE",
+        uncertain: true,
+      });
+    }
+    if (mode === "definite") {
+      throw Object.assign(new Error("private rejected response"), {
+        code: "INVALID_AGENT_RESPONSE",
+        uncertain: false,
+      });
+    }
+    return { agentRunId, status: "claimed" };
+  };
+  const bridge = await startLocalAgentBridge({ appUrl: APP_ORIGIN, runtime });
+  context.after(() => bridge.close());
+  const claim = { path: "/v1/agent-runs/claim", body: JSON.stringify({ agentRunId: "agent-run-replay" }) };
+
+  const uncertain = await rawRequest(bridge.port, claim);
+  assert.equal(uncertain.status, 409);
+  assert.deepEqual(JSON.parse(uncertain.body), { ok: false, error: "AGENT_TRANSPORT_UNAVAILABLE" });
+  assert.equal(uncertain.body.includes("INVALID_AGENT_RESPONSE"), false);
+
+  mode = "success";
+  const replay = await rawRequest(bridge.port, claim);
+  assert.equal(replay.status, 200);
+  assert.deepEqual(claimedIds, ["agent-run-replay", "agent-run-replay"]);
+
+  mode = "definite";
+  const definite = await rawRequest(bridge.port, {
+    path: "/v1/agent-runs/claim",
+    body: JSON.stringify({ agentRunId: "agent-run-definite" }),
+  });
+  assert.equal(definite.status, 500);
+  assert.deepEqual(JSON.parse(definite.body), { ok: false, error: "CODEX_RESEARCH_FAILED" });
+});
+
 test("the connection URL carries only the loopback origin in a fragment", () => {
   const url = new URL(buildConnectionUrl("https://trip.example/decisions?tab=agent", "http://127.0.0.1:43120"));
   assert.equal(url.origin, APP_ORIGIN);

@@ -1281,6 +1281,69 @@ test("two uncertain claims share one lease that expires the real runtime pending
   assert.doesNotThrow(() => harness.service.prepare());
 });
 
+test("uncertain invalid claim responses share one lease and expire the exact pending envelope", async () => {
+  const clock = createControlledClock();
+  const claimBodies = [];
+  const harness = createHarness({
+    clock,
+    transportFactory(_events, runtimeClock) {
+      return new LocalAgentBridgeRuntime({
+        agentEndpoint: "https://api.public.org/api/agent",
+        now: runtimeClock,
+        fetch: async (_url, init) => {
+          const body = JSON.parse(init.body);
+          claimBodies.push(init.body);
+          return Response.json({
+            ok: true,
+            data: { agentRunId: body.agentRunId, status: "claimed" },
+          });
+        },
+      });
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+
+  await assert.rejects(harness.service.claim(request.agentRunId), {
+    code: "INVALID_AGENT_RESPONSE",
+    uncertain: true,
+  });
+  await assert.rejects(harness.service.claim(request.agentRunId), {
+    code: "INVALID_AGENT_RESPONSE",
+    uncertain: true,
+  });
+
+  assert.equal(claimBodies.length, 2);
+  assert.equal(claimBodies[0], claimBodies[1]);
+  assert.equal(clock.scheduledTimers(), 1);
+  assert.equal(clock.pendingTimers(), 1);
+  assert.throws(() => harness.service.prepare(), { code: "BRIDGE_BUSY" });
+  assert.equal(clock.fireNext(), true);
+  assert.doesNotThrow(() => harness.service.prepare());
+});
+
+test("a definite invalid claim response does not start an unbound claim lease", async () => {
+  const clock = createControlledClock();
+  const claimError = Object.assign(new Error("private invalid response"), {
+    code: "INVALID_AGENT_RESPONSE",
+    uncertain: false,
+  });
+  const harness = createHarness({
+    clock,
+    transportFactory(events) {
+      const transport = fakeTransport(events, contextFixture());
+      transport.claim = async () => { throw claimError; };
+      return transport;
+    },
+  });
+  const request = await targetRequest();
+  harness.service.prepare();
+
+  await assert.rejects(harness.service.claim(request.agentRunId), (error) => error === claimError);
+  assert.equal(clock.scheduledTimers(), 0);
+  assert.equal(clock.pendingTimers(), 0);
+});
+
 test("an ordinary release refusal preserves the uncertain claim lease until expiry", async () => {
   const clock = createControlledClock();
   const harness = createHarness({

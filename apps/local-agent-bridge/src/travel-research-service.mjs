@@ -354,9 +354,9 @@ export class TravelResearchService {
       this.#startClaimHandoffLease(agentRunId);
       return claimed;
     } catch (error) {
-      if (error?.code === "AGENT_TRANSPORT_UNAVAILABLE") {
+      if (error?.uncertain === true || error?.code === "AGENT_TRANSPORT_UNAVAILABLE") {
         this.#startClaimHandoffLease(agentRunId);
-      } else if (error?.uncertain !== true) {
+      } else {
         this.#clearClaimHandoffLease(agentRunId);
       }
       throw error;
