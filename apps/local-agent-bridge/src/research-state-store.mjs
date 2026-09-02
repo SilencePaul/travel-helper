@@ -146,6 +146,12 @@ function hasExactFields(value, fields = RECOVERY_STATE_FIELDS) {
     && fields.every((field) => Object.hasOwn(value, field));
 }
 
+function hasAllowedFields(value, required, optional = []) {
+  if (!plainObject(value) || !required.every((field) => Object.hasOwn(value, field))) return false;
+  const allowed = new Set([...required, ...optional]);
+  return Reflect.ownKeys(value).every((field) => typeof field === "string" && allowed.has(field));
+}
+
 function opaqueIdentifier(value) {
   return typeof value === "string"
     && value.length > 0
@@ -281,6 +287,136 @@ function safePersistedProposalValue(value, depth = 0, state = { nodes: 0, textBy
   return true;
 }
 
+function nonEmptyProposalText(value) {
+  return typeof value === "string" && value.length > 0;
+}
+
+function validProposalDate(value) {
+  const match = typeof value === "string" ? /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value) : undefined;
+  if (!match) return false;
+  const time = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  const parsed = new Date(time);
+  return parsed.getUTCFullYear() === Number(match[1])
+    && parsed.getUTCMonth() + 1 === Number(match[2])
+    && parsed.getUTCDate() === Number(match[3]);
+}
+
+function validProposalDateRange(value) {
+  return hasExactFields(value, ["start", "end"])
+    && validProposalDate(value.start)
+    && validProposalDate(value.end);
+}
+
+function validProposalUrl(value) {
+  if (typeof value !== "string") return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" && !parsed.username && !parsed.password && !parsed.hash;
+  } catch {
+    return false;
+  }
+}
+
+function validProposalEntity(value) {
+  return hasAllowedFields(value, ["name"], ["address", "latitude", "longitude"])
+    && nonEmptyProposalText(value.name)
+    && (value.address === undefined || typeof value.address === "string")
+    && (value.latitude === undefined || Number.isFinite(value.latitude))
+    && (value.longitude === undefined || Number.isFinite(value.longitude));
+}
+
+function validProposalApplicability(value) {
+  return hasAllowedFields(value, [], ["dates", "travelers"])
+    && (value.dates === undefined || validProposalDateRange(value.dates))
+    && (value.travelers === undefined || (Number.isSafeInteger(value.travelers) && value.travelers > 0));
+}
+
+function validProposalRecommendation(value) {
+  return hasExactFields(value, ["round", "reason", "preferenceRevisionIds", "feedbackIds"])
+    && Number.isSafeInteger(value.round) && value.round > 0
+    && nonEmptyProposalText(value.reason)
+    && Array.isArray(value.preferenceRevisionIds)
+    && value.preferenceRevisionIds.every((item) => typeof item === "string")
+    && Array.isArray(value.feedbackIds)
+    && value.feedbackIds.every((item) => typeof item === "string");
+}
+
+function validProposalQueryContext(value) {
+  return hasAllowedFields(value, [], ["dates", "travelers", "roomOrTicket"])
+    && (value.dates === undefined || validProposalDateRange(value.dates))
+    && (value.travelers === undefined || (Number.isSafeInteger(value.travelers) && value.travelers > 0))
+    && (value.roomOrTicket === undefined || typeof value.roomOrTicket === "string");
+}
+
+function validHotelFacts(value) {
+  return hasExactFields(value, [
+    "propertyName", "address", "checkInDate", "checkOutDate", "travelers", "roomTypeOrBed",
+    "availability", "priceAmount", "currency", "priceDisplay", "cancellationPolicy",
+  ])
+    && nonEmptyProposalText(value.propertyName)
+    && nonEmptyProposalText(value.address)
+    && validProposalDate(value.checkInDate)
+    && validProposalDate(value.checkOutDate)
+    && Number.isSafeInteger(value.travelers) && value.travelers > 0
+    && nonEmptyProposalText(value.roomTypeOrBed)
+    && ["available", "unavailable", "unknown"].includes(value.availability)
+    && ((Number.isFinite(value.priceAmount) && value.priceAmount >= 0) || value.priceAmount === "not_provided")
+    && nonEmptyProposalText(value.currency)
+    && ["total", "per_night", "per_person", "not_provided"].includes(value.priceDisplay)
+    && nonEmptyProposalText(value.cancellationPolicy);
+}
+
+function validRestaurantFacts(value) {
+  return hasExactFields(value, ["name", "address", "openInformation", "priceSnapshot"])
+    && nonEmptyProposalText(value.name)
+    && nonEmptyProposalText(value.address)
+    && nonEmptyProposalText(value.openInformation)
+    && nonEmptyProposalText(value.priceSnapshot);
+}
+
+function validAttractionFacts(value) {
+  return hasExactFields(value, ["name", "address", "openInformation", "priceSnapshot", "ticketType"])
+    && nonEmptyProposalText(value.name)
+    && nonEmptyProposalText(value.address)
+    && nonEmptyProposalText(value.openInformation)
+    && nonEmptyProposalText(value.priceSnapshot)
+    && nonEmptyProposalText(value.ticketType);
+}
+
+function validProposalEvidence(value) {
+  return hasAllowedFields(value, [
+    "sourceKind", "sourceName", "sourceUrl", "capturedAt", "queryContext", "captureMethod", "facts",
+  ], ["supersedesEvidenceId", "changeReason"])
+    && ["flyai", "amap", "web", "official", "manual"].includes(value.sourceKind)
+    && nonEmptyProposalText(value.sourceName)
+    && validProposalUrl(value.sourceUrl)
+    && canonicalTimestamp(value.capturedAt)
+    && validProposalQueryContext(value.queryContext)
+    && ["detail_page", "search_result", "api_result", "manual"].includes(value.captureMethod)
+    && (validHotelFacts(value.facts) || validAttractionFacts(value.facts) || validRestaurantFacts(value.facts))
+    && (value.supersedesEvidenceId === undefined || nonEmptyProposalText(value.supersedesEvidenceId))
+    && (value.changeReason === undefined || typeof value.changeReason === "string");
+}
+
+function validProposalCandidate(value) {
+  return hasExactFields(value, ["category", "entity", "applicability", "recommendation", "evidence"])
+    && TARGET_CATEGORIES.has(value.category)
+    && validProposalEntity(value.entity)
+    && validProposalApplicability(value.applicability)
+    && validProposalRecommendation(value.recommendation)
+    && Array.isArray(value.evidence)
+    && value.evidence.length >= 2
+    && value.evidence.every(validProposalEvidence);
+}
+
+function validProposalPayload(value) {
+  return hasExactFields(value, ["round", "candidates"])
+    && Number.isSafeInteger(value.round) && value.round > 0
+    && Array.isArray(value.candidates)
+    && value.candidates.length >= 2 && value.candidates.length <= 4
+    && value.candidates.every(validProposalCandidate);
+}
+
 function validProposalSubmission(value, agentRunId) {
   if (!plainObject(value)
     || !hasExactFields(value, [
@@ -293,10 +429,7 @@ function validProposalSubmission(value, agentRunId) {
   const successRevoke = validSignedEnvelope(value.successRevokeBody, agentRunId, "revokeAgentRunSelf");
   const failureRevoke = validSignedEnvelope(value.failureRevokeBody, agentRunId, "revokeAgentRunSelf");
   return Boolean(submit && successRevoke && failureRevoke
-    && hasExactFields(submit.payload, ["round", "candidates"])
-    && Number.isSafeInteger(submit.payload.round) && submit.payload.round > 0
-    && Array.isArray(submit.payload.candidates)
-    && submit.payload.candidates.length >= 2 && submit.payload.candidates.length <= 4
+    && validProposalPayload(submit.payload)
     && safePersistedProposalValue(submit.payload)
     && hasExactFields(successRevoke.payload, [])
     && hasExactFields(failureRevoke.payload, [])

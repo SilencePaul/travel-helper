@@ -83,6 +83,45 @@ function reconciliationState(overrides = {}) {
 
 function proposalReconciliationState(overrides = {}) {
   const agentRunId = "agent-run-1";
+  const candidate = (suffix) => ({
+    category: "hotel",
+    entity: { name: `深圳湾酒店 ${suffix}`, address: "深圳市南山区" },
+    applicability: {
+      dates: { start: "2026-10-03", end: "2026-10-04" },
+      travelers: 2,
+    },
+    recommendation: {
+      round: 1,
+      reason: "位置和价格均适合本次行程",
+      preferenceRevisionIds: ["preference-revision-1"],
+      feedbackIds: ["feedback-1"],
+    },
+    evidence: ["official", "booking"].map((source, index) => ({
+      sourceKind: index === 0 ? "official" : "web",
+      sourceName: index === 0 ? "酒店官网" : "预订平台",
+      sourceUrl: `https://${source}.public.org/hotels/${suffix}`,
+      capturedAt: "2026-09-01T01:02:03.000Z",
+      queryContext: {
+        dates: { start: "2026-10-03", end: "2026-10-04" },
+        travelers: 2,
+        roomOrTicket: "大床房",
+      },
+      captureMethod: index === 0 ? "detail_page" : "search_result",
+      facts: {
+        propertyName: `深圳湾酒店 ${suffix}`,
+        address: "深圳市南山区",
+        checkInDate: "2026-10-03",
+        checkOutDate: "2026-10-04",
+        travelers: 2,
+        roomTypeOrBed: "大床房",
+        availability: "available",
+        priceAmount: 1_288,
+        currency: "CNY",
+        priceDisplay: "total",
+        cancellationPolicy: "入住前一天可免费取消",
+      },
+    })),
+  });
   const envelope = (action, payload, sequence, suffix) => JSON.stringify({
     agentRunId,
     sequence,
@@ -104,7 +143,7 @@ function proposalReconciliationState(overrides = {}) {
       firstSentAt: Date.parse("2026-09-01T01:03:00.000Z"),
       submitBody: envelope("submitProposalBatch", {
         round: 1,
-        candidates: [{ category: "hotel" }, { category: "hotel" }],
+        candidates: [candidate("A"), candidate("B")],
       }, 4, "submit"),
       successRevokeBody: envelope("revokeAgentRunSelf", {}, 5, "success"),
       failureRevokeBody: envelope("revokeAgentRunSelf", {}, 4, "failure"),
@@ -182,10 +221,52 @@ test("persists only a strict proposal replay responsibility and rejects nested p
   })), { code: "RESEARCH_STATE_INVALID" });
 
   const credentialEnvelope = JSON.parse(state.submission.submitBody);
-  credentialEnvelope.payload.candidates[0].reason = "Bearer exposed-token-1234";
+  credentialEnvelope.payload.candidates[0].recommendation.reason = "Bearer exposed-token-1234";
   await assert.rejects(store.persistProposalReconciliation(proposalReconciliationState({
     submission: { ...state.submission, submitBody: JSON.stringify(credentialEnvelope) },
   })), { code: "RESEARCH_STATE_INVALID" });
+});
+
+test("proposal recovery rejects member names and every non-schema candidate field", async (context) => {
+  const { store } = await temporaryStore(context);
+  const state = proposalReconciliationState();
+
+  for (const [field, value] of [
+    ["memberName", "一鸣"],
+    ["travelerName", "美垚"],
+    ["harmlessNote", "不含凭据的普通附加字段"],
+  ]) {
+    const envelope = JSON.parse(state.submission.submitBody);
+    envelope.payload.candidates[0][field] = value;
+    await assert.rejects(store.persistProposalReconciliation(proposalReconciliationState({
+      submission: { ...state.submission, submitBody: JSON.stringify(envelope) },
+    })), { code: "RESEARCH_STATE_INVALID" }, field);
+  }
+});
+
+test("proposal recovery applies an exact field allowlist at every payload boundary", async (context) => {
+  const { store } = await temporaryStore(context);
+  const state = proposalReconciliationState();
+  const mutations = [
+    ["payload", (payload) => { payload.harmlessExtra = "extra"; }],
+    ["candidate", (payload) => { payload.candidates[0].harmlessExtra = "extra"; }],
+    ["entity", (payload) => { payload.candidates[0].entity.harmlessExtra = "extra"; }],
+    ["applicability", (payload) => { payload.candidates[0].applicability.harmlessExtra = "extra"; }],
+    ["applicability dates", (payload) => { payload.candidates[0].applicability.dates.harmlessExtra = "extra"; }],
+    ["recommendation", (payload) => { payload.candidates[0].recommendation.harmlessExtra = "extra"; }],
+    ["evidence", (payload) => { payload.candidates[0].evidence[0].harmlessExtra = "extra"; }],
+    ["query context", (payload) => { payload.candidates[0].evidence[0].queryContext.harmlessExtra = "extra"; }],
+    ["query dates", (payload) => { payload.candidates[0].evidence[0].queryContext.dates.harmlessExtra = "extra"; }],
+    ["facts", (payload) => { payload.candidates[0].evidence[0].facts.harmlessExtra = "extra"; }],
+  ];
+
+  for (const [boundary, mutate] of mutations) {
+    const envelope = JSON.parse(state.submission.submitBody);
+    mutate(envelope.payload);
+    await assert.rejects(store.persistProposalReconciliation(proposalReconciliationState({
+      submission: { ...state.submission, submitBody: JSON.stringify(envelope) },
+    })), { code: "RESEARCH_STATE_INVALID" }, boundary);
+  }
 });
 
 test("writes through a same-directory temporary file and atomic rename", async (context) => {
