@@ -114,7 +114,7 @@ const route = screen.getByRole("img", {
 Run:
 
 ```bash
-pnpm --dir apps/web test -- TravelPassHero.test.tsx
+pnpm --dir apps/web exec vitest run src/features/overview/TravelPassHero.test.tsx
 ```
 
 Expected: FAIL because no SVG station currently renders `data-active="true"`, and the route accessible name has no current-day suffix.
@@ -162,7 +162,7 @@ Leave the first PEK group without `data-active`; add the Beijing condition only 
 Run:
 
 ```bash
-pnpm --dir apps/web test -- TravelPassHero.test.tsx
+pnpm --dir apps/web exec vitest run src/features/overview/TravelPassHero.test.tsx
 ```
 
 Expected: the `TravelPassHero` test file passes, including the existing ticket and route structure assertions.
@@ -199,7 +199,7 @@ This is static, introduces no transition or keyframe animation, and does not alt
 Run:
 
 ```bash
-pnpm --dir apps/web test -- TravelPassHero.test.tsx
+pnpm --dir apps/web exec vitest run src/features/overview/TravelPassHero.test.tsx
 pnpm --dir apps/web typecheck
 pnpm --dir apps/web lint
 ```
@@ -248,7 +248,7 @@ Open `http://127.0.0.1:4182/`, sign in using the existing local state if require
 Run:
 
 ```bash
-pnpm --dir apps/web test -- OverviewPage.test.tsx TravelPassHero.test.tsx
+pnpm --dir apps/web exec vitest run src/features/overview/OverviewPage.test.tsx src/features/overview/TravelPassHero.test.tsx
 ```
 
 Expected: both overview test files pass, including selected-day synchronization.
