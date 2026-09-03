@@ -126,6 +126,7 @@ const routeByPath = Object.fromEntries(cloudbaseConfig.gateway.routes.map((route
 assert.deepEqual(routeByPath["/api/auth"].qpsPolicy, { qpsTotal: 100, qpsPerClient: { limitBy: "ClientIP", limitValue: 3 } });
 assert.equal(routeByPath["/api/agent"].target, "function:agent-api");
 assert.equal(routeByPath["/api/agent"].enableAuth, false);
+assert.equal(routeByPath["/api/agent"].enablePathTransmission, true);
 assert.deepEqual(routeByPath["/api/agent"].qpsPolicy, { qpsTotal: 100, qpsPerClient: { limitBy: "ClientIP", limitValue: 4 } });
 assert.equal(functionByName["auth-service"].envVariables.CLOUDBASE_SERVER_SECRET_ID, "{{env.TENCENTCLOUD_SECRET_ID}}");
 assert.equal(functionByName["auth-service"].envVariables.CLOUDBASE_SERVER_SECRET_KEY, "{{env.TENCENTCLOUD_SECRET_KEY}}");

@@ -71,7 +71,7 @@
         "path": "/api/agent",
         "target": "function:agent-api",
         "enableAuth": false,
-        "enablePathTransmission": false,
+        "enablePathTransmission": true,
         "qpsPolicy": {
           "qpsTotal": 100,
           "qpsPerClient": {
