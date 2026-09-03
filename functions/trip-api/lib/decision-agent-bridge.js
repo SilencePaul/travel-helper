@@ -77,41 +77,51 @@ function createDecisionAgentBridge({ now = () => new Date() } = {}) {
   return {
     async claim(transaction, input, beforeCommit) {
       const runs = transaction.collection("trip_agent_runs");
-      const run = one(await runs.doc(input.agentRunId).get());
-      const signed = { agentRunId: input.agentRunId, pairingCode: input.pairingCode, clientNonce: input.clientNonce };
-      if (!run || !verifySignedValue(run.publicKeyJwk, signed, input.signature)) throw codedError("INVALID_AGENT_CLAIM");
-      const claimRequestFingerprint = sha256Base64Url(canonicalJson(signed));
-      if (run?.claimRequestFingerprint) {
-        if (sameSecret(run.claimRequestFingerprint, claimRequestFingerprint) && run.claimResult) {
-          if (beforeCommit) await beforeCommit(run);
-          assertUsableRun(run, { allowElapsed: true });
-          return run.claimResult;
+      let stage = "read";
+      try {
+        const run = one(await runs.doc(input.agentRunId).get());
+        const signed = { agentRunId: input.agentRunId, pairingCode: input.pairingCode, clientNonce: input.clientNonce };
+        stage = "verify";
+        if (!run || !verifySignedValue(run.publicKeyJwk, signed, input.signature)) throw codedError("INVALID_AGENT_CLAIM");
+        const claimRequestFingerprint = sha256Base64Url(canonicalJson(signed));
+        if (run?.claimRequestFingerprint) {
+          if (sameSecret(run.claimRequestFingerprint, claimRequestFingerprint) && run.claimResult) {
+            stage = "authorize-replay";
+            if (beforeCommit) await beforeCommit(run);
+            assertUsableRun(run, { allowElapsed: true });
+            return run.claimResult;
+          }
+          throw codedError("INVALID_AGENT_CLAIM");
         }
-        throw codedError("INVALID_AGENT_CLAIM");
+        assertUsableRun(run);
+        if (run.status !== "pending_claim"
+          || !sameSecret(run.pairingCodeHash, sha256Base64Url(input.pairingCode))) {
+          throw codedError("INVALID_AGENT_CLAIM");
+        }
+        stage = "authorize";
+        if (beforeCommit) await beforeCommit(run);
+        const { _id: _cloudbaseDocumentId, pairingCodeHash: _consumedPairingCodeHash, ...withoutPairingCode } = run;
+        const claimedAt = now().toISOString();
+        const claimed = {
+          ...withoutPairingCode,
+          status: "claimed",
+          clientNonce: input.clientNonce,
+          claimedAt,
+          revision: run.revision + 1,
+        };
+        const claimResult = {
+          agentRunId: run.id,
+          claimedAt,
+          expiresAt: run.expiresAt,
+          nextSequence: run.lastSequence + 1,
+        };
+        stage = "write";
+        await runs.doc(run.id).set({ ...claimed, claimRequestFingerprint, claimResult });
+        return claimResult;
+      } catch (error) {
+        console.error(JSON.stringify({ component: "agent-api", event: "agent-claim-failure", stage, code: typeof error?.code === "string" ? error.code : "UNKNOWN" }));
+        throw error;
       }
-      assertUsableRun(run);
-      if (run.status !== "pending_claim"
-        || !sameSecret(run.pairingCodeHash, sha256Base64Url(input.pairingCode))) {
-        throw codedError("INVALID_AGENT_CLAIM");
-      }
-      if (beforeCommit) await beforeCommit(run);
-      const { pairingCodeHash: _consumedPairingCodeHash, ...withoutPairingCode } = run;
-      const claimedAt = now().toISOString();
-      const claimed = {
-        ...withoutPairingCode,
-        status: "claimed",
-        clientNonce: input.clientNonce,
-        claimedAt,
-        revision: run.revision + 1,
-      };
-      const claimResult = {
-        agentRunId: run.id,
-        claimedAt,
-        expiresAt: run.expiresAt,
-        nextSequence: run.lastSequence + 1,
-      };
-      await runs.doc(run.id).set({ ...claimed, claimRequestFingerprint, claimResult });
-      return claimResult;
     },
 
     async run(transaction, input, operation, authorize) {

@@ -42,7 +42,7 @@ function pendingRun(publicKeyJwk, overrides = {}) {
 
 test("a valid P-256 claim consumes the pairing code and activates the run", async () => {
   const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
-  const state = createTransaction(pendingRun(publicKey.export({ format: "jwk" })));
+  const state = createTransaction(pendingRun(publicKey.export({ format: "jwk" }), { _id: "cloudbase-document-id" }));
   const bridge = createDecisionAgentBridge({ now: () => new Date("2026-08-28T00:05:00.000Z") });
   const claim = { agentRunId: "agent-run-1", pairingCode: "pairing-code", clientNonce: "nonce-001" };
 
@@ -56,6 +56,7 @@ test("a valid P-256 claim consumes the pairing code and activates the run", asyn
   });
   assert.equal(state.runs.get("agent-run-1").status, "claimed");
   assert.equal(state.runs.get("agent-run-1").pairingCodeHash, undefined);
+  assert.equal(state.runs.get("agent-run-1")._id, undefined);
   assert.equal(state.runs.get("agent-run-1").clientNonce, "nonce-001");
 });
 
