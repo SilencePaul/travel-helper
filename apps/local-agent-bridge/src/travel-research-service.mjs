@@ -159,6 +159,16 @@ function reconcileVerifiedPreviews(previews, candidates) {
     : []);
 }
 
+function matchesActiveProgress(record, input) {
+  return record?.recordType === "active_progress"
+    && record.tripId === input.tripId
+    && record.agentRunId === input.agentRunId
+    && record.operationId === input.operationId
+    && record.targetCategory === input.targetCategory
+    && record.targetScopeId === input.targetScopeId
+    && record.disclosureFingerprint === input.disclosureFingerprint;
+}
+
 function activeResearchProgress(status) {
   const deadline = new Date(Date.parse(status.startedAt) + DISCOVERY_BUDGET_MS);
   if (Number.isNaN(deadline.getTime())) throw codedError("CODEX_RESEARCH_FAILED");
@@ -700,7 +710,8 @@ export class TravelResearchService {
       && this.#status.phase !== "idle") {
       return Promise.resolve(safeResearchStatus(this.#status));
     }
-    if (this.#status.phase !== "idle" && !TERMINAL_PHASES.has(this.#status.phase)) {
+    if (this.#status.phase !== "idle" && !TERMINAL_PHASES.has(this.#status.phase)
+      && !matchesActiveProgress(this.#recoveryRecord, input)) {
       this.#releaseRejectedOperation(input.agentRunId);
       return Promise.reject(codedError("CODEX_RESEARCH_FAILED"));
     }
@@ -722,8 +733,16 @@ export class TravelResearchService {
   async #execute(input, operationKey) {
     let created = false;
     try {
-      if (this.#status.phase !== "idle" && !TERMINAL_PHASES.has(this.#status.phase)) {
+      const continuingRecoveredProgress = matchesActiveProgress(this.#recoveryRecord, input);
+      if (this.#status.phase !== "idle" && !TERMINAL_PHASES.has(this.#status.phase)
+        && !continuingRecoveredProgress) {
         throw codedError("CODEX_RESEARCH_FAILED");
+      }
+      if (continuingRecoveredProgress) {
+        this.#task.operationKey = operationKey;
+        this.#task.agentExpiresAt = this.#assertClaimed(input.agentRunId);
+        this.#cancelRequested = false;
+        return await this.#continueRecoveredProgress(input);
       }
       const shouldRestore = this.#status.phase === "idle" && !this.#restored;
       const startedAt = this.#now();
@@ -760,13 +779,7 @@ export class TravelResearchService {
         }
         this.#restored = true;
         if (recovered) {
-          if (recovered.recordType === "active_progress"
-            && recovered.tripId === input.tripId
-            && recovered.agentRunId === input.agentRunId
-            && recovered.operationId === input.operationId
-            && recovered.targetCategory === input.targetCategory
-            && recovered.targetScopeId === input.targetScopeId
-            && recovered.disclosureFingerprint === input.disclosureFingerprint) {
+          if (matchesActiveProgress(recovered, input)) {
             this.#clearDiscoveryDeadline();
             this.#restoreRecoveredState(recovered);
             this.#task.operationKey = operationKey;

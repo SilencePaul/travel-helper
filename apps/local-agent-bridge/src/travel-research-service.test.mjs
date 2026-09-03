@@ -609,9 +609,14 @@ test("restart resumes persisted discovery progress with only safe previews", asy
     initialState: persisted,
     scripts: [{ codexThreadId: "thread-restart-progress", activeDurationMs: 2_000, output: completedOutput() }],
   });
+  const restored = await restarted.service.getResearchStatus(request.tripId);
+  assert.equal(restored.phase, "validating");
+  assert.deepEqual(restored.progress.previews, persisted.previews);
   restarted.service.prepare(request.tripId);
   await restarted.service.claim(request.agentRunId);
-  const status = await restarted.service.executeTravelResearch(request);
+  const execution = restarted.service.executeTravelResearch(request);
+  assert.equal(restarted.service.executeTravelResearch(structuredClone(request)), execution);
+  const status = await execution;
 
   assert.equal(status.phase, "completed");
   assert.equal(restarted.runner.createCount, 1);
