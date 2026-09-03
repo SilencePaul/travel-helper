@@ -1692,6 +1692,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
         void retryCloudCleanup();
       }}>继续撤销云端授权</button> : null}
       {operation === "error" && bridgeStatusReady && !tripCleanupRequired && !blockedCleanupTaskId && !cloudCleanupRequired && researchStatus.phase !== "needs_owner_action" ? <button ref={retryRef} className="control-button control-button--secondary" type="button" onClick={() => {
+        inFlightRef.current = false;
         setOperation("idle");
         setOperationError(undefined);
       }}>{activePhases.has(researchStatus.phase) ? "继续查看状态" : "返回研究设置"}</button> : null}

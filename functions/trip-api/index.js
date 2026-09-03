@@ -132,7 +132,8 @@ function createAgentHttpHandler({ handler, maxBodyBytes = 64 * 1024 } = {}) {
             : ["INVALID_AGENT_CLAIM", "AGENT_SCOPE_FORBIDDEN", "ADMIN_REQUIRED", "MEMBERSHIP_REQUIRED", "FORBIDDEN"].includes(publicError) ? 403
               : 400;
       return json(statusCode, result?.ok === true ? result : { ok: false, error: publicError });
-    } catch {
+    } catch (error) {
+      console.error(JSON.stringify({ component: "agent-api", event: "agent-handler-failure", code: typeof error?.code === "string" ? error.code : "UNKNOWN" }));
       return json(503, { ok: false, error: "INVALID_REQUEST" });
     }
   };
