@@ -802,7 +802,7 @@ test("ordinary members cannot create, inspect, or revoke AgentRuns", async () =>
   assert.equal(db.data.trip_agent_runs.get("agent-run-1").status, "pending_claim");
 });
 
-test("an administrator creates, inspects, and revokes only the fixed proposal scope", async () => {
+test("an administrator creates a fixed 15-minute AgentRun, inspects, and revokes only the fixed proposal scope", async () => {
   const db = createDb({
     members: [member("fs_admin", "admin")],
     trips: [{ ...trip(), memberUids: ["fs_admin"] }],
@@ -830,6 +830,11 @@ test("an administrator creates, inspects, and revokes only the fixed proposal sc
   }, "fs_admin");
 
   assert.deepEqual(created, { agentRunId: "agent-run-1", expiresAt: "2026-08-28T07:15:00.000Z" });
+  assert.equal(
+    Date.parse(created.expiresAt) - Date.parse("2026-08-28T07:00:00.000Z"),
+    15 * 60 * 1_000,
+    "createAgentRun keeps its server-side 15-minute lease",
+  );
   assert.equal(db.data.trip_agent_runs.get("agent-run-1").status, "pending_claim");
   assert.equal(db.data.trip_agent_runs.get("agent-run-1").lastSequence, 0);
   const pendingStatus = await commands.execute({

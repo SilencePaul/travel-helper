@@ -2885,7 +2885,7 @@ test("insufficient evidence resumes the same thread until success within the act
   assert.equal(harness.runner.resumeInputs[1].prompt.includes("证据不足"), true);
 });
 
-test("active budget exhausted before validation times out with zero writes", async () => {
+test("the independent 10-minute active budget exhausted before validation times out with zero writes", async () => {
   const harness = createHarness({
     runnerFactory(events) {
       const runner = fakeRunner(events, [{
@@ -2908,6 +2908,12 @@ test("active budget exhausted before validation times out with zero writes", asy
 
   assert.equal(status.phase, "failed");
   assert.equal(status.errorCode, "CODEX_RESEARCH_TIMEOUT");
+  assert.deepEqual(harness.runner.createOptions[0], { activeTimeoutMs: 600_000 });
+  assert.equal(
+    15 * 60 * 1_000 > 10 * 60 * 1_000 + 8_000,
+    true,
+    "the 15-minute AgentRun lease leaves the existing bounded claim-handoff cleanup margin after the independent 10-minute active cap",
+  );
   assert.equal(harness.transport.submittedPayloads.length, 0);
   assert.equal(harness.runner.resumeInputs.length, 0);
   assert.equal(harness.events.includes("runner.resolveHostname"), false);
