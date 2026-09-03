@@ -6,9 +6,10 @@ import {
   RECONCILIATION_STATE_FIELDS,
 } from "./research-state-store.mjs";
 import { buildTravelResearchInput } from "./travel-research-input.mjs";
-import { validateTravelResearchOutput } from "./travel-research-output.mjs";
+import { validateTravelResearchDiscoveryOutput, validateTravelResearchOutput } from "./travel-research-output.mjs";
 
 const ACTIVE_BUDGET_MS = 10 * 60 * 1_000;
+const DISCOVERY_BUDGET_MS = 3 * 60 * 1_000;
 const CLAIM_HANDOFF_LEASE_MS = 8_000;
 const CATEGORIES = new Set(["hotel", "restaurant", "attraction"]);
 const RESUME_ACTIONS = new Set(["retry_codex_auth", "skip_blocked_source"]);
@@ -43,6 +44,7 @@ const FAILURE_CODES = new Set([
   "CODEX_RESEARCH_FAILED",
 ]);
 const CONTINUE_EVIDENCE_PROMPT = "现有结果证据不足。请在原旅行研究任务和原授权范围内继续搜索公开来源，并按原固定 JSON Schema 输出完整结果。";
+const VERIFY_DISCOVERY_PROMPT = "请基于刚才发现的候选，在原旅行研究任务和原授权范围内核验公开来源；仅保留可核验候选，并按固定 JSON Schema 输出完整结果。";
 const RETRY_AUTH_PROMPT = "Codex 登录已由设备所有者恢复。请继续原旅行研究任务，不得扩大范围，并按原固定 JSON Schema 输出完整结果。";
 const RECONCILIATION_BACKOFF_INITIAL_MS = 100;
 const RECONCILIATION_BACKOFF_CAP_MS = 5_000;
@@ -143,15 +145,31 @@ function sameProposalReconciliation(left, right) {
 }
 
 function activeResearchProgress(status) {
-  const deadline = new Date(Date.parse(status.startedAt) + 3 * 60 * 1_000);
+  const deadline = new Date(Date.parse(status.startedAt) + DISCOVERY_BUDGET_MS);
   if (Number.isNaN(deadline.getTime())) throw codedError("CODEX_RESEARCH_FAILED");
   const firstResultDeadlineAt = deadline.toISOString();
+  const supplied = status.progress;
+  if (supplied !== undefined && (!plainObject(supplied)
+    || !Reflect.ownKeys(supplied).every((key) => ["stage", "candidateCount", "previews", "firstResultDeadlineAt", "delayNotice"].includes(key))
+    || !["collecting_candidates", "verifying_sources", "writing_shared_decisions", "stopping"].includes(supplied.stage)
+    || !Number.isSafeInteger(supplied.candidateCount) || supplied.candidateCount < 0 || supplied.candidateCount > 128
+    || !Array.isArray(supplied.previews) || supplied.previews.length !== supplied.candidateCount
+    || supplied.previews.some((preview) => !exactKeys(preview, ["name", "address"])
+      || typeof preview.name !== "string" || preview.name.length === 0 || preview.name.length > 200
+      || typeof preview.address !== "string" || preview.address.length === 0 || preview.address.length > 500)
+    || supplied.firstResultDeadlineAt !== firstResultDeadlineAt
+    || (supplied.delayNotice !== undefined && supplied.delayNotice !== "first_results_delayed"))) {
+    throw codedError("CODEX_RESEARCH_FAILED");
+  }
+  const progress = supplied ?? {
+    stage: ACTIVE_PROGRESS_STAGES[status.phase], candidateCount: 0, previews: [], firstResultDeadlineAt,
+  };
   return {
-    stage: ACTIVE_PROGRESS_STAGES[status.phase],
-    candidateCount: 0,
-    previews: [],
+    stage: progress.stage,
+    candidateCount: progress.candidateCount,
+    previews: progress.previews.map((preview) => ({ name: preview.name, address: preview.address })),
     firstResultDeadlineAt,
-    ...(Date.parse(status.updatedAt) >= deadline.getTime()
+    ...((progress.delayNotice === "first_results_delayed" || Date.parse(status.updatedAt) >= deadline.getTime())
       ? { delayNotice: "first_results_delayed" }
       : {}),
   };
@@ -161,7 +179,7 @@ export function safeResearchStatus(value) {
   if (!plainObject(value) || typeof value.phase !== "string") throw codedError("CODEX_RESEARCH_FAILED");
   if (value.phase === "idle") return Object.freeze({ phase: "idle" });
   const result = baseStatus(value);
-  if (ACTIVE_PHASES.has(value.phase)) return Object.freeze({ ...result, progress: activeResearchProgress(result) });
+  if (ACTIVE_PHASES.has(value.phase)) return Object.freeze({ ...result, progress: activeResearchProgress(value) });
   if (value.reconciliationState !== "active") throw codedError("CODEX_RESEARCH_FAILED");
   if (value.phase === "completed") return Object.freeze(result);
   if (value.phase === "needs_owner_action") {
@@ -332,7 +350,37 @@ export class TravelResearchService {
     return this.#status;
   }
 
+  #progress(phase = this.#status.phase, previews = this.#task?.previews ?? []) {
+    const deadline = new Date(Date.parse(this.#task.startedAt) + DISCOVERY_BUDGET_MS).toISOString();
+    return {
+      stage: ACTIVE_PROGRESS_STAGES[phase] ?? "verifying_sources",
+      candidateCount: previews.length,
+      previews,
+      firstResultDeadlineAt: deadline,
+      ...(this.#date().getTime() >= Date.parse(deadline) ? { delayNotice: "first_results_delayed" } : {}),
+    };
+  }
+
+  #setProgressStatus(phase) {
+    return this.#setStatus(phase, { progress: this.#progress(phase) });
+  }
+
+  #startDiscoveryDeadline() {
+    const delay = Math.max(0, Date.parse(this.#task.startedAt) + DISCOVERY_BUDGET_MS - this.#date().getTime());
+    this.#task.discoveryTimer = this.#setTimer(() => {
+      this.#task.discoveryTimer = undefined;
+      if (this.#status.phase === "researching") this.#setProgressStatus("researching");
+    }, delay);
+    this.#task.discoveryTimer?.unref?.();
+  }
+
+  #clearDiscoveryDeadline() {
+    if (this.#task?.discoveryTimer !== undefined) this.#clearTimer(this.#task.discoveryTimer);
+    if (this.#task) this.#task.discoveryTimer = undefined;
+  }
+
   #finishStatus(phase, extras = {}) {
+    this.#clearDiscoveryDeadline();
     this.#task.selfRevokeReconciling = false;
     return this.#setStatus(phase, extras);
   }
@@ -340,9 +388,33 @@ export class TravelResearchService {
   #restoreRecoveredState(recovered) {
     const proposalReconciling = recovered.recordType === "proposal_submit_reconciliation";
     const reconciling = recovered.recordType === "self_revoke_reconciliation";
+    const activeProgress = recovered.recordType === "active_progress";
     this.#recoveryRecord = recovered;
     this.#proposalReconciliationRecord = proposalReconciling ? recovered : undefined;
     this.#reconciliationRecord = reconciling ? recovered : undefined;
+    if (activeProgress) {
+      this.#task = {
+        tripId: recovered.tripId, researchTaskId: recovered.researchTaskId,
+        agentRunId: recovered.agentRunId, operationId: recovered.operationId,
+        codexThreadId: recovered.codexThreadId, targetCategory: recovered.targetCategory,
+        targetScopeId: recovered.targetScopeId, disclosureFingerprint: recovered.disclosureFingerprint,
+        aliasSalt: recovered.aliasSalt, activeRuntimeMs: recovered.activeRuntimeMs,
+        runnerRuntimeMs: recovered.activeRuntimeMs, serviceRuntimeMs: 0, startedAt: recovered.startedAt,
+        previews: recovered.previews,
+      };
+      this.#status = safeResearchStatus({
+        phase: "validating", tripId: recovered.tripId, researchTaskId: recovered.researchTaskId,
+        agentRunId: recovered.agentRunId, operationId: recovered.operationId, reconciliationState: "active",
+        startedAt: recovered.startedAt, updatedAt: recovered.updatedAt,
+        progress: {
+          stage: "verifying_sources", candidateCount: recovered.previews.length, previews: recovered.previews,
+          firstResultDeadlineAt: new Date(Date.parse(recovered.startedAt) + DISCOVERY_BUDGET_MS).toISOString(),
+          ...(Date.parse(recovered.updatedAt) >= Date.parse(recovered.startedAt) + DISCOVERY_BUDGET_MS
+            ? { delayNotice: "first_results_delayed" } : {}),
+        },
+      });
+      return this.#status;
+    }
     if (proposalReconciling) {
       this.#task = {
         tripId: recovered.tripId,
@@ -658,6 +730,7 @@ export class TravelResearchService {
       created = true;
       this.#task.agentExpiresAt = this.#assertClaimed(input.agentRunId);
       this.#setStatus("researching");
+      this.#startDiscoveryDeadline();
       if (shouldRestore) {
         let recovered;
         try {
@@ -694,11 +767,11 @@ export class TravelResearchService {
       if (this.#cancelRequested) return this.#finishCancelled();
       this.#task.built = built;
       this.#session = this.#createSession();
-      const result = await this.#bounded(
-        () => this.#session.runInitial({ prompt: built.prompt }),
+      const discovery = await this.#bounded(
+        () => this.#session.runInitial({ prompt: built.discoveryPrompt, mode: "discovery" }),
         { countService: false, cancelRunner: true },
       );
-      return await this.#consume(result, "researching");
+      return await this.#consumeDiscovery(discovery);
     } catch (error) {
       if (created && this.#status.phase === "idle" && !this.#restored
         && stableFailureCode(error) === "AGENT_RUN_INACTIVE") {
@@ -1139,6 +1212,61 @@ export class TravelResearchService {
       }
       return this.#handleOperationFailure(error, evidenceContinuation);
     }
+  }
+
+  async #consumeDiscovery(result) {
+    try {
+      this.#clearDiscoveryDeadline();
+      const runnerState = recoverableRunnerState(this.#session, undefined, result);
+      if (!runnerState) throw codedError("CODEX_RESEARCH_FAILED");
+      this.#task.codexThreadId = runnerState.codexThreadId;
+      this.#syncActiveRuntime(runnerState.activeDurationMs);
+      const discovered = await this.#bounded(() => validateTravelResearchDiscoveryOutput(result.output, {
+        targetCategory: this.#task.targetCategory,
+        aliasMap: this.#task.built.aliasMap,
+        ...(typeof this.#runner.resolveHostname === "function" ? { resolveHostname: this.#runner.resolveHostname } : {}),
+      }), { countService: false });
+      if (discovered.status === "needs_owner_action") return this.#block(discovered);
+      if (this.#task.activeRuntimeMs >= DISCOVERY_BUDGET_MS) throw codedError("CODEX_RESEARCH_TIMEOUT");
+      this.#task.previews = discovered.candidates;
+      this.#setProgressStatus("validating");
+      const progressRecord = this.#activeProgressRecord();
+      if (typeof this.#store.persistActiveProgress !== "function") throw codedError("RESEARCH_STATE_UNAVAILABLE");
+      await this.#store.persistActiveProgress(progressRecord, this.#recoveryRecord);
+      this.#recoveryRecord = progressRecord;
+      const verified = await this.#bounded(
+        () => this.#session.resume({
+          codexThreadId: this.#task.codexThreadId,
+          prompt: VERIFY_DISCOVERY_PROMPT,
+          mode: "verified",
+        }),
+        { countService: false, cancelRunner: true },
+      );
+      return this.#consume(verified, "validating");
+    } catch (error) {
+      return this.#handleOperationFailure(error);
+    }
+  }
+
+  #activeProgressRecord() {
+    return {
+      recordType: "active_progress",
+      tripId: this.#task.tripId,
+      researchTaskId: this.#task.researchTaskId,
+      agentRunId: this.#task.agentRunId,
+      operationId: this.#task.operationId,
+      reconciliationState: "active",
+      codexThreadId: this.#task.codexThreadId,
+      targetCategory: this.#task.targetCategory,
+      targetScopeId: this.#task.targetScopeId,
+      disclosureFingerprint: this.#task.disclosureFingerprint,
+      aliasSalt: this.#task.aliasSalt,
+      activeRuntimeMs: Math.min(ACTIVE_BUDGET_MS, Math.ceil(this.#task.activeRuntimeMs)),
+      phase: "validating",
+      previews: this.#task.previews,
+      startedAt: this.#task.startedAt,
+      updatedAt: this.#now(),
+    };
   }
 
   async #block(blocked) {

@@ -589,14 +589,15 @@ export async function validateTravelResearchOutput(output, options) {
 
 export async function validateTravelResearchDiscoveryOutput(output, options) {
   try {
-    if (!exactObject(options, ["targetCategory", "aliasMap"]) || !CATEGORIES.has(options.targetCategory)
+    if (!exactObject(options, ["targetCategory", "aliasMap"], ["targetCategory", "aliasMap", "resolveHostname"])
+      || options.resolveHostname !== undefined && typeof options.resolveHostname !== "function" || !CATEGORIES.has(options.targetCategory)
       || !isResearchAliasMap(options.aliasMap)) {
       throw codedError(options && !CATEGORIES.has(options.targetCategory) ? "INVALID_RESEARCH_TARGET" : "CODEX_RESEARCH_FAILED");
     }
     scanForUnsafeContent(output, options.aliasMap);
     if (validOwnerActionShape(output)) {
       if (Object.hasOwn(output, "sourceHostname")) {
-        await resolvePublicHostname(output.sourceHostname, defaultResolveHostname);
+        await resolvePublicHostname(output.sourceHostname, options.resolveHostname ?? defaultResolveHostname);
       }
       return Object.freeze({ ...output });
     }

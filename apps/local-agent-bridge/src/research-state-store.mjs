@@ -58,6 +58,11 @@ export const PROPOSAL_RECONCILIATION_STATE_FIELDS = Object.freeze([
   "startedAt",
   "updatedAt",
 ]);
+export const ACTIVE_PROGRESS_STATE_FIELDS = Object.freeze([
+  "recordType", "tripId", "researchTaskId", "agentRunId", "operationId", "reconciliationState",
+  "codexThreadId", "targetCategory", "targetScopeId", "disclosureFingerprint", "aliasSalt",
+  "activeRuntimeMs", "phase", "previews", "startedAt", "updatedAt",
+]);
 
 const STATE_FILE_NAME = "travel-research-state.json";
 const LOCK_FILE_NAME = ".travel-research-state.lock";
@@ -504,6 +509,25 @@ function validateStateShape(value) {
   }
   if (plainObject(value) && value.recordType === "self_revoke_reconciliation") {
     return validateReconciliationShape(value);
+  }
+  if (plainObject(value) && value.recordType === "active_progress") {
+    const validPreview = (preview) => hasExactFields(preview, ["name", "address"])
+      && typeof preview.name === "string" && preview.name.length > 0 && preview.name.length <= 200
+      && typeof preview.address === "string" && preview.address.length > 0 && preview.address.length <= 500
+      && !PERSISTED_PRIVATE_VALUE_PATTERN.test(preview.name) && !PERSISTED_PRIVATE_VALUE_PATTERN.test(preview.address);
+    const valid = hasExactFields(value, ACTIVE_PROGRESS_STATE_FIELDS)
+      && opaqueIdentifier(value.tripId) && opaqueIdentifier(value.researchTaskId)
+      && opaqueIdentifier(value.agentRunId) && opaqueIdentifier(value.operationId)
+      && value.reconciliationState === "active" && opaqueIdentifier(value.codexThreadId)
+      && TARGET_CATEGORIES.has(value.targetCategory) && /^scope_[a-f0-9]{64}$/u.test(value.targetScopeId)
+      && /^[a-f0-9]{64}$/u.test(value.disclosureFingerprint)
+      && typeof value.aliasSalt === "string" && /^[A-Za-z0-9_-]{16,1024}$/u.test(value.aliasSalt)
+      && Number.isSafeInteger(value.activeRuntimeMs) && value.activeRuntimeMs >= 0 && value.activeRuntimeMs < 600_000
+      && value.phase === "validating" && Array.isArray(value.previews) && value.previews.length <= 128
+      && value.previews.every(validPreview) && canonicalTimestamp(value.startedAt) && canonicalTimestamp(value.updatedAt)
+      && Date.parse(value.updatedAt) >= Date.parse(value.startedAt);
+    if (!valid) throw codedError("RESEARCH_STATE_INVALID");
+    return Object.freeze(Object.fromEntries(ACTIVE_PROGRESS_STATE_FIELDS.map((field) => [field, value[field]])));
   }
   const valid = hasExactFields(value)
     && opaqueIdentifier(value.tripId)
@@ -1337,6 +1361,24 @@ export function createResearchStateStore({
     return result;
   }
 
+  async function persistActiveProgress(value, expected) {
+    const state = await validateState(value);
+    if (state.recordType !== "active_progress") throw codedError("RESEARCH_STATE_INVALID");
+    const expectedState = expected === undefined ? undefined : validateStateShape(expected);
+    const lock = await acquireLock();
+    let result;
+    let failure;
+    try {
+      result = (await compareAndPersist(state, expectedState, lock)).state;
+    } catch (error) { failure = error; }
+    try { await releaseLock(lock); } catch (error) { failure ??= error; }
+    if (failure) {
+      await reconcileMutationFailure(failure, expectedState, state);
+      result = state;
+    }
+    return result;
+  }
+
   return Object.freeze({
     filePath,
     load,
@@ -1345,5 +1387,6 @@ export function createResearchStateStore({
     persistNeedsOwnerAction,
     persistSelfRevokeReconciliation,
     persistProposalReconciliation,
+    persistActiveProgress,
   });
 }

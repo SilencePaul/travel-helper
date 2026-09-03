@@ -280,6 +280,12 @@ function fakeStore(events, initialState, options = {}) {
       state = structuredClone(value);
       return structuredClone(state);
     },
+    async persistActiveProgress(value, expected) {
+      events.push("store.persistActiveProgress");
+      const idempotent = assertExpected(value, expected);
+      if (!idempotent) state = structuredClone(value);
+      return structuredClone(state);
+    },
     get state() { return state && structuredClone(state); },
   };
 }
@@ -477,6 +483,21 @@ function fakeRunner(events, scripts) {
           events.push("runner.runInitial");
           assert.equal(typeof input.prompt, "string");
           initialInputs.push(structuredClone(input));
+          // Older service tests describe only the final, verified response.  Keep
+          // that fixture contract while making discovery an explicit runner turn.
+          const next = scripts[0];
+          if (input.mode === "discovery" && next?.output?.status === "completed") {
+            return {
+              codexThreadId: next.codexThreadId,
+              activeDurationMs: 1,
+              output: {
+                status: "discovered",
+                category: "hotel",
+                candidates: [{ name: "候选酒店", address: "深圳市" }, { name: "候选酒店二", address: "深圳市" }],
+              },
+              state: { codexThreadId: next.codexThreadId, activeDurationMs: 1 },
+            };
+          }
           const script = scripts.shift();
           if (typeof script === "function") return script({ input, cancelled, session });
           if (script instanceof Error) throw script;
@@ -513,6 +534,36 @@ function fakeRunner(events, scripts) {
     createOptions,
   };
 }
+
+test("discovery publishes safe previews before verified continuation settles", async () => {
+  let releaseVerified;
+  const verifiedGate = new Promise((resolve) => { releaseVerified = resolve; });
+  const harness = createHarness({ scripts: [
+    {
+      codexThreadId: "thread-discovery",
+      activeDurationMs: 1_000,
+      output: { status: "discovered", category: "hotel", candidates: [{ name: "深圳湾酒店", address: "深圳市南山区" }, { name: "福田酒店", address: "深圳市福田区" }] },
+    },
+    async () => {
+      await verifiedGate;
+      return { codexThreadId: "thread-discovery", activeDurationMs: 2_000, output: completedOutput() };
+    },
+  ] });
+  const request = await targetRequest();
+  harness.service.prepare(request.tripId);
+  await harness.service.claim(request.agentRunId);
+
+  const execution = harness.service.executeTravelResearch(request);
+  while (!harness.events.some((event) => event.startsWith("runner.resume:"))) await new Promise((resolve) => setImmediate(resolve));
+  const status = await harness.service.getResearchStatus(request.tripId);
+
+  assert.equal(harness.runner.initialInputs[0].mode, "discovery");
+  assert.equal(harness.runner.resumeInputs[0].mode, "verified");
+  assert.deepEqual(status.progress.previews, [{ name: "深圳湾酒店", address: "深圳市南山区" }, { name: "福田酒店", address: "深圳市福田区" }]);
+  assert.equal(status.progress.candidateCount, 2);
+  releaseVerified();
+  assert.equal((await execution).phase, "completed");
+});
 
 async function targetRequest(context = contextFixture()) {
   const targetScopeId = buildResearchTargetScopes(context.trip)[0].targetScopeId;
@@ -641,10 +692,12 @@ test("happy path starts Codex only after prepare/claim and writes one validated 
     "transport.prepare",
     "transport.claim:agent-run-1",
     "store.load",
-    "transport.getDecisionContext",
-    "runner.create:new",
-    "runner.runInitial",
-    "store.clear",
+      "transport.getDecisionContext",
+      "runner.create:new",
+      "runner.runInitial",
+      "store.persistActiveProgress",
+      "runner.resume:codex-thread-1",
+      "store.clear",
     "store.persistProposalReconciliation",
     "transport.submitProposalBatch",
     "transport.revokeSelf",
@@ -962,6 +1015,7 @@ test("a pre-task execute failure preserves a real runtime claim with an uncertai
 
 test("service composes with a real createCodexRunner session contract", async () => {
   const output = completedOutput();
+  let spawnCount = 0;
   const runnerFactory = (events) => ({
     resolveHostname: PUBLIC_RESOLVER,
     create(options) {
@@ -989,6 +1043,10 @@ test("service composes with a real createCodexRunner session contract", async ()
         }),
         processKillImpl: () => { throw new Error("successful fake child must not be killed"); },
         spawnImpl: () => {
+          spawnCount += 1;
+          const turnOutput = spawnCount === 1
+            ? { status: "discovered", category: "hotel", candidates: [{ name: "深圳湾酒店", address: "深圳市南山区" }, { name: "福田酒店", address: "深圳市福田区" }] }
+            : output;
           const child = new EventEmitter();
           child.pid = 40_001;
           child.stdout = new EventEmitter();
@@ -1007,7 +1065,7 @@ test("service composes with a real createCodexRunner session contract", async ()
               JSON.stringify({ type: "item.completed", item: { type: "web_search" } }),
               JSON.stringify({
                 type: "item.completed",
-                item: { type: "agent_message", text: JSON.stringify(output) },
+                item: { type: "agent_message", text: JSON.stringify(turnOutput) },
               }),
               JSON.stringify({ type: "turn.completed" }),
               "",
@@ -1343,11 +1401,14 @@ test("an uncertain proposal response persists exact replay responsibility and co
     },
   });
   const firstStore = createResearchStateStore({ directory, resolveHostname: PUBLIC_RESOLVER });
-  const firstRunner = fakeRunner([], [{
-    codexThreadId: "thread-submit-restart",
-    output: completedOutput(),
-    activeDurationMs: 10_000,
-  }]);
+  const firstRunner = fakeRunner([], [
+    {
+      codexThreadId: "thread-submit-restart",
+      output: { status: "discovered", category: "hotel", candidates: [{ name: "深圳湾酒店", address: "深圳市南山区" }, { name: "福田酒店", address: "深圳市福田区" }] },
+      activeDurationMs: 1_000,
+    },
+    { codexThreadId: "thread-submit-restart", output: completedOutput(), activeDurationMs: 10_000 },
+  ]);
   const firstService = new TravelResearchService({
     transport: firstRuntime,
     runner: firstRunner,
@@ -1618,29 +1679,50 @@ test("two services crossing after the empty-state gate cannot overwrite proposal
   const secondBaseStore = createResearchStateStore({ directory, resolveHostname: PUBLIC_RESOLVER });
   let releaseFirstClear;
   let releaseSecondClear;
+  let releaseFirstProposalPersist;
+  let releaseSecondProposalPersist;
   let observeFirstClear;
   let observeSecondClear;
+  let observeFirstProposalPersist;
+  let observeSecondProposalPersist;
+  let observeFirstProposalCommitted;
   const firstClearGate = new Promise((resolve) => { releaseFirstClear = resolve; });
   const secondClearGate = new Promise((resolve) => { releaseSecondClear = resolve; });
+  const firstProposalPersistGate = new Promise((resolve) => { releaseFirstProposalPersist = resolve; });
+  const secondProposalPersistGate = new Promise((resolve) => { releaseSecondProposalPersist = resolve; });
   const firstCleared = new Promise((resolve) => { observeFirstClear = resolve; });
   const secondCleared = new Promise((resolve) => { observeSecondClear = resolve; });
-  const gateInitialClear = (store, observe, gate) => {
+  const firstProposalPersistStarted = new Promise((resolve) => { observeFirstProposalPersist = resolve; });
+  const secondProposalPersistStarted = new Promise((resolve) => { observeSecondProposalPersist = resolve; });
+  const firstProposalCommitted = new Promise((resolve) => { observeFirstProposalCommitted = resolve; });
+  const gatePersistence = ({ events, store, observeClear, clearGate, observeProposalPersist, proposalPersistGate, observeProposalCommitted }) => {
     let first = true;
     return {
       load: (...args) => store.load(...args),
       async clear(...args) {
+        events.push("store.clear");
         const result = await store.clear(...args);
         if (first) {
           first = false;
-          observe();
-          await gate;
+          observeClear();
+          await clearGate;
         }
         return result;
       },
       save: (...args) => store.save(...args),
       persistNeedsOwnerAction: (...args) => store.persistNeedsOwnerAction(...args),
       persistSelfRevokeReconciliation: (...args) => store.persistSelfRevokeReconciliation(...args),
-      persistProposalReconciliation: (...args) => store.persistProposalReconciliation(...args),
+      async persistProposalReconciliation(...args) {
+        observeProposalPersist();
+        await proposalPersistGate;
+        const result = await store.persistProposalReconciliation(...args);
+        observeProposalCommitted?.();
+        return result;
+      },
+      async persistActiveProgress(...args) {
+        events.push("store.persistActiveProgress");
+        return store.persistActiveProgress(...args);
+      },
     };
   };
   const firstEvents = [];
@@ -1652,7 +1734,15 @@ test("two services crossing after the empty-state gate cannot overwrite proposal
   const firstService = new TravelResearchService({
     transport: firstTransport,
     runner: fakeRunner(firstEvents, [{ codexThreadId: "thread-cas-first", output: completedOutput(), activeDurationMs: 10 }]),
-    store: gateInitialClear(firstBaseStore, observeFirstClear, firstClearGate),
+    store: gatePersistence({
+      events: firstEvents,
+      store: firstBaseStore,
+      observeClear: observeFirstClear,
+      clearGate: firstClearGate,
+      observeProposalPersist: observeFirstProposalPersist,
+      proposalPersistGate: firstProposalPersistGate,
+      observeProposalCommitted: observeFirstProposalCommitted,
+    }),
     notifier: { async notifyOwnerAction() { return true; } },
     clock: createClock(),
     idGenerator: (() => { const values = ["research-task-cas-first", "alias-salt-cas-first"]; return () => values.shift(); })(),
@@ -1660,7 +1750,14 @@ test("two services crossing after the empty-state gate cannot overwrite proposal
   const secondService = new TravelResearchService({
     transport: secondTransport,
     runner: fakeRunner(secondEvents, [{ codexThreadId: "thread-cas-second", output: completedOutput(), activeDurationMs: 10 }]),
-    store: gateInitialClear(secondBaseStore, observeSecondClear, secondClearGate),
+    store: gatePersistence({
+      events: secondEvents,
+      store: secondBaseStore,
+      observeClear: observeSecondClear,
+      clearGate: secondClearGate,
+      observeProposalPersist: observeSecondProposalPersist,
+      proposalPersistGate: secondProposalPersistGate,
+    }),
     notifier: { async notifyOwnerAction() { return true; } },
     clock: createClock(),
     idGenerator: (() => { const values = ["research-task-cas-second", "alias-salt-cas-second"]; return () => values.shift(); })(),
@@ -1677,11 +1774,27 @@ test("two services crossing after the empty-state gate cannot overwrite proposal
   await secondService.claim(secondRequest.agentRunId);
 
   const firstExecution = firstService.executeTravelResearch(firstRequest);
+  await firstCleared;
+  assert.ok(firstEvents.indexOf("store.persistActiveProgress") < firstEvents.indexOf("store.clear"));
+  assert.equal(await firstBaseStore.load(), undefined);
+
   const secondExecution = secondService.executeTravelResearch(secondRequest);
-  await Promise.all([firstCleared, secondCleared]);
+  await secondCleared;
+  assert.ok(secondEvents.indexOf("store.persistActiveProgress") < secondEvents.indexOf("store.clear"));
+  assert.equal(await secondBaseStore.load(), undefined);
+
   releaseFirstClear();
-  while (firstTransport.submittedPayloads.length === 0) await new Promise((resolve) => setImmediate(resolve));
+  await firstProposalPersistStarted;
   releaseSecondClear();
+  await secondProposalPersistStarted;
+  assert.equal(firstTransport.submittedPayloads.length, 0);
+  assert.equal(secondTransport.submittedPayloads.length, 0);
+
+  releaseFirstProposalPersist();
+  await firstProposalCommitted;
+  const ownedBeforeLoser = await firstBaseStore.load();
+  assert.equal(ownedBeforeLoser.operationId, firstRequest.operationId);
+  releaseSecondProposalPersist();
 
   const secondStatus = await secondExecution;
   const owned = await secondBaseStore.load();
@@ -1692,13 +1805,7 @@ test("two services crossing after the empty-state gate cannot overwrite proposal
 
   releaseFirstSubmit();
   assert.equal((await firstExecution).phase, "completed");
-  let retriedSecondStatus = await secondService.getResearchStatus(secondRequest.tripId);
-  while (retriedSecondStatus.phase === "writing") {
-    await new Promise((resolve) => setImmediate(resolve));
-    retriedSecondStatus = await secondService.getResearchStatus(secondRequest.tripId);
-  }
-  assert.equal(retriedSecondStatus.phase, "completed");
-  assert.equal(secondTransport.submittedPayloads.length, 1);
+  assert.equal(secondTransport.submittedPayloads.length, 0);
   assert.equal(await secondBaseStore.load(), undefined);
 });
 
@@ -1866,11 +1973,11 @@ test("concurrent execute calls for the same AgentRun share one runner and one ta
     await waiting;
     return {
       codexThreadId: "codex-thread-1",
-      output: completedOutput(),
-      activeDurationMs: 5_000,
-      state: { codexThreadId: "codex-thread-1", correctionUsed: false, activeDurationMs: 5_000 },
+      output: { status: "discovered", category: "hotel", candidates: [{ name: "深圳湾酒店", address: "深圳市南山区" }, { name: "福田酒店", address: "深圳市福田区" }] },
+      activeDurationMs: 1_000,
+      state: { codexThreadId: "codex-thread-1", correctionUsed: false, activeDurationMs: 1_000 },
     };
-  }] });
+  }, { codexThreadId: "codex-thread-1", output: completedOutput(), activeDurationMs: 5_000 }] });
   const request = await targetRequest();
   harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
@@ -1909,11 +2016,11 @@ test("a different execute operation is rejected while research is in flight", as
     await waiting;
     return {
       codexThreadId: "codex-thread-1",
-      output: completedOutput(),
-      activeDurationMs: 5_000,
-      state: { codexThreadId: "codex-thread-1", correctionUsed: false, activeDurationMs: 5_000 },
+      output: { status: "discovered", category: "hotel", candidates: [{ name: "深圳湾酒店", address: "深圳市南山区" }, { name: "福田酒店", address: "深圳市福田区" }] },
+      activeDurationMs: 1_000,
+      state: { codexThreadId: "codex-thread-1", correctionUsed: false, activeDurationMs: 1_000 },
     };
-  }] });
+  }, { codexThreadId: "codex-thread-1", output: completedOutput(), activeDurationMs: 5_000 }] });
   const request = await targetRequest();
   harness.service.prepare("trip-private");
   await harness.service.claim(request.agentRunId);
@@ -2218,7 +2325,7 @@ test("execute binds the claimed handoff before work and cancels its lease", asyn
 
   const execution = harness.service.executeTravelResearch(request);
 
-  assert.equal(clock.pendingTimers(), 0);
+  assert.equal(clock.pendingTimers(), 1);
   assert.equal(clock.fireLastCleared(), true);
   assert.equal(harness.transport.claimedRun.agentRunId, request.agentRunId);
   assert.equal((await execution).phase, "completed");
@@ -2583,7 +2690,7 @@ test("an issued owner-action revocation finishes reconciliation after the active
   const status = await execution;
 
   assert.equal(timerFired, false);
-  assert.equal(pendingStatus.phase, "validating");
+  assert.equal(pendingStatus.phase, "researching");
   assert.equal(pendingStatus.agentRunId, request.agentRunId);
   assert.equal(pendingStatus.operationId, request.operationId);
   assert.equal(pendingStatus.reconciliationState, "self_revoke_reconciling");
@@ -2712,9 +2819,9 @@ test("insufficient evidence resumes the same thread until success within the act
   const status = await harness.service.executeTravelResearch(request);
 
   assert.equal(status.phase, "completed");
-  assert.equal(harness.runner.resumeInputs.length, 1);
+  assert.equal(harness.runner.resumeInputs.length, 2);
   assert.equal(harness.runner.resumeInputs[0].codexThreadId, "thread-evidence");
-  assert.equal(harness.runner.resumeInputs[0].prompt.includes("证据不足"), true);
+  assert.equal(harness.runner.resumeInputs[1].prompt.includes("证据不足"), true);
 });
 
 test("active budget exhausted before validation times out with zero writes", async () => {
@@ -2722,7 +2829,7 @@ test("active budget exhausted before validation times out with zero writes", asy
     runnerFactory(events) {
       const runner = fakeRunner(events, [{
         codexThreadId: "thread-timeout",
-        output: completedOutput(),
+        output: { status: "discovered", category: "hotel", candidates: [{ name: "深圳湾酒店", address: "深圳市南山区" }, { name: "福田酒店", address: "深圳市福田区" }] },
         activeDurationMs: 600_000,
       }]);
       runner.resolveHostname = async () => {
@@ -2845,7 +2952,7 @@ test("wall-clock rollback cannot reduce service runtime or move status timestamp
       await runnerGate;
       return {
         codexThreadId: "thread-clock-rollback",
-        output: completedOutput(),
+        output: { status: "discovered", category: "hotel", candidates: [{ name: "深圳湾酒店", address: "深圳市南山区" }, { name: "福田酒店", address: "深圳市福田区" }] },
         activeDurationMs: 1_000,
         state: {
           codexThreadId: "thread-clock-rollback",
@@ -2853,7 +2960,7 @@ test("wall-clock rollback cannot reduce service runtime or move status timestamp
           activeDurationMs: 1_000,
         },
       };
-    }],
+    }, { codexThreadId: "thread-clock-rollback", output: completedOutput(), activeDurationMs: 1_000 }],
   });
   const request = await targetRequest();
   harness.service.prepare("trip-private");
@@ -2896,7 +3003,7 @@ test("claimed-run expiry bounds signed context before any runner or write starts
     await new Promise((resolve) => setImmediate(resolve));
   }
 
-  assert.equal(clock.fireNext(), false);
+  assert.equal(clock.fireNext(), true);
   clock.advance(20);
   releaseContext();
   const status = await execution;
@@ -3610,7 +3717,7 @@ test("cleanup revoke remains available after cancellation exhausts the active re
 });
 
 test("permanently uncertain context uses capped exponential backoff and releases only after run expiry", async () => {
-  const clock = createAutoAdvanceClock(undefined, { parkedDelays: [8_000] });
+  const clock = createAutoAdvanceClock(undefined, { parkedDelays: [8_000, 180_000] });
   let contextAttempts = 0;
   const harness = createHarness({
     clock,
@@ -4233,7 +4340,7 @@ test("a persisted self-revoke intent survives a committed-response crash and con
   });
 
   const reconciling = await restarted.service.getResearchStatus("trip-private");
-  assert.equal(reconciling.phase, "validating");
+  assert.equal(reconciling.phase, "researching");
   assert.equal(reconciling.reconciliationState, "self_revoke_reconciling");
   await observedRestartRevoke;
   releaseRestartRevoke();
