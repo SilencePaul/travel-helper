@@ -4627,6 +4627,17 @@ test("getResearchStatus restores only the safe blocked projection and strict sta
     });
   }
 
+  assert.throws(() => safeResearchStatus({
+    phase: "researching",
+    tripId: "trip-private",
+    researchTaskId: "task-active",
+    agentRunId: "agent-run-safe",
+    operationId: "operation-safe",
+    reconciliationState: "active",
+    startedAt: "+275760-09-13T00:00:00.000Z",
+    updatedAt: "+275760-09-13T00:00:00.000Z",
+  }), { code: "CODEX_RESEARCH_FAILED" });
+
   for (const blockedHostname of ["127.0.0.1", "agent.localhost", "source.internal"]) {
     assert.throws(() => safeResearchStatus({
       phase: "needs_owner_action",

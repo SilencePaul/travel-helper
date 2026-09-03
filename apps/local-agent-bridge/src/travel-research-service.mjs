@@ -143,13 +143,15 @@ function sameProposalReconciliation(left, right) {
 }
 
 function activeResearchProgress(status) {
-  const firstResultDeadlineAt = new Date(Date.parse(status.startedAt) + 3 * 60 * 1_000).toISOString();
+  const deadline = new Date(Date.parse(status.startedAt) + 3 * 60 * 1_000);
+  if (Number.isNaN(deadline.getTime())) throw codedError("CODEX_RESEARCH_FAILED");
+  const firstResultDeadlineAt = deadline.toISOString();
   return {
     stage: ACTIVE_PROGRESS_STAGES[status.phase],
     candidateCount: 0,
     previews: [],
     firstResultDeadlineAt,
-    ...(Date.parse(status.updatedAt) >= Date.parse(firstResultDeadlineAt)
+    ...(Date.parse(status.updatedAt) >= deadline.getTime()
       ? { delayNotice: "first_results_delayed" }
       : {}),
   };
