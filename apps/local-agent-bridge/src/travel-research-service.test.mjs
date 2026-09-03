@@ -3773,7 +3773,7 @@ test("the 10-minute active timeout triggers cleanup revoke before the claimed Ag
   const execution = harness.service.executeTravelResearch(request);
   await observedContext;
 
-  clock.advance(10 * 60 * 1_000 + 1);
+  clock.advance(10 * 60 * 1_000);
   releaseContext();
   const executeStatus = await execution;
 
