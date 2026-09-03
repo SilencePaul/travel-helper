@@ -144,6 +144,21 @@ function sameProposalReconciliation(left, right) {
     : left[field] === right[field]);
 }
 
+function validProgressPreview(preview) {
+  return exactKeys(preview, ["category", "name", "location", "verification"])
+    && CATEGORIES.has(preview.category)
+    && typeof preview.name === "string" && preview.name.length > 0 && preview.name.length <= 200
+    && typeof preview.location === "string" && preview.location.length > 0 && preview.location.length <= 200
+    && ["pending", "verified"].includes(preview.verification);
+}
+
+function reconcileVerifiedPreviews(previews, candidates) {
+  return previews.flatMap((preview) => candidates.some((candidate) => candidate.category === preview.category
+    && candidate.entity.name === preview.name && candidate.entity.address === preview.location)
+    ? [{ ...preview, verification: "verified" }]
+    : []);
+}
+
 function activeResearchProgress(status) {
   const deadline = new Date(Date.parse(status.startedAt) + DISCOVERY_BUDGET_MS);
   if (Number.isNaN(deadline.getTime())) throw codedError("CODEX_RESEARCH_FAILED");
@@ -152,11 +167,9 @@ function activeResearchProgress(status) {
   if (supplied !== undefined && (!plainObject(supplied)
     || !Reflect.ownKeys(supplied).every((key) => ["stage", "candidateCount", "previews", "firstResultDeadlineAt", "delayNotice"].includes(key))
     || !["collecting_candidates", "verifying_sources", "writing_shared_decisions", "stopping"].includes(supplied.stage)
-    || !Number.isSafeInteger(supplied.candidateCount) || supplied.candidateCount < 0 || supplied.candidateCount > 128
+    || !Number.isSafeInteger(supplied.candidateCount) || supplied.candidateCount < 0 || supplied.candidateCount > 4
     || !Array.isArray(supplied.previews) || supplied.previews.length !== supplied.candidateCount
-    || supplied.previews.some((preview) => !exactKeys(preview, ["name", "address"])
-      || typeof preview.name !== "string" || preview.name.length === 0 || preview.name.length > 200
-      || typeof preview.address !== "string" || preview.address.length === 0 || preview.address.length > 500)
+    || supplied.previews.length > 4 || supplied.previews.some((preview) => !validProgressPreview(preview))
     || supplied.firstResultDeadlineAt !== firstResultDeadlineAt
     || (supplied.delayNotice !== undefined && supplied.delayNotice !== "first_results_delayed"))) {
     throw codedError("CODEX_RESEARCH_FAILED");
@@ -167,7 +180,7 @@ function activeResearchProgress(status) {
   return {
     stage: progress.stage,
     candidateCount: progress.candidateCount,
-    previews: progress.previews.map((preview) => ({ name: preview.name, address: preview.address })),
+    previews: progress.previews.map((preview) => ({ ...preview })),
     firstResultDeadlineAt,
     ...((progress.delayNotice === "first_results_delayed" || Date.parse(status.updatedAt) >= deadline.getTime())
       ? { delayNotice: "first_results_delayed" }
@@ -225,6 +238,7 @@ function recoverableRunnerState(session, error, result) {
     return {
       codexThreadId: state.codexThreadId,
       activeDurationMs: state.activeDurationMs,
+      correctionUsed: state.correctionUsed === true,
     };
   }
   if (typeof result?.codexThreadId === "string"
@@ -400,14 +414,16 @@ export class TravelResearchService {
         targetScopeId: recovered.targetScopeId, disclosureFingerprint: recovered.disclosureFingerprint,
         aliasSalt: recovered.aliasSalt, activeRuntimeMs: recovered.activeRuntimeMs,
         runnerRuntimeMs: recovered.activeRuntimeMs, serviceRuntimeMs: 0, startedAt: recovered.startedAt,
-        previews: recovered.previews,
+        correctionUsed: recovered.correctionUsed,
+        previews: recovered.previews.map((preview) => ({ ...preview, verification: "pending" })),
       };
       this.#status = safeResearchStatus({
         phase: "validating", tripId: recovered.tripId, researchTaskId: recovered.researchTaskId,
         agentRunId: recovered.agentRunId, operationId: recovered.operationId, reconciliationState: "active",
         startedAt: recovered.startedAt, updatedAt: recovered.updatedAt,
         progress: {
-          stage: "verifying_sources", candidateCount: recovered.previews.length, previews: recovered.previews,
+          stage: "verifying_sources", candidateCount: recovered.previews.length,
+          previews: recovered.previews.map((preview) => ({ ...preview, verification: "pending" })),
           firstResultDeadlineAt: new Date(Date.parse(recovered.startedAt) + DISCOVERY_BUDGET_MS).toISOString(),
           ...(Date.parse(recovered.updatedAt) >= Date.parse(recovered.startedAt) + DISCOVERY_BUDGET_MS
             ? { delayNotice: "first_results_delayed" } : {}),
@@ -744,6 +760,19 @@ export class TravelResearchService {
         }
         this.#restored = true;
         if (recovered) {
+          if (recovered.recordType === "active_progress"
+            && recovered.tripId === input.tripId
+            && recovered.agentRunId === input.agentRunId
+            && recovered.operationId === input.operationId
+            && recovered.targetCategory === input.targetCategory
+            && recovered.targetScopeId === input.targetScopeId
+            && recovered.disclosureFingerprint === input.disclosureFingerprint) {
+            this.#clearDiscoveryDeadline();
+            this.#restoreRecoveredState(recovered);
+            this.#task.operationKey = operationKey;
+            this.#task.agentExpiresAt = this.#assertClaimed(input.agentRunId);
+            return await this.#continueRecoveredProgress(input);
+          }
           this.#transport.releaseUnboundClaim(input.agentRunId);
           this.#restoreRecoveredState(recovered);
           created = false;
@@ -815,6 +844,33 @@ export class TravelResearchService {
     await this.#store.clear(this.#recoveryRecord);
     this.#recoveryRecord = undefined;
     this.#task.recoveryCleared = true;
+  }
+
+  async #continueRecoveredProgress(input) {
+    const context = await this.#getDecisionContext();
+    if (context?.workspace?.tripId !== input.tripId) throw codedError("CODEX_RESEARCH_FAILED");
+    const built = await this.#bounded(() => buildTravelResearchInput(context, {
+      targetCategory: this.#task.targetCategory,
+      targetScopeId: this.#task.targetScopeId,
+      aliasSalt: this.#task.aliasSalt,
+    }));
+    if (built.disclosureFingerprint !== this.#task.disclosureFingerprint) return this.#supersedeCurrentRun();
+    this.#task.built = built;
+    if (this.#task.activeRuntimeMs >= ACTIVE_BUDGET_MS) return this.#finishFailure("CODEX_RESEARCH_TIMEOUT");
+    this.#session = this.#createSession({
+      codexThreadId: this.#task.codexThreadId,
+      correctionUsed: this.#task.correctionUsed,
+      activeDurationMs: this.#task.activeRuntimeMs,
+    });
+    const result = await this.#bounded(
+      () => this.#session.resume({
+        codexThreadId: this.#task.codexThreadId,
+        prompt: VERIFY_DISCOVERY_PROMPT,
+        mode: "verified",
+      }),
+      { countService: false, cancelRunner: true },
+    );
+    return this.#consume(result, "validating");
   }
 
   #terminalCleanupConfirmed() {
@@ -1178,7 +1234,8 @@ export class TravelResearchService {
           return this.#block(validated);
         }
         this.#assertClaimed(this.#task.agentRunId);
-        this.#setStatus("writing");
+        this.#task.previews = reconcileVerifiedPreviews(this.#task.previews ?? [], validated.payload.candidates);
+        this.#setProgressStatus("writing");
         if (this.#cancelRequested) return this.#finishCancelled();
         await this.#bounded(() => this.#clearRecovery());
         if (this.#cancelRequested) return this.#finishCancelled();
@@ -1220,6 +1277,7 @@ export class TravelResearchService {
       const runnerState = recoverableRunnerState(this.#session, undefined, result);
       if (!runnerState) throw codedError("CODEX_RESEARCH_FAILED");
       this.#task.codexThreadId = runnerState.codexThreadId;
+      this.#task.correctionUsed = runnerState.correctionUsed;
       this.#syncActiveRuntime(runnerState.activeDurationMs);
       const discovered = await this.#bounded(() => validateTravelResearchDiscoveryOutput(result.output, {
         targetCategory: this.#task.targetCategory,
@@ -1228,7 +1286,12 @@ export class TravelResearchService {
       }), { countService: false });
       if (discovered.status === "needs_owner_action") return this.#block(discovered);
       if (this.#task.activeRuntimeMs >= DISCOVERY_BUDGET_MS) throw codedError("CODEX_RESEARCH_TIMEOUT");
-      this.#task.previews = discovered.candidates;
+      this.#task.previews = discovered.candidates.map((candidate) => ({
+        category: this.#task.targetCategory,
+        name: candidate.name,
+        location: candidate.address,
+        verification: "pending",
+      }));
       this.#setProgressStatus("validating");
       const progressRecord = this.#activeProgressRecord();
       if (typeof this.#store.persistActiveProgress !== "function") throw codedError("RESEARCH_STATE_UNAVAILABLE");
@@ -1262,6 +1325,7 @@ export class TravelResearchService {
       disclosureFingerprint: this.#task.disclosureFingerprint,
       aliasSalt: this.#task.aliasSalt,
       activeRuntimeMs: Math.min(ACTIVE_BUDGET_MS, Math.ceil(this.#task.activeRuntimeMs)),
+      correctionUsed: this.#task.correctionUsed === true,
       phase: "validating",
       previews: this.#task.previews,
       startedAt: this.#task.startedAt,

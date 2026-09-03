@@ -44,6 +44,29 @@ function recoverableState(overrides = {}) {
   };
 }
 
+function activeProgressState(overrides = {}) {
+  return {
+    recordType: "active_progress",
+    tripId: "trip-private",
+    researchTaskId: "research-task-1",
+    agentRunId: "agent-run-1",
+    operationId: "operation-1",
+    reconciliationState: "active",
+    codexThreadId: "0198f29d-45df-7ce0-8f84-140b19c5ca21",
+    targetCategory: "hotel",
+    targetScopeId: `scope_${"a".repeat(64)}`,
+    disclosureFingerprint: "b".repeat(64),
+    aliasSalt: "safe-alias-salt-1234",
+    activeRuntimeMs: 12_345,
+    correctionUsed: false,
+    phase: "validating",
+    previews: [{ category: "hotel", name: "深圳湾酒店", location: "深圳市南山区", verification: "pending" }],
+    startedAt: "2026-09-01T01:02:03.000Z",
+    updatedAt: "2026-09-01T01:04:05.000Z",
+    ...overrides,
+  };
+}
+
 function reconciliationState(overrides = {}) {
   const agentRunId = "agent-run-1";
   return {
@@ -186,6 +209,24 @@ test("persists one strict recovery record with owner-only permissions", async (c
   ]) {
     assert.equal(serialized.includes(forbidden), false, forbidden);
   }
+});
+
+test("active progress persists only contract-compatible public previews", async (context) => {
+  const { filePath, store } = await temporaryStore(context);
+  const state = activeProgressState();
+
+  await store.persistActiveProgress(state);
+  assert.deepEqual(await store.load(), state);
+  const serialized = await readFile(filePath, "utf8");
+  assert.equal(serialized.includes("address"), false);
+  await assert.rejects(store.persistActiveProgress(activeProgressState({
+    previews: [{ ...state.previews[0], address: "foreign field" }],
+  })), { code: "RESEARCH_STATE_INVALID" });
+  await assert.rejects(store.persistActiveProgress(activeProgressState({
+    previews: Array.from({ length: 5 }, (_, index) => ({
+      category: "hotel", name: `酒店 ${index}`, location: "深圳市", verification: "pending",
+    })),
+  })), { code: "RESEARCH_STATE_INVALID" });
 });
 
 test("persists only the fixed signed self-revoke replay record before terminal publication", async (context) => {

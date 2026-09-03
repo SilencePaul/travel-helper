@@ -537,7 +537,9 @@ function fakeRunner(events, scripts) {
 
 test("discovery publishes safe previews before verified continuation settles", async () => {
   let releaseVerified;
+  let releaseSubmit;
   const verifiedGate = new Promise((resolve) => { releaseVerified = resolve; });
+  const submitGate = new Promise((resolve) => { releaseSubmit = resolve; });
   const harness = createHarness({ scripts: [
     {
       codexThreadId: "thread-discovery",
@@ -548,7 +550,7 @@ test("discovery publishes safe previews before verified continuation settles", a
       await verifiedGate;
       return { codexThreadId: "thread-discovery", activeDurationMs: 2_000, output: completedOutput() };
     },
-  ] });
+  ], transportOptions: { submitGate } });
   const request = await targetRequest();
   harness.service.prepare(request.tripId);
   await harness.service.claim(request.agentRunId);
@@ -559,10 +561,64 @@ test("discovery publishes safe previews before verified continuation settles", a
 
   assert.equal(harness.runner.initialInputs[0].mode, "discovery");
   assert.equal(harness.runner.resumeInputs[0].mode, "verified");
-  assert.deepEqual(status.progress.previews, [{ name: "深圳湾酒店", address: "深圳市南山区" }, { name: "福田酒店", address: "深圳市福田区" }]);
+  assert.deepEqual(status.progress.previews, [
+    { category: "hotel", name: "深圳湾酒店", location: "深圳市南山区", verification: "pending" },
+    { category: "hotel", name: "福田酒店", location: "深圳市福田区", verification: "pending" },
+  ]);
   assert.equal(status.progress.candidateCount, 2);
+  assert.equal(JSON.stringify(status).includes("address"), false);
   releaseVerified();
+  while (harness.transport.submittedPayloads.length === 0) await new Promise((resolve) => setImmediate(resolve));
+  const verified = await harness.service.getResearchStatus(request.tripId);
+  assert.deepEqual(verified.progress.previews, [
+    { category: "hotel", name: "深圳湾酒店", location: "深圳市南山区", verification: "verified" },
+  ]);
+  releaseSubmit();
   assert.equal((await execution).phase, "completed");
+});
+
+test("restart resumes persisted discovery progress with only safe previews", async () => {
+  let releaseVerified;
+  const verifiedGate = new Promise((resolve) => { releaseVerified = resolve; });
+  const first = createHarness({ scripts: [
+    {
+      codexThreadId: "thread-restart-progress",
+      activeDurationMs: 1_000,
+      output: { status: "discovered", category: "hotel", candidates: [{ name: "深圳湾酒店", address: "深圳市南山区" }, { name: "福田酒店", address: "深圳市福田区" }] },
+    },
+    async () => {
+      await verifiedGate;
+      return { codexThreadId: "thread-restart-progress", activeDurationMs: 2_000, output: completedOutput() };
+    },
+  ] });
+  const request = await targetRequest();
+  first.service.prepare(request.tripId);
+  await first.service.claim(request.agentRunId);
+  void first.service.executeTravelResearch(request);
+  while (!first.events.some((event) => event.startsWith("runner.resume:"))) await new Promise((resolve) => setImmediate(resolve));
+
+  const persisted = first.store.state;
+  assert.equal(persisted.recordType, "active_progress");
+  assert.deepEqual(persisted.previews, [
+    { category: "hotel", name: "深圳湾酒店", location: "深圳市南山区", verification: "pending" },
+    { category: "hotel", name: "福田酒店", location: "深圳市福田区", verification: "pending" },
+  ]);
+  assert.equal(JSON.stringify(persisted).includes("address"), false);
+
+  const restarted = createHarness({
+    initialState: persisted,
+    scripts: [{ codexThreadId: "thread-restart-progress", activeDurationMs: 2_000, output: completedOutput() }],
+  });
+  restarted.service.prepare(request.tripId);
+  await restarted.service.claim(request.agentRunId);
+  const status = await restarted.service.executeTravelResearch(request);
+
+  assert.equal(status.phase, "completed");
+  assert.equal(restarted.runner.createCount, 1);
+  assert.equal(restarted.runner.resumeInputs.length, 1);
+  assert.equal(restarted.runner.resumeInputs[0].mode, "verified");
+  assert.equal(restarted.store.state, undefined);
+  releaseVerified();
 });
 
 async function targetRequest(context = contextFixture()) {

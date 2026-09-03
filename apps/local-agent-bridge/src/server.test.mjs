@@ -353,6 +353,43 @@ test("the fixed route matrix dispatches only exact methods and strictly projects
   assert.equal(Object.hasOwn(prepared[0], "pairingCode"), false);
 });
 
+test("research-status projects only contract-compatible public progress previews", async (context) => {
+  const runtime = fakeRuntime();
+  runtime.getResearchStatus = async () => ({
+    phase: "validating",
+    tripId: "trip-1",
+    researchTaskId: "research-task-1",
+    agentRunId: "agent-run-1",
+    operationId: "operation-1",
+    reconciliationState: "active",
+    startedAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:01:00.000Z",
+    progress: {
+      stage: "verifying_sources",
+      candidateCount: 1,
+      previews: [{ category: "hotel", name: "深圳湾酒店", location: "深圳市南山区", verification: "pending" }],
+      firstResultDeadlineAt: "2026-09-01T00:03:00.000Z",
+    },
+    codexThreadId: "private-thread",
+    rawOutput: { address: "must-not-leak" },
+  });
+  const bridge = await startLocalAgentBridge({ appUrl: APP_ORIGIN, runtime });
+  context.after(() => bridge.close());
+
+  const response = await rawRequest(bridge.port, {
+    path: "/v1/agent-runs/research-status",
+    body: JSON.stringify({ tripId: "trip-1" }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(JSON.parse(response.body).data.progress.previews, [
+    { category: "hotel", name: "深圳湾酒店", location: "深圳市南山区", verification: "pending" },
+  ]);
+  assert.equal(response.body.includes("private-thread"), false);
+  assert.equal(response.body.includes("rawOutput"), false);
+  assert.equal(response.body.includes("address"), false);
+});
+
 test("each fixed path accepts only its exact JSON shape and status rejects body or query", async (context) => {
   const events = [];
   const bridge = await startLocalAgentBridge({ appUrl: APP_ORIGIN, runtime: fakeRuntime(events) });

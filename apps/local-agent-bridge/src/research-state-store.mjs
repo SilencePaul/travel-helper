@@ -61,7 +61,7 @@ export const PROPOSAL_RECONCILIATION_STATE_FIELDS = Object.freeze([
 export const ACTIVE_PROGRESS_STATE_FIELDS = Object.freeze([
   "recordType", "tripId", "researchTaskId", "agentRunId", "operationId", "reconciliationState",
   "codexThreadId", "targetCategory", "targetScopeId", "disclosureFingerprint", "aliasSalt",
-  "activeRuntimeMs", "phase", "previews", "startedAt", "updatedAt",
+  "activeRuntimeMs", "correctionUsed", "phase", "previews", "startedAt", "updatedAt",
 ]);
 
 const STATE_FILE_NAME = "travel-research-state.json";
@@ -511,10 +511,12 @@ function validateStateShape(value) {
     return validateReconciliationShape(value);
   }
   if (plainObject(value) && value.recordType === "active_progress") {
-    const validPreview = (preview) => hasExactFields(preview, ["name", "address"])
+    const validPreview = (preview) => hasExactFields(preview, ["category", "name", "location", "verification"])
+      && TARGET_CATEGORIES.has(preview.category)
       && typeof preview.name === "string" && preview.name.length > 0 && preview.name.length <= 200
-      && typeof preview.address === "string" && preview.address.length > 0 && preview.address.length <= 500
-      && !PERSISTED_PRIVATE_VALUE_PATTERN.test(preview.name) && !PERSISTED_PRIVATE_VALUE_PATTERN.test(preview.address);
+      && typeof preview.location === "string" && preview.location.length > 0 && preview.location.length <= 200
+      && ["pending", "verified"].includes(preview.verification)
+      && !PERSISTED_PRIVATE_VALUE_PATTERN.test(preview.name) && !PERSISTED_PRIVATE_VALUE_PATTERN.test(preview.location);
     const valid = hasExactFields(value, ACTIVE_PROGRESS_STATE_FIELDS)
       && opaqueIdentifier(value.tripId) && opaqueIdentifier(value.researchTaskId)
       && opaqueIdentifier(value.agentRunId) && opaqueIdentifier(value.operationId)
@@ -523,7 +525,8 @@ function validateStateShape(value) {
       && /^[a-f0-9]{64}$/u.test(value.disclosureFingerprint)
       && typeof value.aliasSalt === "string" && /^[A-Za-z0-9_-]{16,1024}$/u.test(value.aliasSalt)
       && Number.isSafeInteger(value.activeRuntimeMs) && value.activeRuntimeMs >= 0 && value.activeRuntimeMs < 600_000
-      && value.phase === "validating" && Array.isArray(value.previews) && value.previews.length <= 128
+      && typeof value.correctionUsed === "boolean"
+      && value.phase === "validating" && Array.isArray(value.previews) && value.previews.length <= 4
       && value.previews.every(validPreview) && canonicalTimestamp(value.startedAt) && canonicalTimestamp(value.updatedAt)
       && Date.parse(value.updatedAt) >= Date.parse(value.startedAt);
     if (!valid) throw codedError("RESEARCH_STATE_INVALID");

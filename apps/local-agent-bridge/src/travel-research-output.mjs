@@ -290,7 +290,7 @@ function validDiscoveryShape(value) {
     && Array.isArray(value.candidates)
     && value.candidates.length >= 2 && value.candidates.length <= 4
     && value.candidates.every((candidate) => exactObject(candidate, ["name", "address"])
-      && safeString(candidate.name, 200) && safeString(candidate.address, 500));
+      && safeString(candidate.name, 200) && safeString(candidate.address, 200));
 }
 
 function decodeBasicTagEntities(value) {
