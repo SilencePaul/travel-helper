@@ -2909,11 +2909,6 @@ test("the independent 10-minute active budget exhausted before validation times 
   assert.equal(status.phase, "failed");
   assert.equal(status.errorCode, "CODEX_RESEARCH_TIMEOUT");
   assert.deepEqual(harness.runner.createOptions[0], { activeTimeoutMs: 600_000 });
-  assert.equal(
-    15 * 60 * 1_000 > 10 * 60 * 1_000 + 8_000,
-    true,
-    "the 15-minute AgentRun lease leaves the existing bounded claim-handoff cleanup margin after the independent 10-minute active cap",
-  );
   assert.equal(harness.transport.submittedPayloads.length, 0);
   assert.equal(harness.runner.resumeInputs.length, 0);
   assert.equal(harness.events.includes("runner.resolveHostname"), false);
@@ -3721,13 +3716,15 @@ test("a cancelled trip becomes idle to another trip without weakening active tri
   assert.equal(harness.runner.createCount, 1);
 });
 
-test("cleanup revoke remains available after cancellation exhausts the active research budget", async () => {
+test("cleanup revoke remains available after the independent active budget and finishes before the claimed AgentRun expires", async () => {
   let releaseContext;
   let contextStarted;
   const contextGate = new Promise((resolve) => { releaseContext = resolve; });
   const observedContext = new Promise((resolve) => { contextStarted = resolve; });
   const clock = createClock();
   const actions = [];
+  let claimedExpiresAt;
+  let cleanupRevokedAt;
   const harness = createHarness({
     clock,
     scripts: [{ codexThreadId: "must-not-run", output: completedOutput(), activeDurationMs: 1 }],
@@ -3739,12 +3736,13 @@ test("cleanup revoke remains available after cancellation exhausts the active re
           const body = JSON.parse(init.body);
           actions.push(body.action);
           if (body.action === "claimAgentRun") {
+            claimedExpiresAt = new Date(runtimeClock().getTime() + 15 * 60 * 1_000).toISOString();
             return Response.json({
               ok: true,
               data: {
                 agentRunId: body.agentRunId,
                 claimedAt: "2026-09-01T00:00:00.000Z",
-                expiresAt: "2026-09-01T00:15:00.000Z",
+                expiresAt: claimedExpiresAt,
                 nextSequence: 1,
               },
             });
@@ -3755,10 +3753,15 @@ test("cleanup revoke remains available after cancellation exhausts the active re
             return Response.json({ ok: true, action: body.action, data: contextFixture() });
           }
           assert.equal(body.action, "revokeAgentRunSelf");
+          cleanupRevokedAt = runtimeClock().toISOString();
+          assert.ok(
+            Date.parse(cleanupRevokedAt) < Date.parse(claimedExpiresAt),
+            "the real cleanup revoke must be sent before the claimed lease expires",
+          );
           return Response.json({
             ok: true,
             action: body.action,
-            data: { agentRunId: body.agentRunId, revokedAt: "2026-09-01T00:10:00.001Z" },
+            data: { agentRunId: body.agentRunId, revokedAt: cleanupRevokedAt },
           });
         },
       });
@@ -3778,6 +3781,7 @@ test("cleanup revoke remains available after cancellation exhausts the active re
   assert.equal(executeStatus.phase, "cancelled");
   assert.equal(cancelStatus.phase, "cancelled");
   assert.deepEqual(actions, ["claimAgentRun", "getDecisionContext", "revokeAgentRunSelf"]);
+  assert.ok(Date.parse(cleanupRevokedAt) < Date.parse(claimedExpiresAt));
   assert.equal(harness.runner.createCount, 0);
   assert.equal(harness.transport.claimedRun, undefined);
   assert.equal(harness.store.state, undefined);
