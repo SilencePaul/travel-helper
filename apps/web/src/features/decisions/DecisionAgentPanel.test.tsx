@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   buildResearchTargetScopes,
@@ -77,6 +77,12 @@ const timestamps = {
   reconciliationState: "active" as const,
   startedAt: "2026-08-28T00:00:00.000Z",
   updatedAt: "2026-08-28T00:01:00.000Z",
+  progress: {
+    stage: "collecting_candidates" as const,
+    candidateCount: 0,
+    previews: [],
+    firstResultDeadlineAt: "2099-08-28T00:03:00.000Z",
+  },
 };
 const researching = { phase: "researching", ...timestamps } satisfies ResearchStatus;
 const cancelled = { phase: "cancelled", ...timestamps, errorCode: "CODEX_RESEARCH_CANCELLED" } satisfies ResearchStatus;
@@ -149,6 +155,45 @@ function makeCreateAndRevokeCommand() {
 }
 
 describe("DecisionAgentPanel", () => {
+  it("renders bridge progress previews and locally dismisses a first-result delay", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-28T00:02:00.000Z"));
+    const first = {
+      ...researching,
+      updatedAt: "2026-08-28T00:02:00.000Z",
+      progress: {
+        stage: "collecting_candidates" as const,
+        candidateCount: 2,
+        previews: [{ category: "hotel" as const, name: "海景旅店", location: "香港中环", verification: "pending" as const }],
+        firstResultDeadlineAt: "2026-08-28T00:01:00.000Z",
+      },
+    } satisfies ResearchStatus;
+    const verified = {
+      ...first,
+      phase: "validating" as const,
+      progress: { ...first.progress, stage: "verifying_sources" as const, previews: [{ ...first.progress.previews[0]!, verification: "verified" as const }] },
+    } satisfies ResearchStatus;
+    const bridge = makeBridge({ getResearchStatus: vi.fn().mockResolvedValueOnce(first).mockResolvedValue(verified) });
+    const repository = makeRepository();
+    const onResearchCompleted = vi.fn();
+    const view = setup({ bridge, repository, onResearchCompleted });
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByRole("list", { name: "研究进度" })).toHaveTextContent("范围确认搜集候选核验来源写入共同决定");
+    expect(screen.getByRole("article")).toHaveTextContent("海景旅店香港中环待核验");
+    expect(repository.command).not.toHaveBeenCalled();
+    expect(onResearchCompleted).not.toHaveBeenCalled();
+
+    expect(screen.getByText("首批候选仍在整理中，Codex 会继续核验来源。")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "继续等待" }));
+    expect(screen.queryByText("首批候选仍在整理中，Codex 会继续核验来源。")).not.toBeInTheDocument();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(screen.getByRole("article")).toHaveTextContent("已核验");
+    view.unmount();
+    vi.useRealTimers();
+  });
+
   it("准备只检查本机，并展示准确且无内部 ID 的授权披露", async () => {
     const { bridge, repository, container } = setup();
 
@@ -327,6 +372,7 @@ describe("DecisionAgentPanel", () => {
       reconciliationState: "active",
       startedAt: timestamps.startedAt,
       updatedAt: "2026-08-28T00:03:00.000Z",
+      progress: timestamps.progress,
     } satisfies ResearchStatus;
     const bridge = makeBridge({
       executeTravelResearch: vi.fn().mockRejectedValue(new LocalAgentBridgeError("CODEX_RESEARCH_FAILED")),
@@ -355,6 +401,7 @@ describe("DecisionAgentPanel", () => {
       reconciliationState: "active",
       startedAt: timestamps.startedAt,
       updatedAt: "2026-08-28T00:03:00.000Z",
+      progress: timestamps.progress,
     } satisfies ResearchStatus;
     const executeTravelResearch = vi.fn()
       .mockRejectedValueOnce(new LocalAgentBridgeError("BRIDGE_UNAVAILABLE"))
@@ -1198,6 +1245,7 @@ describe("DecisionAgentPanel", () => {
       reconciliationState: "active",
       startedAt: "2026-08-28T00:03:00.000Z",
       updatedAt: "2026-08-28T00:03:00.000Z",
+      progress: timestamps.progress,
     } satisfies ResearchStatus;
     let finishExecute!: (status: ResearchStatus) => void;
     let localStatus: ResearchStatus = { phase: "idle" };
@@ -1415,6 +1463,7 @@ describe("DecisionAgentPanel", () => {
       reconciliationState: "active",
       startedAt: "2026-08-28T00:03:00.000Z",
       updatedAt: "2026-08-28T00:03:00.000Z",
+      progress: timestamps.progress,
     } satisfies ResearchStatus;
     const cancelledSecond = { ...researchingSecond, phase: "cancelled", errorCode: "CODEX_RESEARCH_CANCELLED" } satisfies ResearchStatus;
     let localStatus: ResearchStatus = { phase: "idle" };

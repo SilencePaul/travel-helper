@@ -133,6 +133,15 @@
 .decision-agent-panel__status-card div { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr); gap: 0.5rem; }
 .decision-agent-panel__status-card dt { color: #7b7569; font-size: 0.68rem; }
 .decision-agent-panel__status-card dd { overflow-wrap: anywhere; margin: 0; font-size: 0.75rem; font-weight: 700; }
+.decision-agent-panel__progress { display: grid; grid-column: 1 / -1; gap: 0.65rem; }
+.decision-agent-panel__progress ol { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.35rem; margin: 0; padding: 0; list-style: none; }
+.decision-agent-panel__progress li { padding: 0.35rem; border-top: 2px solid #c5baa5; color: #7b7569; font-size: 0.7rem; text-align: center; }
+.decision-agent-panel__progress li.is-active { border-color: #cf5d38; color: #104c40; font-weight: 800; }
+.decision-agent-panel__previews { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 0.45rem; }
+.decision-agent-panel__previews article { display: grid; gap: 0.15rem; padding: 0.6rem; border: 1px solid #d7cdbb; background: rgb(255 250 240 / 68%); }
+.decision-agent-panel__previews strong { font-size: 0.82rem; }
+.decision-agent-panel__previews span, .decision-agent-panel__previews small { color: #69756f; font-size: 0.7rem; }
+.decision-agent-panel__delay-notice { display: flex; grid-column: 1 / -1; align-items: center; justify-content: space-between; gap: 0.65rem; padding: 0.65rem; border-left: 3px solid #cf5d38; background: rgb(255 250 240 / 68%); font-size: 0.78rem; }
 .decision-agent-panel__message { grid-column: 1 / -1; margin: 0; padding-top: 0.75rem; border-top: 1px dashed #bdb29e; font-size: 0.8rem; }
 .decision-agent-panel__actions { display: flex; grid-column: 1 / -1; flex-wrap: wrap; gap: 0.55rem; }
 .decision-agent-panel__actions p { margin: 0; font-size: 0.8rem; }
@@ -231,6 +240,8 @@
   .decision-agent-panel__targets label { padding-inline: 0.4rem; }
   .decision-agent-panel__actions > .control-button { width: 100%; }
   .decision-agent-panel__status-card div { grid-template-columns: 1fr; }
+  .decision-agent-panel__progress ol { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .decision-agent-panel__delay-notice { align-items: stretch; flex-direction: column; }
 }
 
 @media (prefers-reduced-motion: reduce) {

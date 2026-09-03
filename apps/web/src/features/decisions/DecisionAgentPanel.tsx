@@ -115,6 +115,12 @@ const bridgeSelfRevokedPhases = new Set<ResearchStatus["phase"]>(["needs_owner_a
 const cloudRevokedSafePhases = new Set<ResearchStatus["phase"]>([...bridgeSelfRevokedPhases, "failed"]);
 const pollDelayMs = 2_000;
 const lifecycleStatusTimeoutMs = 2_000;
+const progressSteps = [
+  { stage: "confirming_scope", label: "范围确认" },
+  { stage: "collecting_candidates", label: "搜集候选" },
+  { stage: "verifying_sources", label: "核验来源" },
+  { stage: "writing_shared_decisions", label: "写入共同决定" },
+] as const;
 
 function tripProjection(trip: Trip) {
   return {
@@ -157,6 +163,19 @@ function statusPhaseLabel(status: ResearchStatus): string {
     case "cancelled": return "已停止";
     case "superseded": return "内容已更新";
     case "needs_owner_action": return "等待设备管理员处理";
+  }
+}
+
+function researchProgressFor(status: ResearchStatus) {
+  switch (status.phase) {
+    case "researching":
+    case "resuming":
+    case "validating":
+    case "writing":
+    case "cancelling":
+      return status.progress;
+    default:
+      return undefined;
   }
 }
 
@@ -265,6 +284,8 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
   const [operation, setOperation] = useState<Operation>(bridge ? "restoring" : "idle");
   const [operationError, setOperationError] = useState<string>();
   const [researchStatus, setResearchStatusState] = useState<ResearchStatus>({ phase: "idle" });
+  const [clockNow, setClockNow] = useState(() => Date.now());
+  const [delayNoticeDismissed, setDelayNoticeDismissed] = useState(false);
   const [bridgeStatusReady, setBridgeStatusReady] = useState(false);
   const [cloudCleanupRequired, setCloudCleanupRequired] = useState(false);
   const [blockedCleanupTaskId, setBlockedCleanupTaskId] = useState<string>();
@@ -291,6 +312,10 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
   const blockedCleanupAttemptRef = useRef<PendingCloudAttempt | undefined>(undefined);
   const retryRef = useRef<HTMLButtonElement>(null);
   const researchTaskId = researchStatus.phase === "idle" ? undefined : researchStatus.researchTaskId;
+  const researchProgress = researchProgressFor(researchStatus);
+  const firstResultDeadlineAt = researchProgress?.firstResultDeadlineAt;
+  const firstResultDelayed = firstResultDeadlineAt !== undefined && clockNow >= Date.parse(firstResultDeadlineAt);
+  const researchStatusUpdatedAt = researchStatus.phase === "idle" ? undefined : researchStatus.updatedAt;
 
   function setResearchStatus(next: ResearchStatus) {
     statusRef.current = next;
@@ -313,6 +338,17 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
     }
     setResearchStatus(next);
   }
+
+  useEffect(() => {
+    setDelayNoticeDismissed(false);
+  }, [bridge, firstResultDeadlineAt, researchStatusUpdatedAt, researchTaskId, tripSafetyKey]);
+
+  useEffect(() => {
+    if (!activePhases.has(researchStatus.phase) || firstResultDeadlineAt === undefined) return;
+    setClockNow(Date.now());
+    const timer = globalThis.setInterval(() => setClockNow(Date.now()), 1_000);
+    return () => globalThis.clearInterval(timer);
+  }, [bridge, firstResultDeadlineAt, researchStatus.phase, researchTaskId, tripSafetyKey]);
 
   function beginOperation(next: Operation) {
     operationAbortRef.current?.abort();
@@ -1669,6 +1705,22 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       <div><dt>本机任务</dt><dd>{researchStatus.researchTaskId}</dd></div>
       <div><dt>当前阶段</dt><dd>{statusPhaseLabel(researchStatus)}</dd></div>
     </dl> : null}
+
+    {researchProgress ? <section className="decision-agent-panel__progress" aria-label="研究进度">
+      <ol aria-label="研究进度">
+        {progressSteps.map((step) => <li key={step.stage} className={researchProgress.stage === step.stage ? "is-active" : undefined}>{step.label}</li>)}
+      </ol>
+      {researchProgress.previews.length > 0 ? <div className="decision-agent-panel__previews" aria-label="候选预览">
+        {researchProgress.previews.map((preview) => <article key={`${preview.category}-${preview.name}-${preview.location}`}>
+          <strong>{preview.name}</strong><span>{preview.location}</span><small>{preview.verification === "verified" ? "已核验" : "待核验"}</small>
+        </article>)}
+      </div> : null}
+    </section> : null}
+
+    {firstResultDelayed && !delayNoticeDismissed ? <div className="decision-agent-panel__delay-notice" role="status">
+      <span>首批候选仍在整理中，Codex 会继续核验来源。</span>
+      <button className="control-button control-button--secondary" type="button" onClick={() => setDelayNoticeDismissed(true)}>继续等待</button>
+    </div> : null}
 
     {message.text ? <p className="decision-agent-panel__message" role={message.role}>{message.text}</p> : null}
 

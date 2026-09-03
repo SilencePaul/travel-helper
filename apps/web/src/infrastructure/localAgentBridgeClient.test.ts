@@ -220,6 +220,31 @@ describe("LocalAgentBridgeClient", () => {
     await expect(operation).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
   });
 
+  it("accepts safe progress while rejecting an internal preview field", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ ok: true, data: {
+        ...researchStatus,
+        progress: {
+          ...researchStatus.progress,
+          candidateCount: 1,
+          previews: [{ category: "hotel", name: "海景旅店", location: "香港中环", verification: "pending" }],
+        },
+      } }))
+      .mockResolvedValueOnce(jsonResponse({ ok: true, data: {
+        ...researchStatus,
+        progress: {
+          ...researchStatus.progress,
+          previews: [{ category: "hotel", name: "海景旅店", location: "香港中环", verification: "pending", sourceUrl: "https://private.example" }],
+        },
+      } }));
+    const client = new LocalAgentBridgeClient("http://127.0.0.1:43120", { fetch });
+
+    await expect(client.getResearchStatus("trip-secret")).resolves.toMatchObject({
+      progress: { previews: [{ name: "海景旅店", location: "香港中环", verification: "pending" }] },
+    });
+    await expect(client.getResearchStatus("trip-secret")).rejects.toMatchObject({ code: "INVALID_BRIDGE_RESPONSE" });
+  });
+
   it.each([
     ["prepare", () => ({ ok: true, data: { ...prepared, pairingCode: "plaintext-secret" } })],
     ["execute", () => ({ ok: true, data: { ...researchStatus, log: "Bearer private-token" } })],
