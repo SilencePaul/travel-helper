@@ -292,21 +292,21 @@ export const ResearchProgressSchema = z.object({
   previews: z.array(ResearchProgressPreviewSchema).max(4),
   firstResultDeadlineAt: z.string().datetime({ precision: 3 }),
   delayNotice: z.literal("first_results_delayed").optional(),
-}).strict().superRefine((progress, context) => {
-  if (progress.delayNotice && Date.parse(progress.firstResultDeadlineAt) > Date.now()) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["delayNotice"],
-      message: "delayNotice is available only after firstResultDeadlineAt",
-    });
-  }
-});
+}).strict();
 
 const activeResearchStatus = <Phase extends "researching" | "resuming" | "validating" | "writing" | "cancelling">(phase: Phase) => z.object({
   phase: z.literal(phase),
   ...ActiveResearchTaskStatusBase,
   progress: ResearchProgressSchema,
-}).strict();
+}).strict().superRefine((status, context) => {
+  if (status.progress.delayNotice && Date.parse(status.updatedAt) < Date.parse(status.progress.firstResultDeadlineAt)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["progress", "delayNotice"],
+      message: "delayNotice is available only when updatedAt reaches firstResultDeadlineAt",
+    });
+  }
+});
 
 export const ResearchStatusSchema = z.discriminatedUnion("phase", [
   z.object({ phase: z.literal("idle") }).strict(),

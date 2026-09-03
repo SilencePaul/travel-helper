@@ -336,14 +336,26 @@ describe("decision contracts", () => {
       ...active,
       progress: { ...researchProgress, firstResultDeadlineAt: "2026-08-28" },
     }).success).toBe(false);
+    const delayedProgress = {
+      ...researchProgress,
+      firstResultDeadlineAt: "2099-08-28T00:03:00.000Z",
+      delayNotice: "first_results_delayed" as const,
+    };
     expect(ResearchStatusSchema.safeParse({
       ...active,
-      progress: {
-        ...researchProgress,
-        firstResultDeadlineAt: new Date(Date.now() + 60_000).toISOString(),
-        delayNotice: "first_results_delayed",
-      },
+      updatedAt: "2099-08-28T00:02:59.999Z",
+      progress: delayedProgress,
     }).success).toBe(false);
+    expect(ResearchStatusSchema.safeParse({
+      ...active,
+      updatedAt: "2099-08-28T00:03:00.000Z",
+      progress: delayedProgress,
+    }).success).toBe(true);
+    expect(ResearchStatusSchema.safeParse({
+      ...active,
+      updatedAt: "2099-08-28T00:03:00.001Z",
+      progress: delayedProgress,
+    }).success).toBe(true);
     expect(ResearchStatusSchema.safeParse({
       phase: "completed",
       tripId: active.tripId,
