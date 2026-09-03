@@ -776,6 +776,12 @@ test("execute publishes an exact admission before a delayed recovery load so lif
     reconciliationState: "active",
     startedAt: "2026-09-01T00:00:00.000Z",
     updatedAt: "2026-09-01T00:00:00.000Z",
+    progress: {
+      stage: "collecting_candidates",
+      candidateCount: 0,
+      previews: [],
+      firstResultDeadlineAt: "2026-09-01T00:03:00.000Z",
+    },
   });
   const cancellation = harness.service.cancelResearch({
     tripId: "trip-private",
@@ -4583,6 +4589,43 @@ test("getResearchStatus restores only the safe blocked projection and strict sta
     updatedAt: "2026-09-01T00:01:00.000Z",
     errorCode: "CODEX_RESEARCH_FAILED",
   });
+
+  for (const [phase, stage] of [
+    ["researching", "collecting_candidates"],
+    ["resuming", "collecting_candidates"],
+    ["validating", "verifying_sources"],
+    ["writing", "writing_shared_decisions"],
+    ["cancelling", "stopping"],
+  ]) {
+    assert.deepEqual(safeResearchStatus({
+      phase,
+      tripId: "trip-private",
+      researchTaskId: "task-active",
+      agentRunId: "agent-run-safe",
+      operationId: "operation-safe",
+      reconciliationState: "active",
+      startedAt: "2026-09-01T00:00:00.000Z",
+      updatedAt: "2026-09-01T00:04:00.000Z",
+      codexThreadId: "secret-thread",
+      output: { evidence: "private" },
+    }), {
+      phase,
+      tripId: "trip-private",
+      researchTaskId: "task-active",
+      agentRunId: "agent-run-safe",
+      operationId: "operation-safe",
+      reconciliationState: "active",
+      startedAt: "2026-09-01T00:00:00.000Z",
+      updatedAt: "2026-09-01T00:04:00.000Z",
+      progress: {
+        stage,
+        candidateCount: 0,
+        previews: [],
+        firstResultDeadlineAt: "2026-09-01T00:03:00.000Z",
+        delayNotice: "first_results_delayed",
+      },
+    });
+  }
 
   for (const blockedHostname of ["127.0.0.1", "agent.localhost", "source.internal"]) {
     assert.throws(() => safeResearchStatus({

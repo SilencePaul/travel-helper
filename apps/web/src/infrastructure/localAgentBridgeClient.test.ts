@@ -23,6 +23,12 @@ const researchStatus = {
   reconciliationState: "active" as const,
   startedAt: "2026-08-28T00:00:00.000Z",
   updatedAt: "2026-08-28T00:01:00.000Z",
+  progress: {
+    stage: "collecting_candidates" as const,
+    candidateCount: 0,
+    previews: [],
+    firstResultDeadlineAt: "2026-08-28T00:03:00.000Z",
+  },
 };
 
 const executeInput = {
@@ -146,8 +152,9 @@ describe("LocalAgentBridgeClient", () => {
   });
 
   it("calls each fixed travel research route with its exact method, path, and body", async () => {
+    const { progress: _progress, ...terminalResearchStatus } = researchStatus;
     const cancelledStatus: ResearchStatus = {
-      ...researchStatus,
+      ...terminalResearchStatus,
       phase: "cancelled",
       errorCode: "CODEX_RESEARCH_CANCELLED",
     };

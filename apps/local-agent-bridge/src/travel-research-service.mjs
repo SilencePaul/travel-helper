@@ -22,6 +22,13 @@ const NON_PUBLIC_HOST_SUFFIXES = [
   "private", "test", "invalid", "example", "onion",
 ];
 const ACTIVE_PHASES = new Set(["researching", "resuming", "validating", "writing", "cancelling"]);
+const ACTIVE_PROGRESS_STAGES = Object.freeze({
+  researching: "collecting_candidates",
+  resuming: "collecting_candidates",
+  validating: "verifying_sources",
+  writing: "writing_shared_decisions",
+  cancelling: "stopping",
+});
 const TERMINAL_PHASES = new Set(["completed", "failed", "cancelled", "superseded"]);
 const FAILURE_CODES = new Set([
   "CODEX_NOT_AVAILABLE",
@@ -135,11 +142,24 @@ function sameProposalReconciliation(left, right) {
     : left[field] === right[field]);
 }
 
+function activeResearchProgress(status) {
+  const firstResultDeadlineAt = new Date(Date.parse(status.startedAt) + 3 * 60 * 1_000).toISOString();
+  return {
+    stage: ACTIVE_PROGRESS_STAGES[status.phase],
+    candidateCount: 0,
+    previews: [],
+    firstResultDeadlineAt,
+    ...(Date.parse(status.updatedAt) >= Date.parse(firstResultDeadlineAt)
+      ? { delayNotice: "first_results_delayed" }
+      : {}),
+  };
+}
+
 export function safeResearchStatus(value) {
   if (!plainObject(value) || typeof value.phase !== "string") throw codedError("CODEX_RESEARCH_FAILED");
   if (value.phase === "idle") return Object.freeze({ phase: "idle" });
   const result = baseStatus(value);
-  if (ACTIVE_PHASES.has(value.phase)) return Object.freeze(result);
+  if (ACTIVE_PHASES.has(value.phase)) return Object.freeze({ ...result, progress: activeResearchProgress(result) });
   if (value.reconciliationState !== "active") throw codedError("CODEX_RESEARCH_FAILED");
   if (value.phase === "completed") return Object.freeze(result);
   if (value.phase === "needs_owner_action") {
