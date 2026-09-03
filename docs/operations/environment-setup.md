@@ -32,7 +32,7 @@ The declarative config passes these variables by reference only. It must not con
 
 ## Database, storage, and OPA policy
 
-After taking the required backup, run `pnpm seed:cloudbase` before the first production bootstrap. The seed is idempotent: it creates only missing collections and absent bootstrap/index/trip records; it does not overwrite an existing trip. The exact collection set is `trips`, `membership_index`, `auth_bootstrap`, `auth_oauth_states`, `auth_sessions`, `auth_exchange_codes`, `members`, `trip_audits`, and `trip_idempotency`. Keep this list synchronized with `scripts/cloudbaseSeed.mjs` rather than creating collections from an older runbook.
+After taking the required backup, run `pnpm seed:cloudbase` before the first production bootstrap. The seed is idempotent: it creates only missing collections and absent bootstrap/index/trip records; it does not overwrite an existing trip. The exact collection set is `trips`, `membership_index`, `auth_bootstrap`, `auth_oauth_states`, `auth_sessions`, `auth_exchange_codes`, `members`, `trip_audits`, `trip_idempotency`, `trip_preferences`, `trip_decision_indexes`, `trip_preference_summaries`, `trip_decision_meta`, `trip_candidates`, `trip_evidence_snapshots`, `trip_candidate_feedback`, `trip_tentative_placements`, `trip_confirmation_receipts`, `trip_decision_events`, `trip_decision_audits`, `trip_decision_idempotency`, and `trip_agent_runs`. Keep this list synchronized with `scripts/cloudbaseSeed.mjs` rather than creating collections from an older runbook.
 
 Use member-based reads and server-only authoritative writes:
 

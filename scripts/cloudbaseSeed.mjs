@@ -10,6 +10,19 @@ export const cloudBaseCollectionNames = [
   "members",
   "trip_audits",
   "trip_idempotency",
+  "trip_preferences",
+  "trip_decision_indexes",
+  "trip_preference_summaries",
+  "trip_decision_meta",
+  "trip_candidates",
+  "trip_evidence_snapshots",
+  "trip_candidate_feedback",
+  "trip_tentative_placements",
+  "trip_confirmation_receipts",
+  "trip_decision_events",
+  "trip_decision_audits",
+  "trip_decision_idempotency",
+  "trip_agent_runs",
 ];
 
 function one(result) {

@@ -30,6 +30,21 @@ test("seeds an unclaimed trip and bootstrap indexes exactly once", async () => {
   assert.equal(db.data.get("auth_bootstrap").get("singleton").consumed, false);
 });
 
-test("declares every authentication exchange collection needed before bootstrap", () => {
-  assert.equal(cloudBaseCollectionNames.includes("auth_exchange_codes"), true);
+test("declares every collection used by authentication, decisions and AgentRuns", () => {
+  for (const name of [
+    "auth_exchange_codes",
+    "trip_preferences",
+    "trip_decision_indexes",
+    "trip_preference_summaries",
+    "trip_decision_meta",
+    "trip_candidates",
+    "trip_evidence_snapshots",
+    "trip_candidate_feedback",
+    "trip_tentative_placements",
+    "trip_confirmation_receipts",
+    "trip_decision_events",
+    "trip_decision_audits",
+    "trip_decision_idempotency",
+    "trip_agent_runs",
+  ]) assert.equal(cloudBaseCollectionNames.includes(name), true, `${name} must be initialized`);
 });
