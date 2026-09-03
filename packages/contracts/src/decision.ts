@@ -272,9 +272,40 @@ const ActiveResearchTaskStatusBase = {
   reconciliationState: z.enum(["active", "self_revoke_reconciling"]),
 };
 
+export const ResearchProgressStageSchema = z.enum([
+  "confirming_scope",
+  "collecting_candidates",
+  "verifying_sources",
+  "writing_shared_decisions",
+  "stopping",
+]);
+export const ResearchPreviewVerificationSchema = z.enum(["pending", "verified"]);
+export const ResearchProgressPreviewSchema = z.object({
+  category: CandidateCategorySchema,
+  name: z.string().min(1).max(200),
+  location: z.string().min(1).max(200),
+  verification: ResearchPreviewVerificationSchema,
+}).strict();
+export const ResearchProgressSchema = z.object({
+  stage: ResearchProgressStageSchema,
+  candidateCount: z.number().int().nonnegative().max(4),
+  previews: z.array(ResearchProgressPreviewSchema).max(4),
+  firstResultDeadlineAt: z.string().datetime({ precision: 3 }),
+  delayNotice: z.literal("first_results_delayed").optional(),
+}).strict().superRefine((progress, context) => {
+  if (progress.delayNotice && Date.parse(progress.firstResultDeadlineAt) > Date.now()) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["delayNotice"],
+      message: "delayNotice is available only after firstResultDeadlineAt",
+    });
+  }
+});
+
 const activeResearchStatus = <Phase extends "researching" | "resuming" | "validating" | "writing" | "cancelling">(phase: Phase) => z.object({
   phase: z.literal(phase),
   ...ActiveResearchTaskStatusBase,
+  progress: ResearchProgressSchema,
 }).strict();
 
 export const ResearchStatusSchema = z.discriminatedUnion("phase", [
@@ -452,6 +483,10 @@ export type ResearchBlockReason = z.infer<typeof ResearchBlockReasonSchema>;
 export type ResearchResumeAction = z.infer<typeof ResearchResumeActionSchema>;
 export type ResearchErrorCode = z.infer<typeof ResearchErrorCodeSchema>;
 export type ResearchFailureErrorCode = z.infer<typeof ResearchFailureErrorCodeSchema>;
+export type ResearchProgressStage = z.infer<typeof ResearchProgressStageSchema>;
+export type ResearchPreviewVerification = z.infer<typeof ResearchPreviewVerificationSchema>;
+export type ResearchProgressPreview = z.infer<typeof ResearchProgressPreviewSchema>;
+export type ResearchProgress = z.infer<typeof ResearchProgressSchema>;
 export type ResearchStatus = z.infer<typeof ResearchStatusSchema>;
 export type PreferenceProfile = z.infer<typeof PreferenceProfileSchema>;
 export type SharedPreferenceSummary = z.infer<typeof SharedPreferenceSummarySchema>;

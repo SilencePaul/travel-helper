@@ -80,6 +80,13 @@ const proposalCandidate = {
   ],
 };
 
+const researchProgress = {
+  stage: "collecting_candidates" as const,
+  candidateCount: 0,
+  previews: [],
+  firstResultDeadlineAt: "2026-08-28T00:03:00.000Z",
+};
+
 describe("decision contracts", () => {
   it("accepts an owner-scoped preference command", () => {
     expect(DecisionCommandSchema.parse({ action: "upsertPreference", tripId: "trip-1", expectedRevision: 0, idempotencyKey: "request-001", answers: { pace: "slow" } }).action).toBe("upsertPreference");
@@ -235,6 +242,121 @@ describe("decision contracts", () => {
     }
   });
 
+  it("accepts collecting and validating research progress previews", () => {
+    const base = {
+      tripId: "trip-1",
+      researchTaskId: "research-1",
+      agentRunId: "agent-run-1",
+      operationId: "operation-1",
+      reconciliationState: "active" as const,
+      startedAt: "2026-08-28T00:00:00.000Z",
+      updatedAt: "2026-08-28T00:01:00.000Z",
+    };
+
+    expect(ResearchStatusSchema.safeParse({
+      phase: "researching",
+      ...base,
+      progress: {
+        stage: "collecting_candidates",
+        candidateCount: 2,
+        previews: [
+          { category: "hotel", name: "海边酒店", location: "香港", verification: "pending" },
+          { category: "restaurant", name: "街角餐厅", location: "九龙", verification: "pending" },
+        ],
+        firstResultDeadlineAt: "2026-08-28T00:03:00.000Z",
+      },
+    }).success).toBe(true);
+    expect(ResearchStatusSchema.safeParse({
+      phase: "validating",
+      ...base,
+      progress: {
+        stage: "verifying_sources",
+        candidateCount: 2,
+        previews: [
+          { category: "attraction", name: "海滨公园", location: "香港岛", verification: "verified" },
+          { category: "restaurant", name: "街角餐厅", location: "九龙", verification: "pending" },
+        ],
+        firstResultDeadlineAt: "2026-08-28T00:03:00.000Z",
+      },
+    }).success).toBe(true);
+  });
+
+  it("rejects unsafe or oversized research progress", () => {
+    const status = {
+      phase: "researching",
+      tripId: "trip-1",
+      researchTaskId: "research-1",
+      agentRunId: "agent-run-1",
+      operationId: "operation-1",
+      reconciliationState: "active",
+      startedAt: "2026-08-28T00:00:00.000Z",
+      updatedAt: "2026-08-28T00:01:00.000Z",
+      progress: {
+        stage: "collecting_candidates",
+        candidateCount: 1,
+        previews: [{ category: "hotel", name: "海边酒店", location: "香港", verification: "pending" }],
+        firstResultDeadlineAt: "2026-08-28T00:03:00.000Z",
+      },
+    };
+
+    for (const leakedField of ["prompt", "log", "codexThreadId", "sourceUrl", "evidence"] as const) {
+      expect(ResearchStatusSchema.safeParse({
+        ...status,
+        progress: { ...status.progress, [leakedField]: "secret" },
+      }).success).toBe(false);
+    }
+    expect(ResearchStatusSchema.safeParse({
+      ...status,
+      progress: { ...status.progress, previews: Array.from({ length: 5 }, () => status.progress.previews[0]) },
+    }).success).toBe(false);
+    expect(ResearchStatusSchema.safeParse({
+      ...status,
+      progress: { ...status.progress, previews: [{ ...status.progress.previews[0], name: "n".repeat(201) }] },
+    }).success).toBe(false);
+  });
+
+  it("requires active progress and rejects invalid deadline or terminal progress shapes", () => {
+    const active = {
+      phase: "researching",
+      tripId: "trip-1",
+      researchTaskId: "research-1",
+      agentRunId: "agent-run-1",
+      operationId: "operation-1",
+      reconciliationState: "active",
+      startedAt: "2026-08-28T00:00:00.000Z",
+      updatedAt: "2026-08-28T00:01:00.000Z",
+      progress: researchProgress,
+    };
+    expect(ResearchStatusSchema.safeParse({ ...active, progress: undefined }).success).toBe(false);
+    expect(ResearchStatusSchema.safeParse({
+      ...active,
+      progress: { ...researchProgress, stage: "not_a_stage" },
+    }).success).toBe(false);
+    expect(ResearchStatusSchema.safeParse({
+      ...active,
+      progress: { ...researchProgress, firstResultDeadlineAt: "2026-08-28" },
+    }).success).toBe(false);
+    expect(ResearchStatusSchema.safeParse({
+      ...active,
+      progress: {
+        ...researchProgress,
+        firstResultDeadlineAt: new Date(Date.now() + 60_000).toISOString(),
+        delayNotice: "first_results_delayed",
+      },
+    }).success).toBe(false);
+    expect(ResearchStatusSchema.safeParse({
+      phase: "completed",
+      tripId: active.tripId,
+      researchTaskId: active.researchTaskId,
+      agentRunId: active.agentRunId,
+      operationId: active.operationId,
+      reconciliationState: active.reconciliationState,
+      startedAt: active.startedAt,
+      updatedAt: active.updatedAt,
+      progress: researchProgress,
+    }).success).toBe(false);
+  });
+
   it("uses one bounded opaque identifier contract at the public protocol edge", () => {
     expect(OpaqueIdentifierSchema.parse("agent-run_1:resume.2")).toBe("agent-run_1:resume.2");
     expect(OpaqueIdentifierSchema.safeParse(`a${"b".repeat(255)}`).success).toBe(true);
@@ -252,6 +374,7 @@ describe("decision contracts", () => {
       reconciliationState: "self_revoke_reconciling",
       startedAt: "2026-08-28T00:00:00.000Z",
       updatedAt: "2026-08-28T00:01:00.000Z",
+      progress: researchProgress,
     } as const;
 
     for (const phase of ["researching", "resuming", "validating", "writing", "cancelling"] as const) {
