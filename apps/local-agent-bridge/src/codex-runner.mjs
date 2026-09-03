@@ -24,6 +24,7 @@ const CODEX_AUTH_MESSAGE = "请在 ChatGPT/Codex 中恢复登录后返回此页�
 const SOURCE_OWNER_ACTION_MESSAGE = "请在来源网站中完成所需操作后返回此页面继续。";
 const SOURCE_KINDS = new Set(["flyai", "amap", "web", "official", "manual"]);
 const CAPTURE_METHODS = new Set(["detail_page", "search_result", "api_result", "manual"]);
+const OUTPUT_MODES = new Set(["discovery", "verified"]);
 
 function codedError(code) {
   return Object.assign(new Error(code), { code });
@@ -249,6 +250,22 @@ function validTravelOutput(value) {
   return validCompletedOutput(value) || validOwnerActionOutput(value);
 }
 
+function validDiscoveryOutput(value) {
+  return validOwnerActionOutput(value)
+    || (objectWithKeys(value, ["status", "category", "candidates"])
+      && value.status === "discovered"
+      && CATEGORIES.has(value.category)
+      && Array.isArray(value.candidates)
+      && value.candidates.length >= 2 && value.candidates.length <= 4
+      && value.candidates.every((candidate) => objectWithKeys(candidate, ["name", "address"])
+        && sizedString(candidate.name, 200) && sizedString(candidate.address, 500)));
+}
+
+function approvedSchemaPaths(schemaPaths) {
+  if (!objectWithKeys(schemaPaths, ["discovery", "verified"])) throw codedError("CODEX_OUTPUT_INVALID");
+  return schemaPaths;
+}
+
 function topLevelArgs(cwd) {
   return [
     "--search",
@@ -427,7 +444,7 @@ export function createCodexRunner(options) {
     codexPath,
     isolatedDir,
     projectDir,
-    schemaPath,
+    schemaPaths: requestedSchemaPaths,
     spawnImpl = spawn,
     processKillImpl = process.kill.bind(process),
     probeIsolation = probeCodexIsolation,
@@ -451,7 +468,8 @@ export function createCodexRunner(options) {
   validateAbsolutePath(isolatedDir, "CODEX_ISOLATION_UNAVAILABLE");
   validateAbsolutePath(projectDir, "CODEX_ISOLATION_UNAVAILABLE");
   if (containsPath(projectDir, isolatedDir) || containsPath(isolatedDir, projectDir)) throw codedError(CODEX_ISOLATION_ERROR);
-  validateAbsolutePath(schemaPath, "CODEX_OUTPUT_INVALID");
+  const schemaPaths = approvedSchemaPaths(requestedSchemaPaths);
+  for (const path of Object.values(schemaPaths)) validateAbsolutePath(path, "CODEX_OUTPUT_INVALID");
   if (typeof probeIsolation !== "function" || typeof pathVerifier !== "function") throw codedError(CODEX_ISOLATION_ERROR);
   if (typeof spawnImpl !== "function" || typeof processKillImpl !== "function" || typeof monotonicNow !== "function"
     || (customValidateOutput !== undefined && typeof customValidateOutput !== "function")) {
@@ -555,7 +573,7 @@ export function createCodexRunner(options) {
     }
   }
 
-  async function verifyPaths(operation) {
+  async function verifyPaths(operation, schemaPath) {
     const requested = { codexPath, isolatedDir, projectDir, schemaPath, probePaths };
     try {
       const canonical = await withinBudget(Promise.resolve().then(() => pathVerifier(requested)), operation);
@@ -611,8 +629,8 @@ export function createCodexRunner(options) {
     }
   }
 
-  async function execute(args, prompt, expectedThreadId, operation) {
-    await verifyPaths(operation);
+  async function execute(args, prompt, expectedThreadId, operation, schemaPath) {
+    await verifyPaths(operation, schemaPath);
     await verifyIsolation(operation);
     if (operation.cancelled) throw codedError("CODEX_RESEARCH_CANCELLED");
     const processTimeoutMs = remainingMs(operation);
@@ -781,9 +799,10 @@ export function createCodexRunner(options) {
     });
   }
 
-  async function outputIsValid(value, operation) {
+  async function outputIsValid(value, operation, mode) {
     try {
-      const result = await withinBudget(Promise.resolve().then(() => validateOutput(value)), operation);
+      const validator = mode === "discovery" ? validDiscoveryOutput : validateOutput;
+      const result = await withinBudget(Promise.resolve().then(() => validator(value)), operation);
       return result === true;
     } catch (error) {
       if (error?.code === "CODEX_RESEARCH_TIMEOUT" || error?.code === "CODEX_RESEARCH_CANCELLED") throw error;
@@ -791,20 +810,21 @@ export function createCodexRunner(options) {
     }
   }
 
-  async function runWithCorrection(args, prompt, expectedThreadId, operation) {
+  async function runWithCorrection(args, prompt, expectedThreadId, operation, mode) {
+    const schemaPath = schemaPaths[mode];
     if (expectedThreadId) bindThread(expectedThreadId);
-    const first = await execute(args, prompt, expectedThreadId, operation);
+    const first = await execute(args, prompt, expectedThreadId, operation, schemaPath);
     bindThread(first.codexThreadId);
-    if (await outputIsValid(first.output, operation)) return first;
+    if (await outputIsValid(first.output, operation, mode)) return first;
     if (correctionUsed) throw codedError("CODEX_OUTPUT_INVALID");
     correctionUsed = true;
     const corrected = await execute(
       buildResumeArgs({ cwd: isolatedDir, schemaPath, codexThreadId: first.codexThreadId }),
       FORMAT_CORRECTION_PROMPT,
       first.codexThreadId,
-      operation,
+      operation, schemaPath,
     );
-    if (!await outputIsValid(corrected.output, operation)) throw codedError("CODEX_OUTPUT_INVALID");
+    if (!await outputIsValid(corrected.output, operation, mode)) throw codedError("CODEX_OUTPUT_INVALID");
     return corrected;
   }
 
@@ -867,26 +887,28 @@ export function createCodexRunner(options) {
     },
     async runInitial(input) {
       const prompt = input?.prompt;
-      if (initialStarted || boundThreadId || typeof prompt !== "string") throw codedError("CODEX_RESEARCH_FAILED");
+      const mode = input?.mode ?? "verified";
+      if (initialStarted || boundThreadId || typeof prompt !== "string" || !OUTPUT_MODES.has(mode)) throw codedError("CODEX_RESEARCH_FAILED");
       initialStarted = true;
       return runExclusive((operation) => runWithCorrection(
-        buildInitialArgs({ cwd: isolatedDir, schemaPath }),
+        buildInitialArgs({ cwd: isolatedDir, schemaPath: schemaPaths[mode] }),
         prompt,
         undefined,
-        operation,
+        operation, mode,
       ));
     },
     async resume(input) {
       const codexThreadId = input?.codexThreadId;
       const prompt = input?.prompt;
+      const mode = input?.mode ?? "verified";
       return runExclusive((operation) => {
         validateThreadId(codexThreadId);
-        if (typeof prompt !== "string") throw codedError("CODEX_RESEARCH_FAILED");
+        if (typeof prompt !== "string" || !OUTPUT_MODES.has(mode)) throw codedError("CODEX_RESEARCH_FAILED");
         return runWithCorrection(
-          buildResumeArgs({ cwd: isolatedDir, schemaPath, codexThreadId }),
+          buildResumeArgs({ cwd: isolatedDir, schemaPath: schemaPaths[mode], codexThreadId }),
           prompt,
           codexThreadId,
-          operation,
+          operation, mode,
         );
       });
     },

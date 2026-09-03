@@ -970,7 +970,7 @@ test("service composes with a real createCodexRunner session contract", async ()
         codexPath: "/Applications/ChatGPT.app/Contents/Resources/codex",
         isolatedDir: "/isolated",
         projectDir: "/project",
-        schemaPath: "/schema.json",
+        schemaPaths: { discovery: "/discovery.schema.json", verified: "/schema.json" },
         activeTimeoutMs: options.activeTimeoutMs,
         ...(options.initialState ? { initialState: options.initialState } : {}),
         sourceEnv: {

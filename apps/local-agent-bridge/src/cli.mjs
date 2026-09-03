@@ -25,6 +25,7 @@ import { TravelResearchService } from "./travel-research-service.mjs";
 const MODULE_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PROJECT_DIRECTORY = resolve(MODULE_DIRECTORY, "../../..");
 const DEFAULT_SCHEMA_PATH = join(MODULE_DIRECTORY, "codex-travel-output.schema.json");
+const DEFAULT_DISCOVERY_SCHEMA_PATH = join(MODULE_DIRECTORY, "codex-travel-discovery.schema.json");
 const DEFAULT_PROJECT_PROBE_PATH = join(DEFAULT_PROJECT_DIRECTORY, "package.json");
 const DEFAULT_OUTSIDE_PROBE_PATH = "/etc/hosts";
 const DEFAULT_TRUSTED_TEMP_ROOT = resolve(realpathSync(tmpdir()));
@@ -92,6 +93,7 @@ function pathsOverlap(left, right) {
 export function createManagedCodexRunnerFactory({
   projectDir,
   schemaPath,
+  discoverySchemaPath = DEFAULT_DISCOVERY_SCHEMA_PATH,
   projectProbePath,
   outsideProbePath,
   trustedTempRoot = DEFAULT_TRUSTED_TEMP_ROOT,
@@ -108,7 +110,7 @@ export function createManagedCodexRunnerFactory({
   quarantineToken = randomUUID,
   createRunner = createCodexRunner,
 } = {}) {
-  if (![projectDir, schemaPath, projectProbePath, outsideProbePath, trustedTempRoot].every(normalizedAbsolutePath)
+  if (![projectDir, schemaPath, discoverySchemaPath, projectProbePath, outsideProbePath, trustedTempRoot].every(normalizedAbsolutePath)
     || typeof discoverCodex !== "function"
     || typeof canonicalizePath !== "function"
     || typeof inspectPath !== "function"
@@ -124,16 +126,22 @@ export function createManagedCodexRunnerFactory({
   }
   let canonicalTempRoot;
   let canonicalProjectDir;
+  let canonicalSchemaPath;
+  let canonicalDiscoverySchemaPath;
   let canonicalHome;
   try {
     canonicalTempRoot = resolve(canonicalizePath(trustedTempRoot));
     canonicalProjectDir = resolve(canonicalizePath(projectDir));
+    canonicalSchemaPath = resolve(canonicalizePath(schemaPath));
+    canonicalDiscoverySchemaPath = resolve(canonicalizePath(discoverySchemaPath));
     canonicalHome = resolve(canonicalizePath(homedir()));
   } catch {
     throw codedError("CODEX_RESEARCH_FAILED");
   }
   if (canonicalTempRoot !== trustedTempRoot
     || canonicalProjectDir !== projectDir
+    || canonicalSchemaPath !== schemaPath
+    || canonicalDiscoverySchemaPath !== discoverySchemaPath
     || canonicalTempRoot === parse(canonicalTempRoot).root
     || canonicalTempRoot === canonicalHome
     || pathsOverlap(canonicalTempRoot, canonicalProjectDir)) {
@@ -267,7 +275,7 @@ export function createManagedCodexRunnerFactory({
         codexPath: discoverCodex(),
         isolatedDir,
         projectDir,
-        schemaPath,
+        schemaPaths: { discovery: canonicalDiscoverySchemaPath, verified: canonicalSchemaPath },
         probePaths: {
           isolatedFile,
           outsideFile: outsideProbePath,
@@ -461,6 +469,7 @@ export async function runCli(argv = process.argv.slice(2), output = process.stdo
     idGenerator = randomUUID,
     projectDir = DEFAULT_PROJECT_DIRECTORY,
     schemaPath = DEFAULT_SCHEMA_PATH,
+    discoverySchemaPath = DEFAULT_DISCOVERY_SCHEMA_PATH,
     projectProbePath = DEFAULT_PROJECT_PROBE_PATH,
     outsideProbePath = DEFAULT_OUTSIDE_PROBE_PATH,
     stateDirectory = DEFAULT_STATE_DIRECTORY,
@@ -473,6 +482,7 @@ export async function runCli(argv = process.argv.slice(2), output = process.stdo
   const runner = createRunnerFactory({
     projectDir,
     schemaPath,
+    discoverySchemaPath,
     projectProbePath,
     outsideProbePath,
     sourceEnv,

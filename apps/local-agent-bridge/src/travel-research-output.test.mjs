@@ -3,7 +3,7 @@ import { webcrypto } from "node:crypto";
 import test from "node:test";
 
 import { buildTravelResearchInput } from "./travel-research-input.mjs";
-import { validateTravelResearchOutput } from "./travel-research-output.mjs";
+import { validateTravelResearchDiscoveryOutput, validateTravelResearchOutput } from "./travel-research-output.mjs";
 
 const aliasFixture = await buildTravelResearchInput({
   trip: {
@@ -136,6 +136,37 @@ test("valid completed output maps current aliases and adds only trusted round/ca
   assert.deepEqual(Object.keys(result.payload).sort(), ["candidates", "round"]);
   assert.equal(JSON.stringify(result.payload).includes("preferenceRevisionAliases"), false);
   assert.equal(JSON.stringify(result.payload).includes("status"), false);
+});
+
+test("discovery validator returns only a safe candidate preview", async () => {
+  const result = await validateTravelResearchDiscoveryOutput({
+    status: "discovered",
+    category: "hotel",
+    candidates: [
+      { name: "深圳湾酒店", address: "深圳市南山区" },
+      { name: "福田酒店", address: "深圳市福田区" },
+    ],
+  }, { targetCategory: "hotel", aliasMap: aliasMap() });
+
+  assert.deepEqual(result, {
+    status: "discovered",
+    category: "hotel",
+    candidates: [
+      { name: "深圳湾酒店", address: "深圳市南山区" },
+      { name: "福田酒店", address: "深圳市福田区" },
+    ],
+  });
+  assert.equal(Object.hasOwn(result, "payload"), false);
+});
+
+test("discovery validator rejects duplicate, private, and full-result shapes", async () => {
+  const output = {
+    status: "discovered", category: "hotel",
+    candidates: [{ name: "酒店", address: "深圳市" }, { name: "酒店", address: "深圳市" }],
+  };
+  await assert.rejects(() => validateTravelResearchDiscoveryOutput(output, { targetCategory: "hotel", aliasMap: aliasMap() }), { code: "CODEX_OUTPUT_INVALID" });
+  await assert.rejects(() => validateTravelResearchDiscoveryOutput({ ...output, candidates: [{ name: "酒店", address: "/Users/private" }, { name: "另一家", address: "深圳市" }] }, { targetCategory: "hotel", aliasMap: aliasMap() }), { code: "CODEX_OUTPUT_INVALID" });
+  await assert.rejects(() => validateTravelResearchDiscoveryOutput(completedOutput(), { targetCategory: "hotel", aliasMap: aliasMap() }), { code: "CODEX_OUTPUT_INVALID" });
 });
 
 test("accepts category-matched restaurant and attraction facts", async () => {

@@ -283,6 +283,16 @@ function validOwnerActionShape(value) {
     && normalizedPublicHostname(value.sourceHostname) === value.sourceHostname;
 }
 
+function validDiscoveryShape(value) {
+  return exactObject(value, ["status", "category", "candidates"])
+    && value.status === "discovered"
+    && CATEGORIES.has(value.category)
+    && Array.isArray(value.candidates)
+    && value.candidates.length >= 2 && value.candidates.length <= 4
+    && value.candidates.every((candidate) => exactObject(candidate, ["name", "address"])
+      && safeString(candidate.name, 200) && safeString(candidate.address, 500));
+}
+
 function decodeBasicTagEntities(value) {
   let decoded = value;
   for (let pass = 0; pass < 2; pass += 1) {
@@ -571,6 +581,37 @@ async function validateOutput(output, options) {
 export async function validateTravelResearchOutput(output, options) {
   try {
     return await validateOutput(output, options);
+  } catch (error) {
+    if (error instanceof Error && STABLE_ERROR_CODES.has(error.code) && error.message === error.code) throw error;
+    throw codedError("CODEX_OUTPUT_INVALID");
+  }
+}
+
+export async function validateTravelResearchDiscoveryOutput(output, options) {
+  try {
+    if (!exactObject(options, ["targetCategory", "aliasMap"]) || !CATEGORIES.has(options.targetCategory)
+      || !isResearchAliasMap(options.aliasMap)) {
+      throw codedError(options && !CATEGORIES.has(options.targetCategory) ? "INVALID_RESEARCH_TARGET" : "CODEX_RESEARCH_FAILED");
+    }
+    scanForUnsafeContent(output, options.aliasMap);
+    if (validOwnerActionShape(output)) {
+      if (Object.hasOwn(output, "sourceHostname")) {
+        await resolvePublicHostname(output.sourceHostname, defaultResolveHostname);
+      }
+      return Object.freeze({ ...output });
+    }
+    if (!validDiscoveryShape(output) || output.category !== options.targetCategory) throw codedError("CODEX_OUTPUT_INVALID");
+    const names = new Set();
+    for (const candidate of output.candidates) {
+      const key = `${candidate.name}\u0000${candidate.address}`;
+      if (names.has(key)) throw codedError("CODEX_OUTPUT_INVALID");
+      names.add(key);
+    }
+    return Object.freeze({
+      status: "discovered",
+      category: output.category,
+      candidates: output.candidates.map(({ name, address }) => Object.freeze({ name, address })),
+    });
   } catch (error) {
     if (error instanceof Error && STABLE_ERROR_CODES.has(error.code) && error.message === error.code) throw error;
     throw codedError("CODEX_OUTPUT_INVALID");

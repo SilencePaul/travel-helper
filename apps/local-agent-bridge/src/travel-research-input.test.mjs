@@ -248,6 +248,19 @@ test("buildTravelResearchInput keeps names and selected public data while exclud
   assert.equal(built.prompt.includes("resourceCommitments"), false);
 });
 
+test("buildTravelResearchInput exposes a bounded discovery prompt without relaxing its disclosure boundary", async () => {
+  const built = await buildTravelResearchInput(contextFixture(), {
+    targetCategory: "hotel",
+    targetScopeId: "scope_b64667f2ad33dd723ef9947c9a3531f105ecd42f01d42c7b559e9712e2764e57",
+    aliasSalt: "input-test-salt-16",
+  }, webcrypto);
+
+  assert.match(built.discoveryPrompt, /名称和地点/u);
+  assert.match(built.discoveryPrompt, /UNTRUSTED_TRAVEL_DATA=/u);
+  assert.equal(built.discoveryPrompt.includes("trip-secret"), false);
+  assert.equal(built.discoveryPrompt.includes("top-level-secret"), false);
+});
+
 test("input inspection catches normalized, URI and encoded private or credential views without over-redacting safe text", async () => {
   const encodedPrivateValues = [
     Buffer.from("preference-secret", "utf8").toString("base64"),

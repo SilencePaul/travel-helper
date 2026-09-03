@@ -194,7 +194,7 @@ function makeRunner(fake, overrides = {}) {
     codexPath: "/Applications/ChatGPT.app/Contents/Resources/codex",
     isolatedDir: "/isolated",
     projectDir: "/project",
-    schemaPath: "/schema.json",
+    schemaPaths: { discovery: "/discovery.schema.json", verified: "/schema.json" },
     spawnImpl: fake.spawnImpl,
     processKillImpl: fake.processKillImpl,
     probeIsolation: async () => COMPLETE_ISOLATION_REPORT,
@@ -251,6 +251,39 @@ test("resume reuses the identical top-level gate and the same Codex thread", () 
     "--output-schema", "/schema.json",
     "-",
   ]);
+});
+
+test("runner uses the service-selected discovery schema then switches the bound thread to verified", async () => {
+  const discovered = {
+    status: "discovered",
+    category: "hotel",
+    candidates: [
+      { name: "酒店一", address: "深圳市" },
+      { name: "酒店二", address: "深圳市" },
+    ],
+  };
+  const fake = createFakeSpawn([{ stdout: jsonl("thread-1", discovered) }, { stdout: jsonl("thread-1", VALID_OUTPUT) }]);
+  const runner = makeRunner(fake, {
+    schemaPaths: { discovery: "/discovery.schema.json", verified: "/schema.json" },
+  });
+
+  await runner.runInitial({ prompt: "discover", mode: "discovery" });
+  await runner.resume({ codexThreadId: "thread-1", prompt: "verify", mode: "verified" });
+
+  assert.equal(fake.calls[0].args.at(-2), "/discovery.schema.json");
+  assert.equal(fake.calls[1].args.at(-2), "/schema.json");
+  assert.deepEqual(fake.calls[0].args.slice(0, TOP_LEVEL_ARGS.length), TOP_LEVEL_ARGS);
+  assert.deepEqual(fake.calls[1].args.slice(0, TOP_LEVEL_ARGS.length), TOP_LEVEL_ARGS);
+});
+
+test("runner rejects unapproved modes and does not accept discovery output as verified", async () => {
+  const discovered = { status: "discovered", category: "hotel", candidates: [{ name: "酒店一", address: "深圳市" }, { name: "酒店二", address: "深圳市" }] };
+  const fake = createFakeSpawn([{ stdout: jsonl("thread-1", discovered) }, { stdout: jsonl("thread-1", discovered) }]);
+  const runner = makeRunner(fake, { schemaPaths: { discovery: "/discovery.schema.json", verified: "/schema.json" } });
+
+  await assert.rejects(runner.runInitial({ prompt: "verify", mode: "verified" }), { code: "CODEX_OUTPUT_INVALID" });
+  await assert.rejects(runner.resume({ codexThreadId: "thread-1", prompt: "bad", mode: "outside" }), { code: "CODEX_RESEARCH_FAILED" });
+  assert.throws(() => makeRunner(createFakeSpawn([]), { schemaPaths: { discovery: "/discovery.schema.json" } }), { code: "CODEX_OUTPUT_INVALID" });
 });
 
 test("runner spawns a controlled absolute binary in the isolated directory and sends prompt only on stdin", async () => {
@@ -1108,8 +1141,8 @@ test("runner rejects relative executables and non-isolated launch paths before s
     { projectDir: undefined },
     { projectDir: "/isolated" },
     { isolatedDir: "/project/isolated", projectDir: "/project" },
-    { schemaPath: "relative/schema.json" },
-    { schemaPath: "/isolated/../project/schema.json" },
+    { schemaPaths: { discovery: "relative/schema.json", verified: "/schema.json" } },
+    { schemaPaths: { discovery: "/discovery.schema.json", verified: "/isolated/../project/schema.json" } },
   ]) {
     assert.throws(() => makeRunner(fake, options));
   }
@@ -1136,10 +1169,10 @@ test("runner rejects canonical path overlap and non-file executable or schema be
   ]);
 
   for (const paths of [
-    { codexPath: schemaDirectory, isolatedDir, schemaPath },
-    { codexPath: codexLink, isolatedDir, schemaPath },
-    { codexPath, isolatedDir: isolatedProjectLink, schemaPath },
-    { codexPath, isolatedDir, schemaPath: schemaDirectory },
+    { codexPath: schemaDirectory, isolatedDir, schemaPaths: { discovery: schemaPath, verified: schemaPath } },
+    { codexPath: codexLink, isolatedDir, schemaPaths: { discovery: schemaPath, verified: schemaPath } },
+    { codexPath, isolatedDir: isolatedProjectLink, schemaPaths: { discovery: schemaPath, verified: schemaPath } },
+    { codexPath, isolatedDir, schemaPaths: { discovery: schemaPath, verified: schemaDirectory } },
   ]) {
     const fake = createFakeSpawn([{ stdout: jsonl("thread-1") }]);
     let probeCalls = 0;
@@ -1193,4 +1226,13 @@ test("travel output schema is strict, HTTPS-only and discriminator-based", async
     "source_risk_control",
   ]);
   assert.deepEqual(schema.$defs.sourceOwnerAction.required, ["status", "reason", "message", "sourceHostname"]);
+});
+
+test("travel discovery schema admits only bounded discovery or owner-action output", async () => {
+  const schema = JSON.parse(await readFile(new URL("./codex-travel-discovery.schema.json", import.meta.url), "utf8"));
+  assert.equal(schema.oneOf.length, 3);
+  assert.equal(schema.oneOf[0].properties.status.const, "discovered");
+  assert.equal(schema.oneOf[0].properties.candidates.minItems, 2);
+  assert.equal(schema.oneOf[0].properties.candidates.maxItems, 4);
+  assert.equal(schema.oneOf[0].properties.candidates.items.additionalProperties, false);
 });
