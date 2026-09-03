@@ -173,13 +173,19 @@ describe("DecisionAgentPanel", () => {
       phase: "validating" as const,
       progress: { ...first.progress, stage: "verifying_sources" as const, previews: [{ ...first.progress.previews[0]!, verification: "verified" as const }] },
     } satisfies ResearchStatus;
-    const bridge = makeBridge({ getResearchStatus: vi.fn().mockResolvedValueOnce(first).mockResolvedValue(verified) });
+    const empty = {
+      ...verified,
+      updatedAt: "2026-08-28T00:02:01.000Z",
+      progress: { ...verified.progress, candidateCount: 0, previews: [] },
+    } satisfies ResearchStatus;
+    const bridge = makeBridge({ getResearchStatus: vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(verified).mockResolvedValue(empty) });
     const repository = makeRepository();
     const onResearchCompleted = vi.fn();
     const view = setup({ bridge, repository, onResearchCompleted });
 
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     expect(screen.getByRole("list", { name: "研究进度" })).toHaveTextContent("范围确认搜集候选核验来源写入共同决定");
+    expect(screen.getByLabelText("已找到 2 个候选")).toBeVisible();
     expect(screen.getByRole("article")).toHaveTextContent("海景旅店香港中环待核验");
     expect(repository.command).not.toHaveBeenCalled();
     expect(onResearchCompleted).not.toHaveBeenCalled();
@@ -190,6 +196,9 @@ describe("DecisionAgentPanel", () => {
 
     await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
     expect(screen.getByRole("article")).toHaveTextContent("已核验");
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(screen.getByLabelText("已找到 0 个候选")).toBeVisible();
+    expect(screen.queryByRole("article")).not.toBeInTheDocument();
     view.unmount();
     vi.useRealTimers();
   });

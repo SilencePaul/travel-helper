@@ -1710,6 +1710,7 @@ export function DecisionAgentPanel({ repository, bridge, trip, workspace, onRese
       <ol aria-label="研究进度">
         {progressSteps.map((step) => <li key={step.stage} className={researchProgress.stage === step.stage ? "is-active" : undefined}>{step.label}</li>)}
       </ol>
+      <p className="decision-agent-panel__candidate-count" aria-label={`已找到 ${researchProgress.candidateCount} 个候选`}>已找到 {researchProgress.candidateCount} 个候选</p>
       {researchProgress.previews.length > 0 ? <div className="decision-agent-panel__previews" aria-label="候选预览">
         {researchProgress.previews.map((preview) => <article key={`${preview.category}-${preview.name}-${preview.location}`}>
           <strong>{preview.name}</strong><span>{preview.location}</span><small>{preview.verification === "verified" ? "已核验" : "待核验"}</small>
