@@ -134,7 +134,7 @@
 .decision-agent-panel__status-card dt { color: #7b7569; font-size: 0.68rem; }
 .decision-agent-panel__status-card dd { overflow-wrap: anywhere; margin: 0; font-size: 0.75rem; font-weight: 700; }
 .decision-agent-panel__progress { display: grid; grid-column: 1 / -1; gap: 0.65rem; }
-.decision-agent-panel__progress ol { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.35rem; margin: 0; padding: 0; list-style: none; }
+.decision-agent-panel__progress ol { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0.35rem; margin: 0; padding: 0; list-style: none; }
 .decision-agent-panel__progress li { padding: 0.35rem; border-top: 2px solid #c5baa5; color: #7b7569; font-size: 0.7rem; text-align: center; }
 .decision-agent-panel__progress li.is-active { border-color: #cf5d38; color: #104c40; font-weight: 800; }
 .decision-agent-panel__candidate-count { margin: 0; color: #69756f; font-size: 0.75rem; }

@@ -155,6 +155,18 @@ function makeCreateAndRevokeCommand() {
 }
 
 describe("DecisionAgentPanel", () => {
+  it("highlights stopping progress while cancelling", async () => {
+    const stopping = {
+      phase: "cancelling" as const,
+      ...timestamps,
+      progress: { ...timestamps.progress, stage: "stopping" as const },
+    } satisfies ResearchStatus;
+    setup({ bridge: makeBridge({ getResearchStatus: vi.fn().mockResolvedValue(stopping) }) });
+
+    await screen.findByText("停止并对账");
+    expect(screen.getByText("停止并对账")).toHaveClass("is-active");
+  });
+
   it("renders bridge progress previews and locally dismisses a first-result delay", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-28T00:02:00.000Z"));

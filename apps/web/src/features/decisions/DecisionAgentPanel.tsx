@@ -120,6 +120,7 @@ const progressSteps = [
   { stage: "collecting_candidates", label: "搜集候选" },
   { stage: "verifying_sources", label: "核验来源" },
   { stage: "writing_shared_decisions", label: "写入共同决定" },
+  { stage: "stopping", label: "停止并对账" },
 ] as const;
 
 function tripProjection(trip: Trip) {
