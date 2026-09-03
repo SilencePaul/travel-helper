@@ -3716,7 +3716,7 @@ test("a cancelled trip becomes idle to another trip without weakening active tri
   assert.equal(harness.runner.createCount, 1);
 });
 
-test("cleanup revoke remains available after the independent active budget and finishes before the claimed AgentRun expires", async () => {
+test("the 10-minute active timeout triggers cleanup revoke before the claimed AgentRun expires", async () => {
   let releaseContext;
   let contextStarted;
   const contextGate = new Promise((resolve) => { releaseContext = resolve; });
@@ -3772,14 +3772,13 @@ test("cleanup revoke remains available after the independent active budget and f
   await harness.service.claim(request.agentRunId);
   const execution = harness.service.executeTravelResearch(request);
   await observedContext;
-  const cancellation = cancelCurrentResearch(harness.service);
 
-  clock.advance(600_001);
+  clock.advance(10 * 60 * 1_000 + 1);
   releaseContext();
-  const [executeStatus, cancelStatus] = await Promise.all([execution, cancellation]);
+  const executeStatus = await execution;
 
-  assert.equal(executeStatus.phase, "cancelled");
-  assert.equal(cancelStatus.phase, "cancelled");
+  assert.equal(executeStatus.phase, "failed");
+  assert.equal(executeStatus.errorCode, "CODEX_RESEARCH_TIMEOUT");
   assert.deepEqual(actions, ["claimAgentRun", "getDecisionContext", "revokeAgentRunSelf"]);
   assert.ok(Date.parse(cleanupRevokedAt) < Date.parse(claimedExpiresAt));
   assert.equal(harness.runner.createCount, 0);
