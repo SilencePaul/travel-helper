@@ -1,6 +1,6 @@
 import type { BudgetCategory, Member, Trip } from "@travel/contracts";
 import type { OrderStatus } from "@travel/contracts";
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { DayStrip } from "./DayStrip";
 import { getDayPanelId, getDayTabId } from "./dayTabIds";
 import { TravelPassHero } from "./TravelPassHero";
@@ -96,7 +96,7 @@ export function OverviewPage({
     cancelButtonRef.current?.focus();
   }, [dialogOpen]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     /* oxlint-disable react/set-state-in-effect -- the form mirrors a persisted trip replacement. */
     setRangeStart(trip.startDate);
     setRangeEnd(trip.endDate);

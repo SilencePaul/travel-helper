@@ -19,7 +19,17 @@ import { BootstrapPage } from "../features/auth/BootstrapPage";
 import { PendingApprovalPage } from "../features/auth/PendingApprovalPage";
 import { AuthShell } from "../features/auth/AuthShell";
 import { logout, recoverAuthenticatedMember } from "../infrastructure/authSession";
-import type { LocalAgentBridge } from "../infrastructure/localAgentBridgeClient";
+import { LocalAgentBridgeError, type LocalAgentBridge } from "../infrastructure/localAgentBridgeClient";
+import {
+  browserDataMode,
+  callActiveBrowserTestBridge,
+  readBrowserTestDecisionCoordinator,
+  type TestDecisionResearchCall,
+  type TestDecisionResearchCoordinator,
+} from "./browserEnvironment";
+
+const decisionResearchCoordinatorName = "__decisionResearchHarnessCall";
+const decisionResearchWorkspaceEvent = "decision-research-test-workspace-refresh";
 
 type ProductionAuthState =
   | { status: "checking" }
@@ -30,6 +40,27 @@ type ProductionAuthState =
 
 function authErrorCode(error: unknown) {
   return error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
+}
+
+function browserTestDecisionCoordinator(): TestDecisionResearchCoordinator | undefined {
+  if (!import.meta.env.DEV) return undefined;
+  return readBrowserTestDecisionCoordinator(
+    true,
+    window.location.search,
+    () => (window as typeof window & { __decisionResearchHarnessCall?: TestDecisionResearchCoordinator })[decisionResearchCoordinatorName],
+  );
+}
+
+async function callTestDecisionCoordinator<T>(coordinator: TestDecisionResearchCoordinator, call: TestDecisionResearchCall): Promise<T> {
+  const result = await coordinator(call);
+  if (!result.ok) throw new Error(result.error);
+  return result.data as T;
+}
+
+async function callTestDecisionBridge<T>(coordinator: TestDecisionResearchCoordinator, call: TestDecisionResearchCall): Promise<T> {
+  const result = await coordinator(call);
+  if (!result.ok) throw new LocalAgentBridgeError(result.error as ConstructorParameters<typeof LocalAgentBridgeError>[0]);
+  return result.data as T;
 }
 
 function createBrowserTestRepository(): TripRepository | undefined {
@@ -141,13 +172,37 @@ function createBrowserTestMemberFixture() {
   if (params.get("__testMemberManagement") !== "1" && params.get("__testDecisionAgent") !== "1") return undefined;
   const admin = { uid: "e2e-admin", displayName: "测试管理员", role: "admin", version: 1, createdAt: "2026-08-30T00:00:00.000Z" } satisfies Member;
   const companion = { uid: "e2e-companion", displayName: "低视口测试同行者（名字很长）", role: "member", version: 1, createdAt: "2026-08-30T00:00:00.000Z" } satisfies Member;
-  return { admin, members: [admin, companion] };
+  const member = params.get("__testDecisionAgentRole") === "member" ? companion : admin;
+  return { member, members: [admin, companion] };
 }
 
 type TestAgentRunCoordinator = (input: Extract<DecisionCommand, { action: "createAgentRun" }>) => Promise<{ agentRunId: string; expiresAt: string }>;
 
 function createBrowserTestDecisionRepository(): DecisionWorkspaceRepository | undefined {
   if (!import.meta.env.DEV || new URLSearchParams(window.location.search).get("__testDecisionAgent") !== "1") return undefined;
+  const researchCoordinator = browserTestDecisionCoordinator();
+  if (researchCoordinator) {
+    return {
+      load: (tripId) => callTestDecisionCoordinator(researchCoordinator, { operation: "workspace.load", input: { tripId } }),
+      refresh: (tripId) => callTestDecisionCoordinator(researchCoordinator, { operation: "workspace.refresh", input: { tripId } }),
+      command: (input) => callTestDecisionCoordinator(researchCoordinator, { operation: "workspace.command", input }),
+      getAgentRunStatus: (tripId, agentRunId) => callTestDecisionCoordinator(researchCoordinator, { operation: "workspace.agent-run-status", input: { tripId, agentRunId } }),
+      events: async (_tripId, afterCursor) => ({ events: [], cursor: afterCursor }),
+      subscribe: (tripId, onChange) => {
+        let active = true;
+        const refresh = () => {
+          void callTestDecisionCoordinator<DecisionWorkspace>(researchCoordinator, { operation: "workspace.refresh", input: { tripId } })
+            .then((next) => { if (active) onChange(next); })
+            .catch(() => undefined);
+        };
+        window.addEventListener(decisionResearchWorkspaceEvent, refresh);
+        return () => {
+          active = false;
+          window.removeEventListener(decisionResearchWorkspaceEvent, refresh);
+        };
+      },
+    };
+  }
   const coordinator = (window as typeof window & { __createTestAgentRun?: TestAgentRunCoordinator }).__createTestAgentRun;
   if (typeof coordinator !== "function") return undefined;
   let run: AgentRun | undefined;
@@ -191,15 +246,41 @@ function createBrowserTestDecisionRepository(): DecisionWorkspaceRepository | un
   };
 }
 
-export function browserDataMode(isDevelopment: boolean, configuredMode: string | undefined): "cloudbase" | "local" | "invalid" {
-  if (configuredMode === "cloudbase") return "cloudbase";
-  return isDevelopment ? "local" : "invalid";
+function createBrowserTestAgentBridge(): LocalAgentBridge | undefined {
+  if (new URLSearchParams(window.location.search).get("__testDecisionAgentRole") === "member") return undefined;
+  const coordinator = browserTestDecisionCoordinator();
+  if (!coordinator) return undefined;
+  let requestSequence = 0;
+  const callBridge = <T,>(operation: Extract<TestDecisionResearchCall["operation"], `bridge.${string}`>, input: unknown, options?: { signal?: AbortSignal }) => {
+    const signal = options?.signal;
+    return callActiveBrowserTestBridge(signal, () => {
+      const requestId = `test-bridge-request-${++requestSequence}`;
+      const request = callTestDecisionBridge<T>(coordinator, {
+        operation,
+        input,
+        request: { requestId, aborted: false },
+      });
+      const abort = () => {
+        void callTestDecisionCoordinator(coordinator, { operation: "bridge.abort", input: { requestId } }).catch(() => undefined);
+      };
+      signal?.addEventListener("abort", abort, { once: true });
+      return request.finally(() => signal?.removeEventListener("abort", abort));
+    });
+  };
+  return {
+    prepare: (tripId, options) => callBridge("bridge.prepare", { tripId }, options),
+    claim: (agentRunId, options) => callBridge("bridge.claim", { agentRunId }, options),
+    executeTravelResearch: (input, options) => callBridge("bridge.execute", input, options),
+    getResearchStatus: (tripId, options) => callBridge("bridge.status", { tripId }, options),
+    resumeTravelResearch: (input, options) => callBridge("bridge.resume", input, options),
+    cancelResearch: (input, options) => callBridge("bridge.cancel", input, options),
+  };
 }
 
 export function BrowserRoot({ agentBridge }: { agentBridge?: LocalAgentBridge } = {}) {
   const mode = browserDataMode(import.meta.env.DEV, import.meta.env.VITE_DATA_MODE);
   if (mode === "cloudbase") return <ProductionAuthGate agentBridge={agentBridge} />;
-  if (mode === "local") return <DevBrowserRoot agentBridge={agentBridge} />;
+  if (import.meta.env.DEV && mode === "local") return <DevBrowserRoot agentBridge={agentBridge} />;
   return (
     <AuthShell step="配置检查" title="旅行助手尚未正确发布" description="生产环境没有连接到共享行程服务。">
       <p className="auth-error" role="alert">请联系管理员检查数据模式配置后重新发布。</p>
@@ -210,9 +291,10 @@ export function BrowserRoot({ agentBridge }: { agentBridge?: LocalAgentBridge } 
 function DevBrowserRoot({ agentBridge }: { agentBridge?: LocalAgentBridge }) {
   const [repository] = useState(createBrowserTestRepository);
   const [decisionRepository] = useState(createBrowserTestDecisionRepository);
+  const [testAgentBridge] = useState(createBrowserTestAgentBridge);
   const [routeService] = useState(createBrowserTestRouteService);
   const [memberFixture] = useState(createBrowserTestMemberFixture);
-  return <BrowserRouter><TripApp repository={repository} decisionRepository={decisionRepository} routeService={routeService} member={memberFixture?.admin} memberManagementInitialMembers={memberFixture?.members} agentBridge={agentBridge} /></BrowserRouter>;
+  return <BrowserRouter><TripApp repository={repository} decisionRepository={decisionRepository} routeService={routeService} member={memberFixture?.member} memberManagementInitialMembers={memberFixture?.members} agentBridge={memberFixture?.member.role === "member" ? undefined : agentBridge ?? testAgentBridge} /></BrowserRouter>;
 }
 
 export function ProductionAuthGate({ agentBridge }: { agentBridge?: LocalAgentBridge } = {}) {

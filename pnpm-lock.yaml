@@ -27,7 +27,11 @@ importers:
         specifier: ^6.0.3
         version: 6.0.3
 
-  apps/local-agent-bridge: {}
+  apps/local-agent-bridge:
+    dependencies:
+      '@travel/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
 
   apps/web:
     dependencies:
@@ -141,6 +145,9 @@ importers:
       '@eslint/js':
         specifier: ^10.0.1
         version: 10.0.1(eslint@10.9.1)
+      '@types/node':
+        specifier: ^24.13.3
+        version: 24.13.3
       eslint:
         specifier: ^10.9.1
         version: 10.9.1

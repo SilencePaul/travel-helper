@@ -1,0 +1,248 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://travel.local/schemas/codex-travel-output.schema.json",
+  "title": "Codex travel research output",
+  "oneOf": [
+    { "$ref": "#/$defs/completed" },
+    { "$ref": "#/$defs/needsOwnerAction" }
+  ],
+  "$defs": {
+    "completed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "category", "candidates"],
+      "properties": {
+        "status": { "const": "completed" },
+        "category": { "enum": ["hotel", "restaurant", "attraction"] },
+        "candidates": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/candidate" }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "category": { "const": "hotel" } } },
+          "then": { "properties": { "candidates": { "items": { "$ref": "#/$defs/hotelCandidate" } } } }
+        },
+        {
+          "if": { "properties": { "category": { "const": "restaurant" } } },
+          "then": { "properties": { "candidates": { "items": { "$ref": "#/$defs/restaurantCandidate" } } } }
+        },
+        {
+          "if": { "properties": { "category": { "const": "attraction" } } },
+          "then": { "properties": { "candidates": { "items": { "$ref": "#/$defs/attractionCandidate" } } } }
+        }
+      ]
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "entity", "applicability", "recommendation", "evidence"],
+      "properties": {
+        "category": { "enum": ["hotel", "restaurant", "attraction"] },
+        "entity": { "$ref": "#/$defs/entity" },
+        "applicability": { "$ref": "#/$defs/applicability" },
+        "recommendation": { "$ref": "#/$defs/recommendation" },
+        "evidence": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/evidence" }
+        }
+      }
+    },
+    "hotelCandidate": {
+      "allOf": [
+        { "$ref": "#/$defs/candidate" },
+        { "properties": { "category": { "const": "hotel" }, "evidence": { "items": { "$ref": "#/$defs/hotelEvidence" } } } }
+      ]
+    },
+    "restaurantCandidate": {
+      "allOf": [
+        { "$ref": "#/$defs/candidate" },
+        { "properties": { "category": { "const": "restaurant" }, "evidence": { "items": { "$ref": "#/$defs/restaurantEvidence" } } } }
+      ]
+    },
+    "attractionCandidate": {
+      "allOf": [
+        { "$ref": "#/$defs/candidate" },
+        { "properties": { "category": { "const": "attraction" }, "evidence": { "items": { "$ref": "#/$defs/attractionEvidence" } } } }
+      ]
+    },
+    "entity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "address"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S" },
+        "address": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "\\S" }
+      }
+    },
+    "applicability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dates", "travelers"],
+      "properties": {
+        "dates": { "$ref": "#/$defs/dateRange" },
+        "travelers": { "type": "integer", "minimum": 1, "maximum": 100 }
+      }
+    },
+    "recommendation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason", "preferenceRevisionAliases", "feedbackAliases"],
+      "properties": {
+        "reason": { "type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S" },
+        "preferenceRevisionAliases": { "$ref": "#/$defs/aliases" },
+        "feedbackAliases": { "$ref": "#/$defs/aliases" }
+      }
+    },
+    "aliases": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "\\S" }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceKind", "sourceName", "sourceUrl", "queryContext", "captureMethod", "facts"],
+      "properties": {
+        "sourceKind": { "enum": ["flyai", "amap", "web", "official", "manual"] },
+        "sourceName": { "type": "string", "minLength": 1, "maxLength": 300, "pattern": "\\S" },
+        "sourceUrl": {
+          "type": "string",
+          "format": "uri",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^https://(?![^/?#]*@)[^#]+$"
+        },
+        "queryContext": { "$ref": "#/$defs/queryContext" },
+        "captureMethod": { "enum": ["detail_page", "search_result", "api_result", "manual"] },
+        "facts": {
+          "oneOf": [
+            { "$ref": "#/$defs/hotelFacts" },
+            { "$ref": "#/$defs/restaurantFacts" },
+            { "$ref": "#/$defs/attractionFacts" }
+          ]
+        }
+      }
+    },
+    "hotelEvidence": {
+      "allOf": [
+        { "$ref": "#/$defs/evidence" },
+        { "properties": { "facts": { "$ref": "#/$defs/hotelFacts" } } }
+      ]
+    },
+    "restaurantEvidence": {
+      "allOf": [
+        { "$ref": "#/$defs/evidence" },
+        { "properties": { "facts": { "$ref": "#/$defs/restaurantFacts" } } }
+      ]
+    },
+    "attractionEvidence": {
+      "allOf": [
+        { "$ref": "#/$defs/evidence" },
+        { "properties": { "facts": { "$ref": "#/$defs/attractionFacts" } } }
+      ]
+    },
+    "queryContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dates": { "$ref": "#/$defs/dateRange" },
+        "travelers": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "roomOrTicket": { "type": "string", "minLength": 1, "maxLength": 300, "pattern": "\\S" }
+      }
+    },
+    "dateRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "type": "string", "format": "date", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "end": { "type": "string", "format": "date", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }
+      }
+    },
+    "hotelFacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["propertyName", "address", "checkInDate", "checkOutDate", "travelers", "roomTypeOrBed", "availability", "priceAmount", "currency", "priceDisplay", "cancellationPolicy"],
+      "properties": {
+        "propertyName": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S" },
+        "address": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "\\S" },
+        "checkInDate": { "type": "string", "format": "date", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "checkOutDate": { "type": "string", "format": "date", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "travelers": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "roomTypeOrBed": { "type": "string", "minLength": 1, "maxLength": 300, "pattern": "\\S" },
+        "availability": { "enum": ["available", "unavailable", "unknown"] },
+        "priceAmount": {
+          "oneOf": [
+            { "type": "number", "minimum": 0, "maximum": 1000000000 },
+            { "const": "not_provided" }
+          ]
+        },
+        "currency": { "type": "string", "minLength": 1, "maxLength": 32, "pattern": "\\S" },
+        "priceDisplay": { "enum": ["total", "per_night", "per_person", "not_provided"] },
+        "cancellationPolicy": { "type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S" }
+      }
+    },
+    "restaurantFacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "address", "openInformation", "priceSnapshot"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S" },
+        "address": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "\\S" },
+        "openInformation": { "type": "string", "minLength": 1, "maxLength": 1000, "pattern": "\\S" },
+        "priceSnapshot": { "type": "string", "minLength": 1, "maxLength": 1000, "pattern": "\\S" }
+      }
+    },
+    "attractionFacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "address", "openInformation", "priceSnapshot", "ticketType"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S" },
+        "address": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "\\S" },
+        "openInformation": { "type": "string", "minLength": 1, "maxLength": 1000, "pattern": "\\S" },
+        "priceSnapshot": { "type": "string", "minLength": 1, "maxLength": 1000, "pattern": "\\S" },
+        "ticketType": { "type": "string", "minLength": 1, "maxLength": 300, "pattern": "\\S" }
+      }
+    },
+    "needsOwnerAction": {
+      "oneOf": [
+        { "$ref": "#/$defs/codexAuthOwnerAction" },
+        { "$ref": "#/$defs/sourceOwnerAction" }
+      ]
+    },
+    "codexAuthOwnerAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reason", "message"],
+      "properties": {
+        "status": { "const": "needs_owner_action" },
+        "reason": { "const": "codex_auth_required" },
+        "message": { "const": "请在 ChatGPT/Codex 中恢复登录后返回此页面继续。" }
+      }
+    },
+    "sourceOwnerAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reason", "message", "sourceHostname"],
+      "properties": {
+        "status": { "const": "needs_owner_action" },
+        "reason": { "enum": ["source_login_required", "source_captcha", "source_risk_control"] },
+        "message": { "const": "请在来源网站中完成所需操作后返回此页面继续。" },
+        "sourceHostname": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253,
+          "pattern": "^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$"
+        }
+      }
+    }
+  }
+}

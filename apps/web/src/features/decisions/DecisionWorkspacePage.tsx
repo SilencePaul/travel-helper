@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import type { DecisionCommand, DecisionWorkspace, DecisionWorkspaceRepository, Member, PreferenceProfile, Trip } from "@travel/contracts";
 import type { LocalAgentBridge } from "../../infrastructure/localAgentBridgeClient";
+import { DecisionAgentMemberNotice } from "./DecisionAgentMemberNotice";
 import { DecisionAgentPanel } from "./DecisionAgentPanel";
 import { DecisionWorkspaceShowcase } from "./DecisionWorkspaceShowcase";
 import { toDecisionWorkspaceViewModel } from "./decisionWorkspaceAdapter";
@@ -71,6 +72,7 @@ export function DecisionWorkspacePage({ repository, trip, member, agentBridge, o
   const [message, setMessage] = useState<MessageState>({ text: "正在读取共同决定…", role: "status", source: "load" });
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [researchRefreshPending, setResearchRefreshPending] = useState(false);
   const workspaceRef = useRef<DecisionWorkspace | undefined>(undefined);
   const draftRef = useRef<PreferenceDraft | undefined>(undefined);
   const preferenceFormRef = useRef<HTMLFormElement>(null);
@@ -155,6 +157,7 @@ export function DecisionWorkspacePage({ repository, trip, member, agentBridge, o
     setDraft(undefined);
     setBusy(false);
     setRefreshing(false);
+    setResearchRefreshPending(false);
     setMessage({ text: "正在读取共同决定…", role: "status", source: "load" });
 
     void repository.load(trip.id).then((loaded) => {
@@ -228,6 +231,16 @@ export function DecisionWorkspacePage({ repository, trip, member, agentBridge, o
       }
     }
   }, [acceptWorkspace, isCurrentScope, repository, scopeGeneration, trip.id]);
+
+  const queueResearchRefresh = useCallback(() => {
+    setResearchRefreshPending(true);
+  }, []);
+
+  useEffect(() => {
+    if (!researchRefreshPending || busy || refreshing || operationRef.current) return;
+    setResearchRefreshPending(false);
+    void retryRefresh();
+  }, [busy, refreshing, researchRefreshPending, retryRefresh]);
 
   const runCommand = useCallback(async (command: DecisionCommand, trigger?: HTMLElement) => {
     const generation = scopeGeneration;
@@ -366,7 +379,16 @@ export function DecisionWorkspacePage({ repository, trip, member, agentBridge, o
       <span>{member.displayName} · 共同决定</span>
     </nav>
 
-    <DecisionAgentPanel repository={repository} bridge={agentBridge} tripId={trip.id} newIdempotencyKey={newIdempotencyKey} />
+    {member.role === "admin"
+      ? <DecisionAgentPanel
+          repository={repository}
+          bridge={agentBridge}
+          trip={trip}
+          workspace={workspace}
+          onResearchCompleted={queueResearchRefresh}
+          newIdempotencyKey={newIdempotencyKey}
+        />
+      : <DecisionAgentMemberNotice />}
 
     <form ref={preferenceFormRef} className="decision-preference-form" aria-busy={interactionBusy} onSubmit={savePreference}>
       <div><p>MY PREFERENCE PASS</p><h2>我的五分钟偏好</h2></div>

@@ -44,9 +44,34 @@ function verifySignedValue(publicKeyJwk, value, signature) {
   }
 }
 
+function utcDateTimeMilliseconds(value) {
+  const match = typeof value === "string"
+    ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/.exec(value)
+    : undefined;
+  if (!match) return Number.NaN;
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return Number.NaN;
+  const parsed = new Date(time);
+  return parsed.getUTCFullYear() === Number(match[1])
+    && parsed.getUTCMonth() + 1 === Number(match[2])
+    && parsed.getUTCDate() === Number(match[3])
+    && parsed.getUTCHours() === Number(match[4])
+    && parsed.getUTCMinutes() === Number(match[5])
+    && parsed.getUTCSeconds() === Number(match[6])
+    ? time
+    : Number.NaN;
+}
+
 function createDecisionAgentBridge({ now = () => new Date() } = {}) {
-  function assertUsableRun(run) {
-    if (!run || new Date(run.expiresAt).getTime() <= now().getTime()) throw codedError("AGENT_RUN_EXPIRED");
+  function assertUsableRun(run, { allowElapsed = false } = {}) {
+    const expiresAt = utcDateTimeMilliseconds(run?.expiresAt);
+    const current = now();
+    const currentTime = current instanceof Date ? current.getTime() : Number.NaN;
+    if (!Number.isFinite(expiresAt)
+      || !Number.isFinite(currentTime)
+      || (!allowElapsed && expiresAt <= currentTime)) {
+      throw codedError("AGENT_RUN_EXPIRED");
+    }
   }
 
   return {
@@ -57,7 +82,11 @@ function createDecisionAgentBridge({ now = () => new Date() } = {}) {
       if (!run || !verifySignedValue(run.publicKeyJwk, signed, input.signature)) throw codedError("INVALID_AGENT_CLAIM");
       const claimRequestFingerprint = sha256Base64Url(canonicalJson(signed));
       if (run?.claimRequestFingerprint) {
-        if (sameSecret(run.claimRequestFingerprint, claimRequestFingerprint) && run.claimResult) return run.claimResult;
+        if (sameSecret(run.claimRequestFingerprint, claimRequestFingerprint) && run.claimResult) {
+          if (beforeCommit) await beforeCommit(run);
+          assertUsableRun(run, { allowElapsed: true });
+          return run.claimResult;
+        }
         throw codedError("INVALID_AGENT_CLAIM");
       }
       assertUsableRun(run);
@@ -75,12 +104,17 @@ function createDecisionAgentBridge({ now = () => new Date() } = {}) {
         claimedAt,
         revision: run.revision + 1,
       };
-      const claimResult = { agentRunId: run.id, claimedAt, nextSequence: run.lastSequence + 1 };
+      const claimResult = {
+        agentRunId: run.id,
+        claimedAt,
+        expiresAt: run.expiresAt,
+        nextSequence: run.lastSequence + 1,
+      };
       await runs.doc(run.id).set({ ...claimed, claimRequestFingerprint, claimResult });
       return claimResult;
     },
 
-    async run(transaction, input, operation) {
+    async run(transaction, input, operation, authorize) {
       const runs = transaction.collection("trip_agent_runs");
       const run = one(await runs.doc(input.agentRunId).get());
       const signed = {
@@ -92,6 +126,8 @@ function createDecisionAgentBridge({ now = () => new Date() } = {}) {
       };
       if (!run) throw codedError("INVALID_AGENT_CLAIM");
       if (!verifySignedValue(run.publicKeyJwk, signed, input.signature)) throw codedError("INVALID_AGENT_CLAIM");
+      const isControlAction = input.action === "revokeAgentRunSelf";
+      const authorization = !isControlAction && authorize ? await authorize(run) : undefined;
 
       const idempotency = transaction.collection("trip_agent_idempotency");
       const id = `${input.agentRunId}:${input.action}:${input.idempotencyKey}`;
@@ -99,19 +135,26 @@ function createDecisionAgentBridge({ now = () => new Date() } = {}) {
       const prior = one(await idempotency.doc(id).get());
       if (prior) {
         if (prior.sequence !== input.sequence || prior.request !== request) throw codedError("IDEMPOTENCY_KEY_REUSED");
+        assertUsableRun(run, { allowElapsed: true });
         return { result: prior.result, replayed: true };
       }
       assertUsableRun(run);
       if (run.status !== "claimed") throw codedError("INVALID_AGENT_CLAIM");
-      if (input.action !== "getDecisionContext" && !run.scope.includes(input.action)) throw codedError("AGENT_SCOPE_FORBIDDEN");
+      if (!isControlAction && input.action !== "getDecisionContext" && !run.scope.includes(input.action)) {
+        throw codedError("AGENT_SCOPE_FORBIDDEN");
+      }
       if (input.sequence !== run.lastSequence + 1) throw codedError("INVALID_AGENT_CLAIM");
 
-      const result = await operation(run);
+      const usedAt = now().toISOString();
+      const result = isControlAction
+        ? { agentRunId: run.id, revokedAt: usedAt }
+        : await operation(run, authorization);
       await runs.doc(run.id).set({
         ...run,
+        ...(isControlAction ? { status: "revoked", revokedAt: usedAt } : {}),
         lastSequence: input.sequence,
         revision: run.revision + 1,
-        lastUsedAt: now().toISOString(),
+        lastUsedAt: usedAt,
       });
       await idempotency.doc(id).set({
         agentRunId: run.id,
@@ -119,7 +162,7 @@ function createDecisionAgentBridge({ now = () => new Date() } = {}) {
         sequence: input.sequence,
         request,
         result,
-        createdAt: now().toISOString(),
+        createdAt: usedAt,
       });
       return { result, replayed: false };
     },

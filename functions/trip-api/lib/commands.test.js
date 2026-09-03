@@ -35,6 +35,24 @@ function candidate(overrides = {}) {
   };
 }
 
+function restaurantProposal(name, sourceUrls = ["https://flyai.example/restaurants", "https://guide.example/restaurants"]) {
+  return {
+    category: "restaurant",
+    entity: { name, address: "香港" },
+    applicability: { dates: { start: "2026-10-01", end: "2026-10-01" }, travelers: 2 },
+    recommendation: { round: 1, reason: "符合共同偏好", preferenceRevisionIds: [], feedbackIds: [] },
+    evidence: sourceUrls.map((sourceUrl, index) => ({
+      sourceKind: index === 0 ? "flyai" : "web",
+      sourceName: index === 0 ? "FlyAI" : "公开旅行指南",
+      sourceUrl,
+      capturedAt: "2026-08-28T07:00:00.000Z",
+      queryContext: { dates: { start: "2026-10-01", end: "2026-10-01" }, travelers: 2 },
+      captureMethod: index === 0 ? "api_result" : "search_result",
+      facts: { name, address: "香港", openInformation: "晚餐营业", priceSnapshot: "约 HK$200/人" },
+    })),
+  };
+}
+
 function placement(overrides = {}) {
   return {
     id: "trip-2026-autumn:candidate-1",
@@ -739,24 +757,77 @@ test("decision idempotency keys are scoped by actor and action", async () => {
   assert.equal(db.data.trip_preferences.size, 2);
 });
 
-test("a trip member creates and revokes a scoped expiring agent run", async () => {
+test("ordinary members cannot create, inspect, or revoke AgentRuns", async () => {
   const db = createDb({
     members: [member("fs_member", "member")],
     trips: [{ ...trip(), memberUids: ["fs_member"] }],
+  });
+  db.data.trip_agent_runs.set("agent-run-1", {
+    id: "agent-run-1",
+    tripId: "trip-2026-autumn",
+    creatorUid: "fs_member",
+    publicKeyJwk: { kty: "EC", crv: "P-256", x: "x-coordinate", y: "y-coordinate" },
+    scope: ["submitProposalBatch"],
+    status: "pending_claim",
+    lastSequence: 0,
+    revision: 1,
+    createdAt: "2026-08-28T07:00:00.000Z",
+    expiresAt: "2026-08-28T07:15:00.000Z",
+  });
+  const commands = createTripCommands({
+    db,
+    now: () => new Date("2026-08-28T07:00:00.000Z"),
+  });
+
+  await assert.rejects(() => commands.execute({
+    action: "createAgentRun",
+    tripId: "trip-2026-autumn",
+    publicKeyJwk: { kty: "EC", crv: "P-256", x: "x-coordinate", y: "y-coordinate" },
+    pairingCodeHash: "2g8DdGhJvqg00hyxT13Po40J6lVT92CRPLHZfoW3szI",
+    scope: ["submitProposalBatch"],
+    idempotencyKey: "create-agent-run-001",
+  }, "fs_member"), { code: "ADMIN_REQUIRED" });
+  await assert.rejects(() => commands.execute({
+    action: "getAgentRunStatus",
+    tripId: "trip-2026-autumn",
+    agentRunId: "agent-run-1",
+  }, "fs_member"), { code: "ADMIN_REQUIRED" });
+  await assert.rejects(() => commands.execute({
+    action: "revokeAgentRun",
+    tripId: "trip-2026-autumn",
+    agentRunId: "agent-run-1",
+    expectedRevision: 1,
+    idempotencyKey: "revoke-agent-run-001",
+  }, "fs_member"), { code: "ADMIN_REQUIRED" });
+  assert.equal(db.data.trip_agent_runs.get("agent-run-1").status, "pending_claim");
+});
+
+test("an administrator creates, inspects, and revokes only the fixed proposal scope", async () => {
+  const db = createDb({
+    members: [member("fs_admin", "admin")],
+    trips: [{ ...trip(), memberUids: ["fs_admin"] }],
   });
   const commands = createTripCommands({
     db,
     now: () => new Date("2026-08-28T07:00:00.000Z"),
     randomId: () => "agent-run-1",
   });
-  const created = await commands.execute({
+  await assert.rejects(() => commands.execute({
     action: "createAgentRun",
     tripId: "trip-2026-autumn",
     publicKeyJwk: { kty: "EC", crv: "P-256", x: "x-coordinate", y: "y-coordinate" },
     pairingCodeHash: "2g8DdGhJvqg00hyxT13Po40J6lVT92CRPLHZfoW3szI",
     scope: ["submitProposalBatch", "appendEvidenceSnapshot"],
+    idempotencyKey: "create-agent-run-wide",
+  }, "fs_admin"), { code: "INVALID_REQUEST" });
+  const created = await commands.execute({
+    action: "createAgentRun",
+    tripId: "trip-2026-autumn",
+    publicKeyJwk: { kty: "EC", crv: "P-256", x: "x-coordinate", y: "y-coordinate" },
+    pairingCodeHash: "2g8DdGhJvqg00hyxT13Po40J6lVT92CRPLHZfoW3szI",
+    scope: ["submitProposalBatch"],
     idempotencyKey: "create-agent-run-001",
-  }, "fs_member");
+  }, "fs_admin");
 
   assert.deepEqual(created, { agentRunId: "agent-run-1", expiresAt: "2026-08-28T07:15:00.000Z" });
   assert.equal(db.data.trip_agent_runs.get("agent-run-1").status, "pending_claim");
@@ -765,12 +836,12 @@ test("a trip member creates and revokes a scoped expiring agent run", async () =
     action: "getAgentRunStatus",
     tripId: "trip-2026-autumn",
     agentRunId: "agent-run-1",
-  }, "fs_member");
+  }, "fs_admin");
   assert.deepEqual(pendingStatus, {
     agentRunId: "agent-run-1",
     tripId: "trip-2026-autumn",
     status: "pending_claim",
-    scope: ["submitProposalBatch", "appendEvidenceSnapshot"],
+    scope: ["submitProposalBatch"],
     revision: 1,
     nextSequence: 1,
     createdAt: "2026-08-28T07:00:00.000Z",
@@ -786,20 +857,59 @@ test("a trip member creates and revokes a scoped expiring agent run", async () =
     agentRunId: "agent-run-1",
     expectedRevision: 1,
     idempotencyKey: "revoke-agent-run-001",
-  }, "fs_member");
+  }, "fs_admin");
   assert.deepEqual(revoked, { agentRunId: "agent-run-1", revokedAt: "2026-08-28T07:00:00.000Z" });
   assert.equal(db.data.trip_agent_runs.get("agent-run-1").status, "revoked");
   assert.equal(db.data.trip_agent_runs.get("agent-run-1").revision, 2);
-  assert.equal((await commands.execute({ action: "getAgentRunStatus", tripId: "trip-2026-autumn", agentRunId: "agent-run-1" }, "fs_member")).status, "revoked");
+  assert.equal((await commands.execute({ action: "getAgentRunStatus", tripId: "trip-2026-autumn", agentRunId: "agent-run-1" }, "fs_admin")).status, "revoked");
   assert.deepEqual(db.data.decisionAudits.map(({ command }) => command), ["createAgentRun", "revokeAgentRun"]);
   assert.equal(JSON.stringify(db.data.decisionAudits).includes("pairingCodeHash"), false);
   assert.equal(JSON.stringify(db.data.decisionAudits).includes("publicKeyJwk"), false);
 });
 
-test("a member cannot query a different trip's AgentRun through their own trip", async () => {
-  const tripA = { ...trip(), id: "trip-a", memberUids: ["fs_member"] };
+test("AgentRun status rejects corrupt expirations and reports a valid elapsed run as expired", async () => {
+  for (const [label, expiresAt, clock, expected] of [
+    ["missing", undefined, new Date("2026-08-28T07:05:00.000Z"), "AGENT_RUN_EXPIRED"],
+    ["invalid", "not-a-date", new Date("2026-08-28T07:05:00.000Z"), "AGENT_RUN_EXPIRED"],
+    ["non-datetime", "2099-08-28", new Date("2026-08-28T07:05:00.000Z"), "AGENT_RUN_EXPIRED"],
+    ["invalid clock", "2026-08-28T07:15:00.000Z", new Date("not-a-date"), "AGENT_RUN_EXPIRED"],
+    ["elapsed", "2026-08-28T07:05:00.000Z", new Date("2026-08-28T07:05:00.000Z"), "expired"],
+  ]) {
+    const db = createDb({
+      members: [member("fs_admin", "admin")],
+      trips: [{ ...trip(), memberUids: ["fs_admin"] }],
+    });
+    db.data.trip_agent_runs.set("agent-run-1", {
+      id: "agent-run-1",
+      tripId: "trip-2026-autumn",
+      creatorUid: "fs_admin",
+      publicKeyJwk: { kty: "EC", crv: "P-256", x: "x", y: "y" },
+      scope: ["submitProposalBatch"],
+      status: "claimed",
+      lastSequence: 0,
+      revision: 2,
+      createdAt: "2026-08-28T07:00:00.000Z",
+      expiresAt,
+    });
+    const commands = createTripCommands({ db, now: () => clock });
+    const status = () => commands.execute({
+      action: "getAgentRunStatus",
+      tripId: "trip-2026-autumn",
+      agentRunId: "agent-run-1",
+    }, "fs_admin");
+
+    if (expected === "expired") {
+      assert.equal((await status()).status, "expired", label);
+    } else {
+      await assert.rejects(status, { code: expected }, label);
+    }
+  }
+});
+
+test("an administrator cannot query a different trip's AgentRun through their own trip", async () => {
+  const tripA = { ...trip(), id: "trip-a", memberUids: ["fs_admin"] };
   const tripB = { ...trip(), id: "trip-b", memberUids: ["fs_other"] };
-  const db = createDb({ members: [member("fs_member", "member"), member("fs_other", "member")], trips: [tripA, tripB] });
+  const db = createDb({ members: [member("fs_admin", "admin"), member("fs_other", "admin")], trips: [tripA, tripB] });
   db.data.trip_agent_runs.set("agent-run-b", {
     id: "agent-run-b",
     tripId: "trip-b",
@@ -815,20 +925,20 @@ test("a member cannot query a different trip's AgentRun through their own trip",
   const commands = createTripCommands({ db });
 
   await assert.rejects(
-    () => commands.execute({ action: "getAgentRunStatus", tripId: "trip-a", agentRunId: "agent-run-b" }, "fs_member"),
+    () => commands.execute({ action: "getAgentRunStatus", tripId: "trip-a", agentRunId: "agent-run-b" }, "fs_admin"),
     { code: "FORBIDDEN" },
   );
 });
 
 test("agent run revoke conflicts include only the latest safe projection", async () => {
   const db = createDb({
-    members: [member("fs_member", "member")],
-    trips: [{ ...trip(), memberUids: ["fs_member"] }],
+    members: [member("fs_admin", "admin")],
+    trips: [{ ...trip(), memberUids: ["fs_admin"] }],
   });
   db.data.trip_agent_runs.set("agent-run-1", {
     id: "agent-run-1",
     tripId: "trip-2026-autumn",
-    creatorUid: "fs_member",
+    creatorUid: "fs_admin",
     publicKeyJwk: { kty: "EC", crv: "P-256", x: "x", y: "y" },
     pairingCodeHash: "secret-hash",
     scope: ["submitProposalBatch"],
@@ -841,7 +951,7 @@ test("agent run revoke conflicts include only the latest safe projection", async
   const commands = createTripCommands({ db, now: () => new Date("2026-08-28T07:05:00.000Z") });
 
   await assert.rejects(
-    () => commands.execute({ action: "revokeAgentRun", tripId: "trip-2026-autumn", agentRunId: "agent-run-1", expectedRevision: 1, idempotencyKey: "revoke-conflict-001" }, "fs_member"),
+    () => commands.execute({ action: "revokeAgentRun", tripId: "trip-2026-autumn", agentRunId: "agent-run-1", expectedRevision: 1, idempotencyKey: "revoke-conflict-001" }, "fs_admin"),
     (error) => {
       assert.equal(error.code, "VERSION_CONFLICT");
       assert.equal(error.latest.revision, 2);
@@ -853,7 +963,7 @@ test("agent run revoke conflicts include only the latest safe projection", async
   );
 });
 
-test("an invalid claim signature is rejected before trip or member data is read", async () => {
+test("invalid Agent signatures are rejected before trip or member data is read", async () => {
   const { publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
   const db = createDb();
   db.data.trip_agent_runs.set("agent-run-invalid", {
@@ -884,14 +994,323 @@ test("an invalid claim signature is rejected before trip or member data is read"
     clientNonce: "nonce-001",
     signature: "invalid-signature",
   }), { code: "INVALID_AGENT_CLAIM" });
+  await assert.rejects(() => commands.executeAgent({
+    action: "getDecisionContext",
+    agentRunId: "agent-run-invalid",
+    sequence: 1,
+    idempotencyKey: "invalid-command-001",
+    payload: {},
+    signature: "invalid-signature",
+  }), { code: "INVALID_AGENT_CLAIM" });
+});
+
+test("claim rechecks that the AgentRun creator is still an administrator", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const db = createDb({
+    members: [member("fs_admin", "admin")],
+    trips: [{ ...trip(), memberUids: ["fs_admin"] }],
+  });
+  const commands = createTripCommands({
+    db,
+    now: () => new Date("2026-08-28T07:05:00.000Z"),
+    randomId: () => "agent-run-1",
+  });
+  await commands.execute({
+    action: "createAgentRun",
+    tripId: "trip-2026-autumn",
+    publicKeyJwk: publicKey.export({ format: "jwk" }),
+    pairingCodeHash: sha256Base64Url("pairing-code"),
+    scope: ["submitProposalBatch"],
+    idempotencyKey: "create-demotion-run-001",
+  }, "fs_admin");
+  db.data.members.get("fs_admin").role = "member";
+  const claim = { agentRunId: "agent-run-1", pairingCode: "pairing-code", clientNonce: "nonce-001" };
+
+  await assert.rejects(
+    () => commands.executeAgent({ action: "claimAgentRun", ...claim, signature: agentSignature(privateKey, claim) }),
+    { code: "ADMIN_REQUIRED" },
+  );
+  assert.equal(db.data.trip_agent_runs.get("agent-run-1").status, "pending_claim");
+  assert.equal(db.data.trip_agent_runs.get("agent-run-1").claimResult, undefined);
+});
+
+test("an exact claim replay is denied after the creator is demoted", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const db = createDb({
+    members: [member("fs_admin", "admin")],
+    trips: [{ ...trip(), memberUids: ["fs_admin"] }],
+  });
+  const commands = createTripCommands({
+    db,
+    now: () => new Date("2026-08-28T07:05:00.000Z"),
+    randomId: () => "agent-run-1",
+  });
+  await commands.execute({
+    action: "createAgentRun",
+    tripId: "trip-2026-autumn",
+    publicKeyJwk: publicKey.export({ format: "jwk" }),
+    pairingCodeHash: sha256Base64Url("pairing-code"),
+    scope: ["submitProposalBatch"],
+    idempotencyKey: "create-claim-replay",
+  }, "fs_admin");
+  const claim = { agentRunId: "agent-run-1", pairingCode: "pairing-code", clientNonce: "nonce-001" };
+  const envelope = { action: "claimAgentRun", ...claim, signature: agentSignature(privateKey, claim) };
+  await commands.executeAgent(envelope);
+  db.data.members.get("fs_admin").role = "member";
+
+  await assert.rejects(() => commands.executeAgent(envelope), { code: "ADMIN_REQUIRED" });
+});
+
+test("a demoted creator cannot read context or submit, but can self-revoke with replay protection", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const ids = ["agent-run-1", "candidate-1", "evidence-1", "evidence-2", "candidate-2", "evidence-3", "evidence-4"];
+  const db = createDb({
+    members: [member("fs_admin", "admin")],
+    trips: [{ ...trip(), memberUids: ["fs_admin"] }],
+  });
+  const commands = createTripCommands({
+    db,
+    now: () => new Date("2026-08-28T07:05:00.000Z"),
+    randomId: () => ids.shift(),
+  });
+  await commands.execute({
+    action: "createAgentRun",
+    tripId: "trip-2026-autumn",
+    publicKeyJwk: publicKey.export({ format: "jwk" }),
+    pairingCodeHash: sha256Base64Url("pairing-code"),
+    scope: ["submitProposalBatch"],
+    idempotencyKey: "create-active-run-001",
+  }, "fs_admin");
+  const claim = { agentRunId: "agent-run-1", pairingCode: "pairing-code", clientNonce: "nonce-001" };
+  await commands.executeAgent({
+    action: "claimAgentRun",
+    ...claim,
+    signature: agentSignature(privateKey, claim),
+  });
+  db.data.members.get("fs_admin").role = "member";
+
+  const context = {
+    agentRunId: "agent-run-1",
+    sequence: 1,
+    idempotencyKey: "demoted-context-001",
+    action: "getDecisionContext",
+    payload: {},
+  };
+  await assert.rejects(
+    () => commands.executeAgent({ ...context, signature: agentSignature(privateKey, context) }),
+    { code: "ADMIN_REQUIRED" },
+  );
+  const submit = {
+    agentRunId: "agent-run-1",
+    sequence: 1,
+    idempotencyKey: "demoted-submit-001",
+    action: "submitProposalBatch",
+    payload: { round: 1, candidates: [restaurantProposal("餐厅 A"), restaurantProposal("餐厅 B")] },
+  };
+  await assert.rejects(
+    () => commands.executeAgent({ ...submit, signature: agentSignature(privateKey, submit) }),
+    { code: "ADMIN_REQUIRED" },
+  );
+  assert.equal(db.data.trip_candidates.size, 0);
+  assert.equal(db.data.trip_evidence_snapshots.size, 0);
+
+  const revoke = {
+    agentRunId: "agent-run-1",
+    sequence: 1,
+    idempotencyKey: "self-revoke-001",
+    action: "revokeAgentRunSelf",
+    payload: {},
+  };
+  const first = await commands.executeAgent({ ...revoke, signature: agentSignature(privateKey, revoke) });
+  const replay = await commands.executeAgent({ ...revoke, signature: agentSignature(privateKey, revoke) });
+
+  assert.deepEqual(first, {
+    agentRunId: "agent-run-1",
+    revokedAt: "2026-08-28T07:05:00.000Z",
+    replayed: false,
+  });
+  assert.deepEqual(replay, { ...first, replayed: true });
+  assert.deepEqual(Object.keys(first).sort(), ["agentRunId", "replayed", "revokedAt"]);
+  assert.equal(db.data.trip_agent_runs.get("agent-run-1").status, "revoked");
+  assert.equal(db.data.trip_agent_runs.get("agent-run-1").lastSequence, 1);
+  assert.equal(db.data.trip_agent_runs.get("agent-run-1").revision, 3);
+});
+
+test("demotion blocks old context and submit replays while the self-revoke replay remains available", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const ids = ["agent-run-1", "candidate-1", "evidence-1", "evidence-2", "candidate-2", "evidence-3", "evidence-4"];
+  const db = createDb({
+    members: [member("fs_admin", "admin")],
+    trips: [{ ...trip(), memberUids: ["fs_admin"] }],
+  });
+  const commands = createTripCommands({
+    db,
+    now: () => new Date("2026-08-28T07:05:00.000Z"),
+    randomId: () => ids.shift(),
+  });
+  await commands.execute({
+    action: "createAgentRun",
+    tripId: "trip-2026-autumn",
+    publicKeyJwk: publicKey.export({ format: "jwk" }),
+    pairingCodeHash: sha256Base64Url("pairing-code"),
+    scope: ["submitProposalBatch"],
+    idempotencyKey: "create-replay-run-001",
+  }, "fs_admin");
+  const claim = { agentRunId: "agent-run-1", pairingCode: "pairing-code", clientNonce: "nonce-001" };
+  await commands.executeAgent({ action: "claimAgentRun", ...claim, signature: agentSignature(privateKey, claim) });
+  const context = {
+    agentRunId: "agent-run-1",
+    sequence: 1,
+    idempotencyKey: "context-before-demotion",
+    action: "getDecisionContext",
+    payload: {},
+  };
+  const submit = {
+    agentRunId: "agent-run-1",
+    sequence: 2,
+    idempotencyKey: "submit-before-demotion",
+    action: "submitProposalBatch",
+    payload: { round: 1, candidates: [restaurantProposal("餐厅 A"), restaurantProposal("餐厅 B")] },
+  };
+  await commands.executeAgent({ ...context, signature: agentSignature(privateKey, context) });
+  await commands.executeAgent({ ...submit, signature: agentSignature(privateKey, submit) });
+  db.data.members.get("fs_admin").role = "member";
+
+  await assert.rejects(
+    () => commands.executeAgent({ ...context, signature: agentSignature(privateKey, context) }),
+    { code: "ADMIN_REQUIRED" },
+  );
+  await assert.rejects(
+    () => commands.executeAgent({ ...submit, signature: agentSignature(privateKey, submit) }),
+    { code: "ADMIN_REQUIRED" },
+  );
+  assert.equal(db.data.trip_candidates.size, 2);
+  assert.equal(db.data.trip_evidence_snapshots.size, 4);
+
+  const revoke = {
+    agentRunId: "agent-run-1",
+    sequence: 3,
+    idempotencyKey: "self-revoke-after-demotion",
+    action: "revokeAgentRunSelf",
+    payload: {},
+  };
+  const first = await commands.executeAgent({ ...revoke, signature: agentSignature(privateKey, revoke) });
+  const replay = await commands.executeAgent({ ...revoke, signature: agentSignature(privateKey, revoke) });
+  assert.equal(first.replayed, false);
+  assert.deepEqual(replay, { ...first, replayed: true });
+});
+
+test("demotion blocks legacy scoped Agent actions on replay and fresh envelopes without writes", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const db = createDb({
+    members: [member("fs_admin", "admin"), member("fs_member", "member")],
+    trips: [{ ...trip(), memberUids: ["fs_admin", "fs_member"] }],
+    candidates: [candidate({
+      entity: { name: "海边酒店", address: "香港" },
+      applicability: { dates: { start: "2026-10-01", end: "2026-10-02" }, travelers: 2 },
+      recommendation: { round: 1, reason: "位置合适", preferenceRevisionIds: [], feedbackIds: [] },
+      verificationState: "candidate",
+      decisionState: "none",
+    })],
+  });
+  for (const uid of ["fs_admin", "fs_member"]) {
+    db.data.trip_preferences.set(`trip-2026-autumn:${uid}`, {
+      id: `trip-2026-autumn:${uid}`,
+      tripId: "trip-2026-autumn",
+      ownerUid: uid,
+      answers: { pace: "slow" },
+      status: "completed",
+      revision: 1,
+      updatedAt: "2026-08-28T07:00:00.000Z",
+      updatedBy: uid,
+    });
+  }
+  db.data.trip_agent_runs.set("legacy-run-1", {
+    id: "legacy-run-1",
+    tripId: "trip-2026-autumn",
+    creatorUid: "fs_admin",
+    publicKeyJwk: publicKey.export({ format: "jwk" }),
+    scope: ["appendEvidenceSnapshot", "reportVerificationBlocked", "generatePreferenceSummary"],
+    status: "claimed",
+    lastSequence: 0,
+    revision: 2,
+    expiresAt: "2026-08-28T08:00:00.000Z",
+  });
+  const commands = createTripCommands({
+    db,
+    now: () => new Date("2026-08-28T07:10:00.000Z"),
+    randomId: () => "legacy-evidence-1",
+  });
+  const append = {
+    agentRunId: "legacy-run-1",
+    sequence: 1,
+    idempotencyKey: "legacy-append-001",
+    action: "appendEvidenceSnapshot",
+    payload: {
+      candidateId: "candidate-1",
+      expectedCandidateRevision: 2,
+      evidence: {
+        sourceKind: "manual",
+        sourceName: "管理员手工证据",
+        capturedAt: "2026-08-28T07:00:00.000Z",
+        queryContext: {},
+        captureMethod: "manual",
+        facts: { name: "海边酒店", address: "香港", openInformation: "not_provided", priceSnapshot: "not_provided" },
+      },
+    },
+  };
+  const report = {
+    agentRunId: "legacy-run-1",
+    sequence: 2,
+    idempotencyKey: "legacy-report-001",
+    action: "reportVerificationBlocked",
+    payload: { candidateId: "candidate-1", expectedCandidateRevision: 3, reason: "captcha" },
+  };
+  const summary = {
+    agentRunId: "legacy-run-1",
+    sequence: 3,
+    idempotencyKey: "legacy-summary-001",
+    action: "generatePreferenceSummary",
+    payload: { sourcePreferenceRevisions: { fs_admin: 1, fs_member: 1 } },
+  };
+  for (const envelope of [append, report, summary]) {
+    await commands.executeAgent({ ...envelope, signature: agentSignature(privateKey, envelope) });
+  }
+  const beforeDemotion = {
+    candidate: structuredClone(db.data.trip_candidates.get("candidate-1")),
+    evidenceCount: db.data.trip_evidence_snapshots.size,
+    summary: structuredClone(db.data.trip_preference_summaries.get("trip-2026-autumn")),
+    eventCount: db.data.trip_decision_events.size,
+    auditCount: db.data.decisionAudits.length,
+    run: structuredClone(db.data.trip_agent_runs.get("legacy-run-1")),
+  };
+  db.data.members.get("fs_admin").role = "member";
+
+  for (const envelope of [append, report, summary]) {
+    await assert.rejects(
+      () => commands.executeAgent({ ...envelope, signature: agentSignature(privateKey, envelope) }),
+      { code: "ADMIN_REQUIRED" },
+    );
+    const fresh = { ...envelope, sequence: 4, idempotencyKey: `${envelope.action}-fresh` };
+    await assert.rejects(
+      () => commands.executeAgent({ ...fresh, signature: agentSignature(privateKey, fresh) }),
+      { code: "ADMIN_REQUIRED" },
+    );
+  }
+  assert.deepEqual(db.data.trip_candidates.get("candidate-1"), beforeDemotion.candidate);
+  assert.equal(db.data.trip_evidence_snapshots.size, beforeDemotion.evidenceCount);
+  assert.deepEqual(db.data.trip_preference_summaries.get("trip-2026-autumn"), beforeDemotion.summary);
+  assert.equal(db.data.trip_decision_events.size, beforeDemotion.eventCount);
+  assert.equal(db.data.decisionAudits.length, beforeDemotion.auditCount);
+  assert.deepEqual(db.data.trip_agent_runs.get("legacy-run-1"), beforeDemotion.run);
 });
 
 test("a claimed scoped agent submits an atomic two-candidate proposal batch", async () => {
   const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
-  const ids = ["agent-run-1", "candidate-1", "evidence-1", "candidate-2", "evidence-2"];
+  const ids = ["agent-run-1", "candidate-1", "evidence-1", "evidence-2", "candidate-2", "evidence-3", "evidence-4"];
   const db = createDb({
-    members: [member("fs_member", "member")],
-    trips: [{ ...trip(), memberUids: ["fs_member"] }],
+    members: [member("fs_admin", "admin")],
+    trips: [{ ...trip(), memberUids: ["fs_admin"] }],
   });
   const commands = createTripCommands({
     db,
@@ -905,30 +1324,16 @@ test("a claimed scoped agent submits an atomic two-candidate proposal batch", as
     pairingCodeHash: sha256Base64Url("pairing-code"),
     scope: ["submitProposalBatch"],
     idempotencyKey: "create-proposal-run-001",
-  }, "fs_member");
+  }, "fs_admin");
   const claim = { action: "claimAgentRun", agentRunId: "agent-run-1", pairingCode: "pairing-code", clientNonce: "nonce-001" };
   await commands.executeAgent({ ...claim, signature: agentSignature(privateKey, { agentRunId: claim.agentRunId, pairingCode: claim.pairingCode, clientNonce: claim.clientNonce }) });
 
-  const proposal = (name) => ({
-    category: "restaurant",
-    entity: { name, address: "香港" },
-    applicability: { dates: { start: "2026-10-01", end: "2026-10-01" }, travelers: 2 },
-    recommendation: { round: 1, reason: "符合共同偏好", preferenceRevisionIds: [], feedbackIds: [] },
-    evidence: [{
-      sourceKind: "flyai",
-      sourceName: "FlyAI",
-      capturedAt: "2026-08-28T07:00:00.000Z",
-      queryContext: { dates: { start: "2026-10-01", end: "2026-10-01" }, travelers: 2 },
-      captureMethod: "api_result",
-      facts: { name, address: "香港", openInformation: "晚餐营业", priceSnapshot: "约 HK$200/人" },
-    }],
-  });
   const signed = {
     agentRunId: "agent-run-1",
     sequence: 1,
     idempotencyKey: "proposal-batch-001",
     action: "submitProposalBatch",
-    payload: { round: 1, candidates: [proposal("餐厅 A"), proposal("餐厅 B")] },
+    payload: { round: 1, candidates: [restaurantProposal("餐厅 A"), restaurantProposal("餐厅 B")] },
   };
   const result = await commands.executeAgent({ ...signed, signature: agentSignature(privateKey, signed) });
   const eventCountAfterFirstSubmit = db.data.trip_decision_events.size;
@@ -942,13 +1347,13 @@ test("a claimed scoped agent submits an atomic two-candidate proposal batch", as
   assert.equal(result.candidates[0].verificationState, "candidate");
   assert.equal(result.candidates[0].decisionState, "none");
   assert.equal(db.data.trip_candidates.size, 2);
-  assert.equal(db.data.trip_evidence_snapshots.size, 2);
+  assert.equal(db.data.trip_evidence_snapshots.size, 4);
   assert.equal(db.data.trip_decision_events.size, eventCountAfterFirstSubmit);
   assert.equal(db.data.decisionAudits.length, auditCountAfterFirstSubmit);
   assert.equal(db.data.trip_agent_runs.get("agent-run-1").lastSequence, 1);
-  const workspace = await commands.execute({ action: "getDecisionWorkspace", tripId: "trip-2026-autumn" }, "fs_member");
+  const workspace = await commands.execute({ action: "getDecisionWorkspace", tripId: "trip-2026-autumn" }, "fs_admin");
   assert.equal(workspace.candidates.length, 2);
-  assert.equal(workspace.evidence.length, 2);
+  assert.equal(workspace.evidence.length, 4);
 
   const contextCommand = {
     agentRunId: "agent-run-1",
@@ -958,8 +1363,14 @@ test("a claimed scoped agent submits an atomic two-candidate proposal batch", as
     payload: {},
   };
   const context = await commands.executeAgent({ ...contextCommand, signature: agentSignature(privateKey, contextCommand) });
-  assert.equal(context.context.tripId, "trip-2026-autumn");
-  assert.equal(context.context.candidates.length, 2);
+  assert.equal(context.context.workspace.tripId, "trip-2026-autumn");
+  assert.equal(context.context.workspace.candidates.length, 2);
+  assert.deepEqual(context.context.trip, {
+    version: 0,
+    days: [{ id: "day-1", date: "2026-10-01", city: "香港" }],
+    travelerNames: ["一鸣"],
+    travelerCount: 1,
+  });
   assert.equal(JSON.stringify(context.context).includes("publicKeyJwk"), false);
   assert.equal(JSON.stringify(context.context).includes("pairingCodeHash"), false);
 
@@ -967,14 +1378,14 @@ test("a claimed scoped agent submits an atomic two-candidate proposal batch", as
     action: "getAgentRunStatus",
     tripId: "trip-2026-autumn",
     agentRunId: "agent-run-1",
-  }, "fs_member");
+  }, "fs_admin");
   await commands.execute({
     action: "revokeAgentRun",
     tripId: "trip-2026-autumn",
     agentRunId: "agent-run-1",
     expectedRevision: activeStatus.revision,
     idempotencyKey: "revoke-active-agent-001",
-  }, "fs_member");
+  }, "fs_admin");
   const afterRevoke = {
     agentRunId: "agent-run-1",
     sequence: 3,
@@ -988,10 +1399,224 @@ test("a claimed scoped agent submits an atomic two-candidate proposal batch", as
   );
 });
 
+test("Agent decision context returns a whitelist Trip projection using traveler names from the Trip", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const safeTripSource = {
+    ...trip(7),
+    travelers: [
+      { id: "traveler-secret-a", name: "一鸣" },
+      { id: "traveler-secret-b", name: "美垚" },
+    ],
+    days: [{
+      id: "day-1",
+      date: "2026-10-01",
+      city: "香港",
+      itemIds: ["item-secret"],
+      hotelId: "hotel-secret",
+    }],
+    orders: [{
+      id: "order-secret",
+      name: "私密订单",
+      category: "hotel",
+      estimated: 100,
+      paid: 0,
+      currency: "CNY",
+      status: "unpaid",
+    }],
+    memberUids: ["fs_admin", "fs_partner"],
+    pairingSecret: "must-not-leak",
+  };
+  const db = createDb({
+    members: [member("fs_admin", "admin", "不应用此名"), member("fs_partner", "member", "也不应用此名")],
+    trips: [safeTripSource],
+  });
+  db.data.trip_agent_runs.set("agent-run-1", {
+    id: "agent-run-1",
+    tripId: "trip-2026-autumn",
+    creatorUid: "fs_admin",
+    publicKeyJwk: publicKey.export({ format: "jwk" }),
+    scope: ["submitProposalBatch"],
+    status: "claimed",
+    lastSequence: 0,
+    revision: 2,
+    expiresAt: "2026-08-28T08:00:00.000Z",
+  });
+  const originalRunTransaction = db.runTransaction.bind(db);
+  db.runTransaction = (callback) => originalRunTransaction((transaction) => callback({
+    collection(name) {
+      const original = transaction.collection(name);
+      if (name !== "members") return original;
+      return {
+        ...original,
+        doc(id) {
+          if (id === "fs_partner") throw new Error("TRAVELER_MEMBER_RECORD_READ");
+          return original.doc(id);
+        },
+      };
+    },
+  }));
+  const commands = createTripCommands({ db, now: () => new Date("2026-08-28T07:05:00.000Z") });
+  const signed = {
+    agentRunId: "agent-run-1",
+    sequence: 1,
+    idempotencyKey: "safe-context-001",
+    action: "getDecisionContext",
+    payload: {},
+  };
+
+  const result = await commands.executeAgent({ ...signed, signature: agentSignature(privateKey, signed) });
+
+  assert.deepEqual(result.context.trip, {
+    version: 7,
+    days: [{ id: "day-1", date: "2026-10-01", city: "香港" }],
+    travelerNames: ["一鸣", "美垚"],
+    travelerCount: 2,
+  });
+  const serializedTrip = JSON.stringify(result.context.trip);
+  for (const secret of ["fs_admin", "fs_partner", "traveler-secret", "item-secret", "hotel-secret", "order-secret", "pairingSecret"]) {
+    assert.equal(serializedTrip.includes(secret), false);
+  }
+  assert.equal(result.context.workspace.tripId, "trip-2026-autumn");
+});
+
+test("Agent decision context fails closed when a stored Trip has no travelers", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const db = createDb({
+    members: [member("fs_admin", "admin")],
+    trips: [{ ...trip(), travelers: [], memberUids: ["fs_admin"] }],
+  });
+  db.data.trip_agent_runs.set("agent-run-1", {
+    id: "agent-run-1",
+    tripId: "trip-2026-autumn",
+    creatorUid: "fs_admin",
+    publicKeyJwk: publicKey.export({ format: "jwk" }),
+    scope: ["submitProposalBatch"],
+    status: "claimed",
+    lastSequence: 0,
+    revision: 2,
+    expiresAt: "2026-08-28T08:00:00.000Z",
+  });
+  const commands = createTripCommands({ db, now: () => new Date("2026-08-28T07:05:00.000Z") });
+  const signed = {
+    agentRunId: "agent-run-1",
+    sequence: 1,
+    idempotencyKey: "empty-travelers-001",
+    action: "getDecisionContext",
+    payload: {},
+  };
+
+  await assert.rejects(
+    () => commands.executeAgent({ ...signed, signature: agentSignature(privateKey, signed) }),
+    { code: "INVALID_REQUEST" },
+  );
+  assert.equal(db.data.trip_agent_idempotency.size, 0);
+  assert.equal(db.data.trip_agent_runs.get("agent-run-1").lastSequence, 0);
+});
+
+test("proposal batches reject duplicate normalized HTTPS origins before writing anything", async () => {
+  const variants = [
+    ["https://source.example/a", "https://source.example/b?different=1"],
+    ["https://SOURCE.example/a", "https://source.example/b"],
+    ["https://source.example:443/a", "https://source.example/b"],
+    ["https://source.example./a", "https://source.example/b"],
+    ["https://SOURCE.EXAMPLE.:443/a", "https://source.example/b"],
+    ["https://[2001:db8::1]:443/a", "https://[2001:db8::1]/b?different=1"],
+  ];
+
+  for (const [firstUrl, secondUrl] of variants) {
+    const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+    const db = createDb({
+      members: [member("fs_admin", "admin")],
+      trips: [{ ...trip(), memberUids: ["fs_admin"] }],
+    });
+    db.data.trip_agent_runs.set("agent-run-1", {
+      id: "agent-run-1",
+      tripId: "trip-2026-autumn",
+      creatorUid: "fs_admin",
+      publicKeyJwk: publicKey.export({ format: "jwk" }),
+      scope: ["submitProposalBatch"],
+      status: "claimed",
+      lastSequence: 0,
+      revision: 2,
+      expiresAt: "2026-08-28T08:00:00.000Z",
+    });
+    const commands = createTripCommands({ db, now: () => new Date("2026-08-28T07:05:00.000Z") });
+    const duplicateOrigin = restaurantProposal("餐厅 A", [firstUrl, secondUrl]);
+    const signed = {
+      agentRunId: "agent-run-1",
+      sequence: 1,
+      idempotencyKey: "duplicate-origin-001",
+      action: "submitProposalBatch",
+      payload: { round: 1, candidates: [duplicateOrigin, restaurantProposal("餐厅 B")] },
+    };
+
+    await assert.rejects(
+      () => commands.executeAgent({ ...signed, signature: agentSignature(privateKey, signed) }),
+      { code: "INVALID_REQUEST" },
+    );
+    assert.equal(db.data.trip_candidates.size, 0);
+    assert.equal(db.data.trip_evidence_snapshots.size, 0);
+    assert.equal(db.data.trip_decision_events.size, 0);
+    assert.equal(db.data.trip_agent_idempotency.size, 0);
+    assert.equal(db.data.trip_agent_runs.get("agent-run-1").lastSequence, 0);
+  }
+});
+
+test("proposal-only schemas require deep-strict HTTPS evidence", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const db = createDb({
+    members: [member("fs_admin", "admin")],
+    trips: [{ ...trip(), memberUids: ["fs_admin"] }],
+  });
+  db.data.trip_agent_runs.set("agent-run-1", {
+    id: "agent-run-1",
+    tripId: "trip-2026-autumn",
+    creatorUid: "fs_admin",
+    publicKeyJwk: publicKey.export({ format: "jwk" }),
+    scope: ["submitProposalBatch"],
+    status: "claimed",
+    lastSequence: 0,
+    revision: 2,
+    expiresAt: "2026-08-28T08:00:00.000Z",
+  });
+  const commands = createTripCommands({ db, now: () => new Date("2026-08-28T07:05:00.000Z") });
+  const invalidCandidates = [
+    restaurantProposal("餐厅 A", [undefined, "https://guide.example/a"]),
+    restaurantProposal("餐厅 A", ["http://flyai.example/a", "https://guide.example/a"]),
+    restaurantProposal("餐厅 A", ["https://flyai.example/a#", "https://guide.example/a"]),
+    restaurantProposal("餐厅 A", ["https://./a", "https://guide.example/a"]),
+    {
+      ...restaurantProposal("餐厅 A"),
+      evidence: restaurantProposal("餐厅 A").evidence.map((evidence, index) => (
+        index === 0 ? { ...evidence, queryContext: { ...evidence.queryContext, leaked: "secret" } } : evidence
+      )),
+    },
+    { ...restaurantProposal("餐厅 A"), leaked: "secret" },
+  ];
+  for (const [index, invalidCandidate] of invalidCandidates.entries()) {
+    const signed = {
+      agentRunId: "agent-run-1",
+      sequence: 1,
+      idempotencyKey: `strict-proposal-${index}`,
+      action: "submitProposalBatch",
+      payload: { round: 1, candidates: [invalidCandidate, restaurantProposal("餐厅 B")] },
+    };
+    await assert.rejects(
+      () => commands.executeAgent({ ...signed, signature: agentSignature(privateKey, signed) }),
+      { code: "INVALID_REQUEST" },
+    );
+  }
+  assert.equal(db.data.trip_candidates.size, 0);
+  assert.equal(db.data.trip_evidence_snapshots.size, 0);
+  assert.equal(db.data.trip_decision_events.size, 0);
+  assert.equal(db.data.trip_agent_idempotency.size, 0);
+  assert.equal(db.data.trip_agent_runs.get("agent-run-1").lastSequence, 0);
+});
+
 test("agent web evidence is server-verified, changed evidence becomes stale, and blockage is explicit", async () => {
   const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
   const db = createDb({
-    members: [member("fs_member", "member")],
+    members: [member("fs_member", "admin")],
     trips: [{ ...trip(), memberUids: ["fs_member"] }],
     candidates: [candidate({
       category: "hotel",

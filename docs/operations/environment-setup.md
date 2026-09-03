@@ -109,9 +109,17 @@ Set the following in the appropriate scope:
 
 Browser build variables are limited to `VITE_AMAP_JS_KEY` and `VITE_AMAP_SECURITY_CODE` in addition to the CloudBase public identifiers. Never put Web Service, QWeather, Feishu, CloudBase private, or Codex credentials behind a `VITE_` prefix.
 
-## 本地 Agent Bridge 启动与验证
+## 本机 Codex Bridge 启动与验证
 
-使用 Node 20+，从信任的操作员终端启动。`--app-url` 必须是正式 HTTPS 应用 URL，`--agent-endpoint` 必须是以 `/api/agent` 结尾的 HTTPS 网关 URL，`--port 0` 由操作系统选择随机 loopback 端口：
+### 设备与登录边界
+
+- Bridge 只在设备所有者可控的 macOS 用户会话中运行，并且只使用设备所有者已在本机 ChatGPT/Codex 建立的登录态。项目不提供 Codex 登录、换号或凭据代理。
+- 普通行程成员无需、也不得为此功能登录 Codex 或提交任何账号、令牌、Cookie 或验证码。他们只能看到权限说明和原子写入后的候选结果。
+- Codex 登录失效，或外部来源要求登录、验证码或风控处理时，任务进入“等待设备管理员处理”。页面持续显示状态，Bridge 会尝试向设备所有者发送不含行程、账号或来源站点内容的本地通知；通知被禁用不会使任务失败。设备所有者处理后，在共同决定页选择“已恢复登录，继续研究”或“跳过该来源并继续”，Bridge 恢复同一个 Codex task/thread，不新建任务。
+
+### 启动、状态与停止
+
+使用 Node 20+，先确认设备所有者的 ChatGPT/Codex 已登录，再从信任的操作员终端启动。`--app-url` 必须是正式 HTTPS 应用 URL，`--agent-endpoint` 必须是以 `/api/agent` 结尾的 HTTPS 网关 URL，`--port 0` 由操作系统选择随机 loopback 端口：
 
 ```bash
 node apps/local-agent-bridge/src/cli.mjs \
@@ -120,13 +128,27 @@ node apps/local-agent-bridge/src/cli.mjs \
   --port 0
 ```
 
-终端会输出待打开的应用 URL，并在 Web 调用 prepare 后输出本机配对指纹，供用户与页面显示值对照。URL fragment 只含非机密的 `http://127.0.0.1:<random-port>`；Web 在启动时立即尽力清除，不写入 DOM、localStorage 或 sessionStorage。P-256 私钥和 32-byte pairing code 只存在 Bridge 进程内存中，不打印、不落盘。停止进程或刷新 Web 页面后应视为已断开，需重新启动/连接。
+终端会输出待打开的应用 URL，并在 Web 调用 prepare 后输出本机配对指纹，供设备所有者与页面显示值对照。URL fragment 只含非机密的 `http://127.0.0.1:<random-port>`；Web 在启动时立即尽力清除，不写入 DOM、localStorage 或 sessionStorage。P-256 私钥和 32-byte pairing code 只存在 Bridge 进程内存中，不打印、不落盘。
+
+- 状态：以共同决定页显示的“准备中 / 研究中 / 继续研究 / 校验中 / 写入中 / 等待设备管理员 / 完成 / 失败”为本机任务状态。页面无法读取时先使用“重新读取本机状态”，不要重复启动新任务。
+- 停止单个研究：使用页面的“停止搜索”，等待状态进入“已取消”或完成安全对账。
+- 停止 Bridge：在启动终端按 `Ctrl-C`，等待进程完成当前任务的取消、云端撤销对账和临时目录清理。不得用强制结束代替正常停止，除非进程已无法响应。
+
+### 故障恢复
+
+1. Bridge 中断后，用原命令重新启动，并打开新输出的应用 URL；刷新或旧 URL 不保留配对材料。Bridge 从本机应用数据中恢复最小任务状态，页面应先“重新读取本机状态”。
+2. 显示 `CODEX_NOT_AUTHENTICATED` 时，只由设备所有者在 ChatGPT/Codex 内恢复登录，然后回到原页点击“已恢复登录，继续研究”。
+3. 来源登录、验证码或风控无法在隔离环境中安全解决时，不要在项目页面输入账号、Cookie 或验证码；点击“跳过该来源并继续”，仍恢复原 Codex task/thread。
+4. 显示 `CODEX_NOT_AVAILABLE` 时，确认本机 Codex CLI 来自受信任的 ChatGPT/Codex 安装并可执行；显示 `CODEX_ISOLATION_UNAVAILABLE` 时，不得绕过隔离探针或改成宽松权限，应先修复/更新本机 Codex 后重试准备。
+5. 显示 Bridge 或 Agent transport 不可用时，检查本机进程、两个 HTTPS URL 和网关连通性，然后优先“重新读取本机状态”或继续已有对账，不要盲目创建新任务。
 
 验证分层：
 
 - 本地：运行 `node --test apps/local-agent-bridge/src/*.test.mjs` 与 `pnpm exec playwright test e2e/decision-agent-bridge.spec.ts --project=chromium`；这些使用真实 loopback HTTP/P-256 和测试 transport，不是生产 E2E。
 - Staging：将两个 URL 替换为 staging HTTPS 值，确认 prepare → create → claim → getDecisionContext，同时检查无效签名、匿名成员命令和限流均被拒绝。
 - 生产：只在发布审批后执行相同验收；仓库中的 mock/本地结果不得记录为生产 E2E 成功。本指南不表示已执行真实部署或写入真实旅行数据。
+
+上述自动测试使用假 Codex 可执行文件和测试 transport，不启动真实 Codex、不消耗 Codex 额度。真实 Codex 冒烟会创建可见的持久任务、消耗设备所有者额度并执行真实联网搜索，必须在当次操作前获得单独明确批准；本指南不表示已执行该冒烟。
 
 ## Feishu and AMap console setup
 

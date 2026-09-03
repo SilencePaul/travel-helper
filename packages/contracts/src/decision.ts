@@ -1,6 +1,12 @@
 import { z } from "zod";
 import type { Trip } from "./trip";
 
+export const OPAQUE_IDENTIFIER_MAX_LENGTH = 256;
+export const OpaqueIdentifierSchema = z.string()
+  .min(1)
+  .max(OPAQUE_IDENTIFIER_MAX_LENGTH)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
+
 export const CandidateCategorySchema = z.enum(["hotel", "restaurant", "attraction"]);
 export const SummaryStatusSchema = z.enum(["ready", "outdated"]);
 export const VerificationStateSchema = z.enum(["candidate", "web_verified", "needs_takeover", "stale"]);
@@ -9,6 +15,46 @@ export const FeedbackKindSchema = z.enum(["like", "dislike", "comment"]);
 export const EvidenceSourceKindSchema = z.enum(["flyai", "amap", "web", "official", "manual"]);
 export const VerificationBlockReasonSchema = z.enum(["login", "captcha", "risk_control", "load_failed", "field_missing"]);
 export const AgentScopeSchema = z.enum(["submitProposalBatch", "appendEvidenceSnapshot", "reportVerificationBlocked", "generatePreferenceSummary"]);
+export const ResearchPhaseSchema = z.enum([
+  "idle",
+  "researching",
+  "needs_owner_action",
+  "resuming",
+  "superseded",
+  "validating",
+  "writing",
+  "completed",
+  "failed",
+  "cancelling",
+  "cancelled",
+]);
+export const ResearchBlockReasonSchema = z.enum([
+  "codex_auth_required",
+  "source_login_required",
+  "source_captcha",
+  "source_risk_control",
+]);
+export const ResearchResumeActionSchema = z.enum(["retry_codex_auth", "skip_blocked_source"]);
+export const ResearchErrorCodeSchema = z.enum([
+  "CODEX_NOT_AVAILABLE",
+  "CODEX_NOT_AUTHENTICATED",
+  "CODEX_ISOLATION_UNAVAILABLE",
+  "CODEX_USAGE_UNAVAILABLE",
+  "CODEX_RESEARCH_TIMEOUT",
+  "CODEX_OUTPUT_INVALID",
+  "CODEX_INSUFFICIENT_EVIDENCE",
+  "INVALID_RESEARCH_TARGET",
+  "DISCLOSURE_CONTEXT_CHANGED",
+  "CODEX_RESEARCH_CANCELLED",
+  "AGENT_RUN_INACTIVE",
+  "AGENT_TRANSPORT_UNAVAILABLE",
+  "CODEX_RESEARCH_FAILED",
+]);
+export const ResearchFailureErrorCodeSchema = ResearchErrorCodeSchema.exclude([
+  "CODEX_NOT_AUTHENTICATED",
+  "DISCLOSURE_CONTEXT_CHANGED",
+  "CODEX_RESEARCH_CANCELLED",
+]);
 
 export const RevisionSchema = z.object({
   id: z.string().min(1),
@@ -195,6 +241,80 @@ export const DecisionWorkspaceSchema = z.object({
   fetchedAt: z.string().datetime(),
 });
 
+export const AgentTripProjectionSchema = z.object({
+  version: z.number().int().nonnegative(),
+  days: z.array(z.object({
+    id: z.string().min(1),
+    date: z.string().date(),
+    city: z.string(),
+  }).strict()),
+  travelerNames: z.array(z.string()),
+  travelerCount: z.number().int().positive(),
+}).strict();
+
+export const AgentDecisionContextSchema = z.object({
+  workspace: DecisionWorkspaceSchema,
+  trip: AgentTripProjectionSchema,
+}).strict();
+
+const ResearchTaskStatusBase = {
+  tripId: OpaqueIdentifierSchema,
+  researchTaskId: OpaqueIdentifierSchema,
+  agentRunId: OpaqueIdentifierSchema,
+  operationId: OpaqueIdentifierSchema,
+  reconciliationState: z.literal("active"),
+  startedAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+};
+
+const ActiveResearchTaskStatusBase = {
+  ...ResearchTaskStatusBase,
+  reconciliationState: z.enum(["active", "self_revoke_reconciling"]),
+};
+
+const activeResearchStatus = <Phase extends "researching" | "resuming" | "validating" | "writing" | "cancelling">(phase: Phase) => z.object({
+  phase: z.literal(phase),
+  ...ActiveResearchTaskStatusBase,
+}).strict();
+
+export const ResearchStatusSchema = z.discriminatedUnion("phase", [
+  z.object({ phase: z.literal("idle") }).strict(),
+  activeResearchStatus("researching"),
+  z.discriminatedUnion("blockedReason", [
+    z.object({
+      phase: z.literal("needs_owner_action"),
+      ...ResearchTaskStatusBase,
+      blockedReason: z.literal("codex_auth_required"),
+    }).strict(),
+    z.object({
+      phase: z.literal("needs_owner_action"),
+      ...ResearchTaskStatusBase,
+      blockedReason: z.enum(["source_login_required", "source_captcha", "source_risk_control"]),
+      blockedHostname: z.hostname(),
+    }).strict(),
+  ]),
+  activeResearchStatus("resuming"),
+  z.object({
+    phase: z.literal("superseded"),
+    ...ResearchTaskStatusBase,
+    errorCode: z.literal("DISCLOSURE_CONTEXT_CHANGED"),
+  }).strict(),
+  activeResearchStatus("validating"),
+  activeResearchStatus("writing"),
+  z.object({ phase: z.literal("completed"), ...ResearchTaskStatusBase }).strict(),
+  z.object({
+    phase: z.literal("failed"),
+    ...ResearchTaskStatusBase,
+    errorCode: ResearchFailureErrorCodeSchema,
+  }).strict(),
+  activeResearchStatus("cancelling"),
+  z.object({
+    phase: z.literal("cancelled"),
+    ...ResearchTaskStatusBase,
+    errorCode: z.literal("CODEX_RESEARCH_CANCELLED"),
+  }).strict(),
+]);
+
 export const AgentRunSchema = z.object({
   agentRunId: z.string().min(1),
   tripId: z.string().min(1),
@@ -223,7 +343,7 @@ export const DecisionCommandSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("detachTentativeFromLegacyTrip"), ...CommandBase, placementId: z.string().min(1), expectedPlacementRevision: z.number().int().nonnegative(), expectedTripVersion: z.number().int().nonnegative() }),
   z.object({ action: z.literal("recordFeedback"), ...CommandBase, candidateId: z.string().min(1), kind: FeedbackKindSchema, reason: z.string().max(2000).optional() }),
   z.object({ action: z.literal("setConfirmationReceipt"), ...CommandBase, candidateId: z.string().min(1), expectedCandidateRevision: z.number().int().nonnegative(), active: z.boolean(), reason: z.string().max(2000).optional() }),
-  z.object({ action: z.literal("createAgentRun"), ...CommandBase, publicKeyJwk: z.object({ kty: z.literal("EC"), crv: z.literal("P-256"), x: z.string().min(1), y: z.string().min(1) }), pairingCodeHash: z.string().length(43), scope: z.array(AgentScopeSchema).min(1).max(4) }),
+  z.object({ action: z.literal("createAgentRun"), ...CommandBase, publicKeyJwk: z.object({ kty: z.literal("EC"), crv: z.literal("P-256"), x: z.string().min(1), y: z.string().min(1) }), pairingCodeHash: z.string().length(43), scope: z.tuple([z.literal("submitProposalBatch")]) }),
   z.object({ action: z.literal("revokeAgentRun"), ...CommandBase, agentRunId: z.string().min(1), expectedRevision: z.number().int().nonnegative() }),
 ]);
 
@@ -237,16 +357,58 @@ export const AgentEvidenceInputSchema = EvidenceSnapshotSchema.omit({
   fieldCompleteness: true,
 });
 
-export const AgentProposalCandidateInputSchema = CandidateObjectSchema.omit({
-  id: true,
-  tripId: true,
-  revision: true,
-  updatedAt: true,
-  verificationState: true,
-  decisionState: true,
-  currentEvidenceId: true,
-  verificationBlockReason: true,
-}).extend({ evidence: z.array(AgentEvidenceInputSchema).min(1) });
+const HttpsUrlSchema = z.url().refine((value) => new URL(value).protocol === "https:", {
+  message: "sourceUrl must use HTTPS",
+});
+
+export const AgentProposalDateRangeSchema = DateRangeSchema.strict();
+export const AgentProposalQueryContextSchema = z.object({
+  dates: AgentProposalDateRangeSchema.optional(),
+  travelers: z.number().int().positive().optional(),
+  roomOrTicket: z.string().optional(),
+}).strict();
+export const AgentProposalHotelEvidenceFactsSchema = HotelEvidenceFactsSchema.strict();
+export const AgentProposalRestaurantEvidenceFactsSchema = RestaurantEvidenceFactsSchema.strict();
+export const AgentProposalAttractionEvidenceFactsSchema = AttractionEvidenceFactsSchema.strict();
+export const AgentProposalEntitySchema = z.object({
+  name: z.string().min(1),
+  address: z.string().optional(),
+  latitude: z.number().optional(),
+  longitude: z.number().optional(),
+}).strict();
+export const AgentProposalApplicabilitySchema = z.object({
+  dates: AgentProposalDateRangeSchema.optional(),
+  travelers: z.number().int().positive().optional(),
+}).strict();
+export const AgentProposalRecommendationSchema = z.object({
+  round: z.number().int().positive(),
+  reason: z.string().min(1),
+  preferenceRevisionIds: z.array(z.string()),
+  feedbackIds: z.array(z.string()),
+}).strict();
+export const AgentProposalEvidenceInputSchema = z.object({
+  sourceKind: EvidenceSourceKindSchema,
+  sourceName: z.string().min(1),
+  sourceUrl: HttpsUrlSchema,
+  capturedAt: z.string().datetime(),
+  queryContext: AgentProposalQueryContextSchema,
+  captureMethod: z.enum(["detail_page", "search_result", "api_result", "manual"]),
+  facts: z.union([
+    AgentProposalHotelEvidenceFactsSchema,
+    AgentProposalAttractionEvidenceFactsSchema,
+    AgentProposalRestaurantEvidenceFactsSchema,
+  ]),
+  supersedesEvidenceId: z.string().min(1).optional(),
+  changeReason: z.string().optional(),
+}).strict();
+
+export const AgentProposalCandidateInputSchema = z.object({
+  category: CandidateCategorySchema,
+  entity: AgentProposalEntitySchema,
+  applicability: AgentProposalApplicabilitySchema,
+  recommendation: AgentProposalRecommendationSchema,
+  evidence: z.array(AgentProposalEvidenceInputSchema).min(2),
+}).strict();
 
 const AgentEnvelope = {
   agentRunId: z.string().min(1),
@@ -255,12 +417,18 @@ const AgentEnvelope = {
   signature: z.string().min(1),
 };
 
+export const AgentProposalBatchPayloadSchema = z.object({
+  round: z.number().int().positive(),
+  candidates: z.array(AgentProposalCandidateInputSchema).min(2).max(4),
+}).strict();
+
 export const AgentCommandSchema = z.discriminatedUnion("action", [
-  z.object({ action: z.literal("submitProposalBatch"), ...AgentEnvelope, payload: z.object({ round: z.number().int().positive(), candidates: z.array(AgentProposalCandidateInputSchema).min(2).max(4) }) }),
+  z.object({ action: z.literal("submitProposalBatch"), ...AgentEnvelope, payload: AgentProposalBatchPayloadSchema }).strict(),
   z.object({ action: z.literal("appendEvidenceSnapshot"), ...AgentEnvelope, payload: z.object({ candidateId: z.string().min(1), expectedCandidateRevision: z.number().int().nonnegative(), evidence: AgentEvidenceInputSchema }) }),
   z.object({ action: z.literal("reportVerificationBlocked"), ...AgentEnvelope, payload: z.object({ candidateId: z.string().min(1), expectedCandidateRevision: z.number().int().nonnegative(), reason: VerificationBlockReasonSchema }) }),
   z.object({ action: z.literal("generatePreferenceSummary"), ...AgentEnvelope, payload: z.object({ sourcePreferenceRevisions: z.record(z.string(), z.number().int().nonnegative()) }) }),
   z.object({ action: z.literal("getDecisionContext"), ...AgentEnvelope, payload: z.object({}) }),
+  z.object({ action: z.literal("revokeAgentRunSelf"), ...AgentEnvelope, payload: z.object({}).strict() }).strict(),
 ]);
 
 export const AgentClaimSchema = z.object({
@@ -279,6 +447,12 @@ export type FeedbackKind = z.infer<typeof FeedbackKindSchema>;
 export type EvidenceSourceKind = z.infer<typeof EvidenceSourceKindSchema>;
 export type VerificationBlockReason = z.infer<typeof VerificationBlockReasonSchema>;
 export type AgentScope = z.infer<typeof AgentScopeSchema>;
+export type ResearchPhase = z.infer<typeof ResearchPhaseSchema>;
+export type ResearchBlockReason = z.infer<typeof ResearchBlockReasonSchema>;
+export type ResearchResumeAction = z.infer<typeof ResearchResumeActionSchema>;
+export type ResearchErrorCode = z.infer<typeof ResearchErrorCodeSchema>;
+export type ResearchFailureErrorCode = z.infer<typeof ResearchFailureErrorCodeSchema>;
+export type ResearchStatus = z.infer<typeof ResearchStatusSchema>;
 export type PreferenceProfile = z.infer<typeof PreferenceProfileSchema>;
 export type SharedPreferenceSummary = z.infer<typeof SharedPreferenceSummarySchema>;
 export type Candidate = z.infer<typeof CandidateSchema>;
@@ -291,9 +465,12 @@ export type DecisionResource = z.infer<typeof DecisionResourceSchema>;
 export type DecisionResourceType = z.infer<typeof DecisionResourceTypeSchema>;
 export type DecisionEvent = z.infer<typeof DecisionEventSchema>;
 export type DecisionWorkspace = z.infer<typeof DecisionWorkspaceSchema>;
+export type AgentTripProjection = z.infer<typeof AgentTripProjectionSchema>;
+export type AgentDecisionContext = z.infer<typeof AgentDecisionContextSchema>;
 export type AgentRun = z.infer<typeof AgentRunSchema>;
 export type DecisionCommand = z.infer<typeof DecisionCommandSchema>;
 export type AgentEvidenceInput = z.infer<typeof AgentEvidenceInputSchema>;
+export type AgentProposalEvidenceInput = z.infer<typeof AgentProposalEvidenceInputSchema>;
 export type AgentProposalCandidateInput = z.infer<typeof AgentProposalCandidateInputSchema>;
 export type AgentCommand = z.infer<typeof AgentCommandSchema>;
 export type AgentClaim = z.infer<typeof AgentClaimSchema>;
@@ -309,7 +486,7 @@ export type DecisionCommandSuccess =
 
 export type DecisionCommandFailure = {
   ok: false;
-  error: "AUTH_REQUIRED" | "MEMBERSHIP_REQUIRED" | "FORBIDDEN" | "INVALID_REQUEST"
+  error: "AUTH_REQUIRED" | "MEMBERSHIP_REQUIRED" | "ADMIN_REQUIRED" | "FORBIDDEN" | "INVALID_REQUEST"
     | "VERSION_CONFLICT" | "IDEMPOTENCY_KEY_REUSED" | "SUMMARY_NOT_READY"
     | "AGENT_RUN_EXPIRED" | "AGENT_SCOPE_FORBIDDEN" | "INVALID_AGENT_CLAIM"
     | "INVALID_CONFIRMATION_STATE" | "INVALID_PLACEMENT" | "INVALID_PLACEMENT_STATE"
@@ -320,7 +497,7 @@ export type DecisionCommandFailure = {
 export type DecisionCommandResult = DecisionCommandSuccess | DecisionCommandFailure;
 
 export type AgentClaimResult =
-  | { ok: true; data: { agentRunId: string; claimedAt: string; nextSequence: number } }
+  | { ok: true; data: { agentRunId: string; claimedAt: string; expiresAt: string; nextSequence: number } }
   | DecisionCommandFailure;
 
 export type AgentCommandResult =
@@ -328,7 +505,8 @@ export type AgentCommandResult =
   | { ok: true; action: "appendEvidenceSnapshot"; data: Candidate; warning?: "VERIFICATION_INCOMPLETE"; replayed?: boolean }
   | { ok: true; action: "reportVerificationBlocked"; data: Candidate; replayed?: boolean }
   | { ok: true; action: "generatePreferenceSummary"; data: SharedPreferenceSummary; replayed?: boolean }
-  | { ok: true; action: "getDecisionContext"; data: DecisionWorkspace; replayed?: boolean }
+  | { ok: true; action: "getDecisionContext"; data: AgentDecisionContext; replayed?: boolean }
+  | { ok: true; action: "revokeAgentRunSelf"; data: { agentRunId: string; revokedAt: string }; replayed?: boolean }
   | DecisionCommandFailure;
 
 export interface DecisionWorkspaceRepository {

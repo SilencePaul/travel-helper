@@ -78,9 +78,77 @@ test("returns stable decision state errors", async () => {
   assert.deepEqual(await handler({ action: "setConfirmationReceipt" }), { ok: false, error: "INVALID_CONFIRMATION_STATE" });
 });
 
+test("Decision mutations wrap only declared domain failures without changing legacy read failures", async () => {
+  const unauthenticated = createTripHandler({ getUserInfo: () => undefined, commands: { execute: async () => ({}) } });
+  const mutation = {
+    action: "upsertPreference",
+    tripId: "trip-1",
+    expectedRevision: 0,
+    idempotencyKey: "request-001",
+    answers: {},
+  };
+
+  assert.deepEqual(await unauthenticated(mutation), { ok: false, error: "AUTH_REQUIRED" });
+  assert.deepEqual(await unauthenticated({ action: "getTrip", tripId: "trip-1" }), { error: "AUTH_REQUIRED" });
+  const unavailable = createTripHandler({ getUserInfo: () => ({ customUserId: "fs_admin" }), env: {} });
+  await assert.rejects(() => unavailable(mutation), { code: "TRIP_API_UNAVAILABLE" });
+
+  for (const [internalCode, publicCode] of [
+    ["TRIP_NOT_FOUND", "FORBIDDEN"],
+    ["MEMBER_NOT_FOUND", "INVALID_REQUEST"],
+  ]) {
+    const handler = createTripHandler({
+      getUserInfo: () => ({ customUserId: "fs_admin" }),
+      commands: { execute: async () => { const error = new Error(internalCode); error.code = internalCode; throw error; } },
+    });
+    assert.deepEqual(await handler(mutation), { ok: false, error: publicCode });
+  }
+
+  for (const internalCode of ["TRIP_API_UNAVAILABLE", "UNEXPECTED_PROVIDER_ERROR"]) {
+    const failure = Object.assign(new Error(internalCode), { code: internalCode });
+    const handler = createTripHandler({
+      getUserInfo: () => ({ customUserId: "fs_admin" }),
+      commands: { execute: async () => { throw failure; } },
+    });
+    await assert.rejects(() => handler(mutation), (error) => error === failure);
+  }
+});
+
+test("Agent domain failures use a declared ok-false envelope while transport failures reject", async () => {
+  const input = {
+    action: "getDecisionContext",
+    agentRunId: "agent-run-1",
+    sequence: 1,
+    idempotencyKey: "context-001",
+    payload: {},
+    signature: "signature",
+  };
+  for (const [internalCode, publicCode] of [
+    ["TRIP_NOT_FOUND", "FORBIDDEN"],
+    ["MEMBER_NOT_FOUND", "INVALID_REQUEST"],
+  ]) {
+    const handler = createTripHandler({
+      commands: { executeAgent: async () => { const error = new Error(internalCode); error.code = internalCode; throw error; } },
+    });
+    const result = await handler(input);
+    assert.deepEqual(result, { ok: false, error: publicCode });
+    assert.deepEqual(Object.keys(result).sort(), ["error", "ok"]);
+  }
+
+  for (const internalCode of ["TRIP_API_UNAVAILABLE", "UNEXPECTED_PROVIDER_ERROR"]) {
+    const failure = Object.assign(new Error(internalCode), { code: internalCode });
+    const handler = createTripHandler({ commands: { executeAgent: async () => { throw failure; } } });
+    await assert.rejects(() => handler(input), (error) => error === failure);
+  }
+  await assert.rejects(
+    () => createTripHandler({ env: {} })(input),
+    { code: "TRIP_API_UNAVAILABLE" },
+  );
+});
+
 test("the local bridge can claim an agent run without a browser identity", async () => {
   const calls = [];
-  const claimed = { agentRunId: "agent-run-1", claimedAt: "2026-08-28T00:00:00.000Z", nextSequence: 1 };
+  const claimed = { agentRunId: "agent-run-1", claimedAt: "2026-08-28T00:00:00.000Z", expiresAt: "2026-08-28T00:15:00.000Z", nextSequence: 1 };
   const handler = createTripHandler({
     getUserInfo: () => undefined,
     commands: { executeAgent: async (payload) => { calls.push(payload); return claimed; } },
@@ -102,6 +170,26 @@ test("agent command results use their dedicated success envelope", async () => {
     ok: true,
     action: "submitProposalBatch",
     data: candidates,
+    replayed: false,
+  });
+});
+
+test("self-revoke returns only its fixed control result in the Agent success envelope", async () => {
+  const handler = createTripHandler({
+    getUserInfo: () => undefined,
+    commands: {
+      executeAgent: async () => ({
+        agentRunId: "agent-run-1",
+        revokedAt: "2026-08-28T00:05:00.000Z",
+        replayed: false,
+      }),
+    },
+  });
+
+  assert.deepEqual(await handler({ action: "revokeAgentRunSelf", agentRunId: "agent-run-1", sequence: 1 }), {
+    ok: true,
+    action: "revokeAgentRunSelf",
+    data: { agentRunId: "agent-run-1", revokedAt: "2026-08-28T00:05:00.000Z" },
     replayed: false,
   });
 });
@@ -129,16 +217,16 @@ test("agent decision context and incomplete verification warning use stable enve
   });
 });
 
-test("an authenticated member can read an agent run safe status", async () => {
+test("an authenticated administrator can read an agent run safe status", async () => {
   const status = { agentRunId: "agent-run-1", tripId: "trip-1", status: "claimed", revision: 2 };
   const calls = [];
   const handler = createTripHandler({
-    getUserInfo: () => ({ customUserId: "fs_member" }),
+    getUserInfo: () => ({ customUserId: "fs_admin" }),
     commands: { execute: async (payload, actorUid) => { calls.push({ payload, actorUid }); return status; } },
   });
 
   assert.deepEqual(await handler({ action: "getAgentRunStatus", tripId: "trip-1", agentRunId: "agent-run-1" }), status);
-  assert.deepEqual(calls, [{ payload: { action: "getAgentRunStatus", tripId: "trip-1", agentRunId: "agent-run-1" }, actorUid: "fs_member" }]);
+  assert.deepEqual(calls, [{ payload: { action: "getAgentRunStatus", tripId: "trip-1", agentRunId: "agent-run-1" }, actorUid: "fs_admin" }]);
 });
 
 test("an authenticated member summary request is not mistaken for an agent command", async () => {
@@ -162,7 +250,7 @@ test("the public Agent HTTP transport accepts only signed Agent actions", async 
   const transport = createAgentHttpHandler({
     handler: createTripHandler({
       getUserInfo: () => undefined,
-      commands: { executeAgent: async (payload) => { calls.push(payload); return { agentRunId: payload.agentRunId, claimedAt: "2026-08-31T00:00:00.000Z", nextSequence: 1 }; } },
+      commands: { executeAgent: async (payload) => { calls.push(payload); return { agentRunId: payload.agentRunId, claimedAt: "2026-08-31T00:00:00.000Z", expiresAt: "2026-08-31T00:15:00.000Z", nextSequence: 1 }; } },
     }),
   });
   const claim = { action: "claimAgentRun", agentRunId: "agent-run-1", pairingCode: "secret", clientNonce: "nonce-001", signature: "signature" };
@@ -170,8 +258,62 @@ test("the public Agent HTTP transport accepts only signed Agent actions", async 
   const response = await transport({ httpMethod: "POST", path: "/api/agent", headers: { "content-type": "application/json" }, body: JSON.stringify(claim) });
 
   assert.equal(response.statusCode, 200);
-  assert.deepEqual(JSON.parse(response.body), { ok: true, data: { agentRunId: "agent-run-1", claimedAt: "2026-08-31T00:00:00.000Z", nextSequence: 1 } });
+  assert.deepEqual(JSON.parse(response.body), { ok: true, data: { agentRunId: "agent-run-1", claimedAt: "2026-08-31T00:00:00.000Z", expiresAt: "2026-08-31T00:15:00.000Z", nextSequence: 1 } });
   assert.deepEqual(calls, [claim]);
+});
+
+test("the public Agent transport accepts the signed self-revoke control action", async () => {
+  const transport = createAgentHttpHandler({ handler: async () => ({
+    ok: true,
+    action: "revokeAgentRunSelf",
+    data: { agentRunId: "agent-run-1", revokedAt: "2026-08-31T00:05:00.000Z" },
+    replayed: false,
+  }) });
+  const command = {
+    action: "revokeAgentRunSelf",
+    agentRunId: "agent-run-1",
+    sequence: 1,
+    idempotencyKey: "self-revoke-001",
+    payload: {},
+    signature: "signature",
+  };
+
+  const response = await transport({
+    httpMethod: "POST",
+    path: "/api/agent",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(command),
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(JSON.parse(response.body), {
+    ok: true,
+    action: "revokeAgentRunSelf",
+    data: { agentRunId: "agent-run-1", revokedAt: "2026-08-31T00:05:00.000Z" },
+    replayed: false,
+  });
+});
+
+test("the public Agent transport maps lost administrator authority or membership to forbidden", async () => {
+  for (const error of ["ADMIN_REQUIRED", "MEMBERSHIP_REQUIRED"]) {
+    const transport = createAgentHttpHandler({ handler: async () => ({ ok: false, error }) });
+    const response = await transport({
+      httpMethod: "POST",
+      path: "/api/agent",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "getDecisionContext",
+        agentRunId: "agent-run-1",
+        sequence: 1,
+        idempotencyKey: "context-001",
+        payload: {},
+        signature: "signature",
+      }),
+    });
+
+    assert.equal(response.statusCode, 403);
+    assert.deepEqual(JSON.parse(response.body), { ok: false, error });
+  }
 });
 
 test("the public Agent HTTP transport rejects member commands before data access", async () => {
@@ -227,7 +369,7 @@ test("the public Agent adapter maps unexpected handler failures to 503", async (
     body: JSON.stringify({ action: "claimAgentRun", agentRunId: "run", pairingCode: "code", clientNonce: "nonce-001", signature: "signature" }),
   });
   assert.equal(response.statusCode, 503);
-  assert.deepEqual(JSON.parse(response.body), { ok: false, error: "TRIP_API_UNAVAILABLE" });
+  assert.deepEqual(JSON.parse(response.body), { ok: false, error: "INVALID_REQUEST" });
 });
 
 test("the public Agent adapter maps a returned backend outage to 503", async () => {
@@ -240,9 +382,37 @@ test("the public Agent adapter maps a returned backend outage to 503", async () 
   });
 
   assert.equal(response.statusCode, 503);
-  assert.deepEqual(JSON.parse(response.body), { ok: false, error: "TRIP_API_UNAVAILABLE" });
+  assert.deepEqual(JSON.parse(response.body), { ok: false, error: "INVALID_REQUEST" });
   assert.equal(response.headers["cache-control"], "no-store");
   assert.equal(response.body.includes("database"), false);
+});
+
+test("the real Agent handler preserves transport-unavailable status without exposing it in the contract body", async () => {
+  const failure = Object.assign(new Error("database unavailable"), { code: "TRIP_API_UNAVAILABLE" });
+  const handler = createTripHandler({
+    commands: {
+      executeAgent: async () => { throw failure; },
+    },
+  });
+  const input = {
+    action: "getDecisionContext",
+    agentRunId: "agent-run-1",
+    sequence: 1,
+    idempotencyKey: "context-001",
+    payload: {},
+    signature: "signature",
+  };
+  await assert.rejects(() => handler(input), (error) => error === failure);
+  const transport = createAgentHttpHandler({ handler });
+  const response = await transport({
+    httpMethod: "POST",
+    path: "/api/agent",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+
+  assert.equal(response.statusCode, 503);
+  assert.deepEqual(JSON.parse(response.body), { ok: false, error: "INVALID_REQUEST" });
 });
 
 test("the public Agent entry rejects an invalid signature through the real command verifier", async () => {

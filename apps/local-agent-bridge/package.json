@@ -10,5 +10,8 @@
     "typecheck": "node --check src/*.mjs",
     "build": "node --check src/*.mjs",
     "lint": "node --check src/*.mjs"
+  },
+  "dependencies": {
+    "@travel/contracts": "workspace:*"
   }
 }

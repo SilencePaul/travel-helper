@@ -3,7 +3,11 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./decision-research": {
+      "types": "./src/decision-research.d.mts",
+      "import": "./src/decision-research.mjs"
+    }
   },
   "scripts": {
     "build": "tsc --noEmit",
@@ -16,6 +20,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@types/node": "^24.13.3",
     "@eslint/js": "^10.0.1",
     "eslint": "^10.9.1",
     "typescript": "^6.0.3",
