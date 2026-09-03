@@ -147,6 +147,17 @@ export function createManagedCodexRunnerFactory({
     || pathsOverlap(canonicalTempRoot, canonicalProjectDir)) {
     throw codedError("CODEX_RESEARCH_FAILED");
   }
+  try {
+    for (const path of [canonicalDiscoverySchemaPath, canonicalSchemaPath]) {
+      const info = inspectPath(path);
+      if (!info || typeof info.isFile !== "function" || typeof info.isSymbolicLink !== "function"
+        || !info.isFile() || info.isSymbolicLink()) {
+        throw new Error("schema is not a regular file");
+      }
+    }
+  } catch {
+    throw codedError("CODEX_RESEARCH_FAILED");
+  }
   const managedSessions = new Set();
   const ownedDirectories = new Set();
   const quarantinePaths = new Set();

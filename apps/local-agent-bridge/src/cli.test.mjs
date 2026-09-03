@@ -15,10 +15,11 @@ function trustedTempBoundary(overrides = {}) {
   return {
     trustedTempRoot: "/private/tmp",
     canonicalizePath: (path) => path,
-    inspectPath: () => ({
+    inspectPath: (path) => ({
       dev: 10,
       ino: 20,
-      isDirectory: () => true,
+      isDirectory: () => !path.endsWith(".json"),
+      isFile: () => path.endsWith(".json"),
       isSymbolicLink: () => false,
     }),
     moveDirectory: async () => {},
@@ -49,6 +50,26 @@ test("CLI accepts only app URL, Agent endpoint and port zero", () => {
     ["--app-url", "https://trip.example", "--agent-endpoint", "https://api.example/api/agent", "--sandbox", "danger-full-access"],
     ["--app-url", "https://trip.example", "--agent-endpoint", "https://api.example/api/agent", "--approval-policy", "never"],
   ]) assert.throws(() => parseCliArguments(argv), /INVALID_ARGUMENTS/);
+});
+
+test("managed runner factory rejects non-regular discovery and verified schemas before a session exists", () => {
+  const base = {
+    ...trustedTempBoundary(),
+    projectDir: "/safe/project",
+    schemaPath: "/safe/project/verified.schema.json",
+    discoverySchemaPath: "/safe/project/discovery.schema.json",
+    projectProbePath: "/safe/project/package.json",
+    outsideProbePath: "/etc/hosts",
+  };
+  for (const invalidPath of ["/safe/project/discovery.schema.json", "/safe/project/verified.schema.json"]) {
+    assert.throws(() => createManagedCodexRunnerFactory({
+      ...base,
+      inspectPath: (path) => ({
+        isFile: () => path !== invalidPath,
+        isSymbolicLink: () => path === invalidPath,
+      }),
+    }), { code: "CODEX_RESEARCH_FAILED" });
+  }
 });
 
 test("CLI module import is safe when process.argv has no entry script", () => {
@@ -714,6 +735,7 @@ test("managed runner factory refuses unowned, colliding, project-related and sym
         dev: 10,
         ino: 20,
         isDirectory: () => path === symlinkPath,
+        isFile: () => path !== symlinkPath,
         isSymbolicLink: () => path === symlinkPath,
       }),
     }),
@@ -738,12 +760,14 @@ test("managed cleanup refuses a replaced directory identity without moving or de
   let inspection = 0;
   const factory = createManagedCodexRunnerFactory({
     ...trustedTempBoundary({
-      inspectPath: () => ({
-        dev: 10,
-        ino: inspection++ === 0 ? 20 : 21,
-        isDirectory: () => true,
-        isSymbolicLink: () => false,
-      }),
+      inspectPath: (path) => path.endsWith(".json")
+        ? { isFile: () => true, isSymbolicLink: () => false }
+        : {
+          dev: 10,
+          ino: inspection++ === 0 ? 20 : 21,
+          isDirectory: () => true,
+          isSymbolicLink: () => false,
+        },
     }),
     projectDir: "/safe/project",
     schemaPath: "/safe/project/schema.json",
@@ -865,7 +889,8 @@ test("managed cleanup never deletes when the quarantined inode differs after ren
       inspectPath: (path) => ({
         dev: 10,
         ino: path === quarantineDir ? 21 : 20,
-        isDirectory: () => true,
+        isDirectory: () => !path.endsWith(".json"),
+        isFile: () => path.endsWith(".json"),
         isSymbolicLink: () => false,
       }),
     }),
