@@ -84,7 +84,7 @@ Test anonymous reads, a pending/non-member read, and a direct client write; all 
 | `POST /api/auth/logout` | Revoke the server session | Authenticated server session |
 | `POST /api/agent` | Claim AgentRun and submit an existing signed Agent envelope | Public transport; ES256/run scope/sequence/idempotency verified server-side |
 
-`trip-api` 的函数 invoke ACL 保持需要已认证 CloudBase 身份；独立的 `agent-api` 入口复用同一函数目录的 `index.agentMain`，仅让 `/api/agent` 无 bearer 到达验签层。HTTP transport 在调用任何命令前拒绝非 Agent action；成员 action 仍然必须通过 CloudBase SDK 事件调用，并在处理器和命令层重新检查已登录身份及 Trip 成员资格。不得向 Agent Bridge 配置成员 bearer、CloudBase 凭据或浏览器 Cookie。
+CloudBase CLI v2 以网关路由而不是函数级 `aclRule` 配置公网入口：不得新增指向 `trip-api` 的公网路由。独立的 `agent-api` 入口复用同一函数目录的 `index.agentMain`，仅让 `/api/agent` 无 bearer 到达验签层。HTTP transport 在调用任何命令前拒绝非 Agent action；成员 action 仍然必须通过 CloudBase SDK 事件调用，并在处理器和命令层重新检查已登录身份及 Trip 成员资格。不得向 Agent Bridge 配置成员 bearer、CloudBase 凭据或浏览器 Cookie。
 
 Set the following in the appropriate scope:
 
@@ -165,7 +165,7 @@ In AMap security settings:
 
 ## Safe-origin, backup, and rollback preparation
 
-Configure CloudBase safe origins for the production HTTPS origin and the documented local development origin only. Before deployment, export database collections and record the backup location in `release-checklist.md`. Record the hosting version, all function revisions, Agent gateway route/QPS configuration, deployment ID, and rollback tag. A rollback restores the prior hosting version, `auth-service`, authenticated `trip-api`, public `agent-api`, and `/api/agent` gateway/ACL configuration together; do not roll back only the web bundle or only one function.
+Configure CloudBase safe origins for the production HTTPS origin and the documented local development origin only. Before deployment, export database collections and record the backup location in `release-checklist.md`. Record the hosting version, all function revisions, Agent gateway route/QPS configuration, deployment ID, and rollback tag. A rollback restores the prior hosting version, `auth-service`, `trip-api`, public `agent-api`, and `/api/agent` gateway configuration together; do not roll back only the web bundle or only one function.
 
 Run the secret-safe check before deployment:
 

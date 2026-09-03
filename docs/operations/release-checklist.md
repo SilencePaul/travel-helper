@@ -23,7 +23,7 @@ Complete this checklist for each release. Values below are identifiers and opera
 - [ ] CloudBase safe origins contain only the production HTTPS origin and approved local origin.
 - [ ] The public auth gateway route enforces per-client QPS limiting; OAuth/auth records have bounded lifecycle cleanup.
 - [ ] `/api/agent` targets only `agent-api`/`index.agentMain`, retains the reviewed per-client QPS limit, and rejects a malformed action and an invalid signature without reading member/trip data.
-- [ ] `trip-api` invoke ACL still requires authenticated CloudBase identity; only the isolated `agent-api` invoke ACL is public.
+- [ ] No public gateway route targets `trip-api`; member commands continue through authenticated CloudBase event invocation and handler-level membership checks. Only `/api/agent` reaches the isolated `agent-api` handler without a bearer.
 - [ ] Feishu redirect is exactly `<AUTH_SERVICE_URL>/api/auth/callback`; minimum identity permissions are enabled.
 - [ ] Feishu application availability is limited to the intended tenant/users where possible; no identity or secret appears in logs.
 - [ ] Membership approval is the admission boundary: the traveler sends the waiting-page identity code to the admin through a separate trusted Feishu chat or in person, pending accounts cannot read trip data, and approving a third active member is rejected.
@@ -65,4 +65,4 @@ Complete this checklist for each release. Values below are identifiers and opera
 - [ ] QWeather state: `<PENDING/FORECAST/WARNING/DEGRADED>`; incident link if degraded: `<...>`.
 - [ ] Next Codex scheduled run: `<SCHEDULE_OR_NONE>`.
 - [ ] Rollback owner and command/location are documented; rollback has not been executed on a healthy release.
-- [ ] If rollback is needed: freeze writes, announce incident, restore the recorded hosting version and all three function revisions, restore/remove `agent-api` plus the `/api/agent` gateway target/QPS and `trip-api`/`agent-api` ACLs to the recorded state, verify auth/read/write/Agent-signature smoke tests, then reconcile any writes made after the rollback point.
+- [ ] If rollback is needed: freeze writes, announce incident, restore the recorded hosting version and all three function revisions, restore/remove `agent-api` plus the `/api/agent` gateway target/QPS to the recorded state, verify auth/read/write/Agent-signature smoke tests, then reconcile any writes made after the rollback point.

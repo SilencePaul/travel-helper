@@ -10,7 +10,6 @@
       "handler": "index.main",
       "runtime": "Nodejs20.19",
       "timeout": 30,
-      "aclRule": { "invoke": false },
       "installDependency": true,
       "envVariables": {
         "VITE_CLOUDBASE_ENV_ID": "{{env.VITE_CLOUDBASE_ENV_ID}}",
@@ -31,7 +30,6 @@
       "handler": "index.main",
       "runtime": "Nodejs20.19",
       "timeout": 20,
-      "aclRule": { "invoke": "auth.loginType != 'ANONYMOUS' && auth != null" },
       "installDependency": true,
       "envVariables": {
         "VITE_CLOUDBASE_ENV_ID": "{{env.VITE_CLOUDBASE_ENV_ID}}",
@@ -41,12 +39,11 @@
     },
     {
       "name": "agent-api",
-      "dir": "trip-api",
+      "dir": "functions/trip-api",
       "type": "Event",
       "handler": "index.agentMain",
       "runtime": "Nodejs20.19",
       "timeout": 20,
-      "aclRule": { "invoke": false },
       "installDependency": true,
       "envVariables": {
         "VITE_CLOUDBASE_ENV_ID": "{{env.VITE_CLOUDBASE_ENV_ID}}",
@@ -76,7 +73,7 @@
         "enableAuth": false,
         "enablePathTransmission": false,
         "qpsPolicy": {
-          "qpsTotal": 40,
+          "qpsTotal": 100,
           "qpsPerClient": {
             "limitBy": "ClientIP",
             "limitValue": 4
